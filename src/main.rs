@@ -3,7 +3,10 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use clap::{Args, Parser, Subcommand};
 use updraft_bluetooth::{DiscoveredDevice, ProbeMode, ProbeOptions, ProbeResult, ReadReply, probe};
-use updraft_protocol::{ControlCommand, Frame, ReadCommand};
+use updraft_protocol::{
+    AutomaticThresholds, ControlCommand, Frame, HumidityTenthsPercent, Minutes, ReadCommand,
+    TemperatureTenthsF, TimerState,
+};
 
 #[derive(Debug, Parser)]
 #[command(name = "updraft", about = "GAF attic fan protocol probe")]
@@ -71,6 +74,44 @@ struct BleOptions {
     set_timer_minutes: Option<u16>,
 }
 
+impl BleOptions {
+    fn requested_control(&self) -> Option<ControlCommand> {
+        self.set_auto_thresholds_tenths
+            .as_deref()
+            .map(|values| {
+                let &[temperature, humidity]: &[u16; 2] = values
+                    .try_into()
+                    .expect("clap requires exactly two automatic thresholds");
+                ControlCommand::SetAutomaticThresholds(AutomaticThresholds {
+                    temperature: TemperatureTenthsF::new(temperature),
+                    humidity: HumidityTenthsPercent::new(humidity),
+                })
+            })
+            .or_else(|| {
+                self.set_timer_minutes
+                    .map(Minutes::new)
+                    .map(ControlCommand::SetTimer)
+            })
+    }
+
+    fn into_probe_options(self) -> ProbeOptions {
+        let control_command = self.requested_control();
+        let mode = if self.scan_only {
+            ProbeMode::Scan
+        } else {
+            ProbeMode::Query {
+                device_id: self.device_id,
+                control_command,
+            }
+        };
+        ProbeOptions {
+            scan_duration: Duration::from_secs(self.scan_seconds),
+            response_timeout: Duration::from_secs(self.response_timeout_seconds),
+            mode,
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
@@ -83,35 +124,19 @@ async fn main() -> Result<()> {
 
 async fn run_ble_probe(options: BleOptions) -> Result<()> {
     let show_identity = options.show_identity;
-    let control_command = match options.set_auto_thresholds_tenths {
-        Some(values) => {
-            let [temperature_tenths_f, humidity_tenths_percent] = values
-                .try_into()
-                .expect("clap requires exactly two automatic thresholds");
-            Some(ControlCommand::SetAutomaticThresholds {
-                temperature_tenths_f,
-                humidity_tenths_percent,
-            })
-        }
-        None => options
-            .set_timer_minutes
-            .map(|duration_minutes| ControlCommand::SetTimer { duration_minutes }),
-    };
-    let mode = match options.scan_only {
-        true => ProbeMode::Scan,
-        false => ProbeMode::Query {
-            device_id: options.device_id,
-            control_command,
-        },
-    };
-    let result = probe(ProbeOptions {
-        scan_duration: Duration::from_secs(options.scan_seconds),
-        response_timeout: Duration::from_secs(options.response_timeout_seconds),
-        mode,
-    })
-    .await
-    .context("BLE probe failed")?;
+    let requested_control = options.requested_control();
+    let result = probe(options.into_probe_options())
+        .await
+        .context("BLE probe failed")?;
+    print_probe_result(result, requested_control, show_identity);
+    Ok(())
+}
 
+fn print_probe_result(
+    result: ProbeResult,
+    requested_control: Option<ControlCommand>,
+    show_identity: bool,
+) {
     match result {
         ProbeResult::NoDevices => {
             println!("No nearby BLE device advertising GAF service 00FF was found.");
@@ -132,13 +157,15 @@ async fn run_ble_probe(options: BleOptions) -> Result<()> {
             control_reply,
         } => {
             print_devices(&devices);
-            print_control_reply(control_reply.as_ref());
+            if let Some(response) = control_reply {
+                print_control_acknowledgement(&response);
+            }
             print_replies(&replies, show_identity);
-            print_control_readback(control_command, &replies);
+            if let Some(command) = requested_control {
+                println!("{}", format_control_readback(command, &replies));
+            }
         }
     }
-
-    Ok(())
 }
 
 fn print_devices(devices: &[DiscoveredDevice]) {
@@ -155,32 +182,21 @@ fn print_devices(devices: &[DiscoveredDevice]) {
     });
 }
 
-fn print_control_reply(response: Option<&Frame>) {
-    if let Some(response) = response {
-        let acknowledgement = match response.payload() {
-            b"0" => "success",
-            _ => "unrecognized/error",
-        };
-        println!(
-            "control acknowledgement: {acknowledgement} ({} payload={})",
-            String::from_utf8_lossy(&response.command()),
-            String::from_utf8_lossy(response.payload()),
-        );
-    }
+fn print_control_acknowledgement(response: &Frame) {
+    let acknowledgement = match response.payload() {
+        b"0" => "success",
+        _ => "unrecognized/error",
+    };
+    println!(
+        "control acknowledgement: {acknowledgement} ({} payload={})",
+        String::from_utf8_lossy(&response.command()),
+        String::from_utf8_lossy(response.payload()),
+    );
 }
 
 fn print_replies(replies: &[ReadReply], show_identity: bool) {
     replies.iter().for_each(|reply| {
-        let payload = if reply.request == ReadCommand::Identity && !show_identity {
-            format!("<redacted; {} bytes>", reply.response.payload().len())
-        } else {
-            reply
-                .response
-                .payload()
-                .iter()
-                .map(|byte| format!("{byte:02X}"))
-                .collect::<String>()
-        };
+        let payload = format_reply_payload(reply, show_identity);
         println!(
             "{} -> {} payload_hex={payload}",
             String::from_utf8_lossy(reply.request.frame()).trim_end(),
@@ -189,76 +205,119 @@ fn print_replies(replies: &[ReadReply], show_identity: bool) {
     });
 }
 
-fn print_control_readback(control_command: Option<ControlCommand>, replies: &[ReadReply]) {
-    match control_command {
-        Some(ControlCommand::SetAutomaticThresholds {
-            temperature_tenths_f,
-            humidity_tenths_percent,
-        }) => {
-            let expected_payload =
-                format!("{temperature_tenths_f:04X}{humidity_tenths_percent:04X}");
-            let status = replies
-                .iter()
-                .find(|reply| reply.request == ReadCommand::AutoThresholds)
-                .map(|reply| {
-                    if reply
-                        .response
-                        .payload()
-                        .eq_ignore_ascii_case(expected_payload.as_bytes())
-                    {
-                        "matches request"
-                    } else {
-                        "differs from request"
-                    }
-                })
-                .unwrap_or("unavailable");
-            println!("automatic threshold readback: {status}");
+fn format_reply_payload(reply: &ReadReply, show_identity: bool) -> String {
+    match (reply.request, show_identity) {
+        (ReadCommand::Identity, false) => {
+            format!("<redacted; {} bytes>", reply.response.payload().len())
         }
-        Some(ControlCommand::SetTimer { duration_minutes }) => {
-            let timer = replies
-                .iter()
-                .find(|reply| reply.request == ReadCommand::Timer)
-                .and_then(|reply| parse_timer_readback(reply.response.payload()));
-            match timer {
-                Some((remaining_minutes, original_minutes)) => {
-                    let matches = original_minutes == duration_minutes
-                        && remaining_minutes <= duration_minutes;
-                    println!(
-                        "timer readback: remaining={remaining_minutes} minute(s), original={original_minutes} minute(s); {}",
-                        if matches {
-                            "matches request"
-                        } else {
-                            "differs from request"
-                        }
-                    );
-                }
-                None => {
-                    println!("timer readback: unrecognized payload");
-                }
-            }
-        }
-        None => {}
+        _ => reply
+            .response
+            .payload()
+            .iter()
+            .map(|byte| format!("{byte:02X}"))
+            .collect(),
     }
 }
 
-fn parse_timer_readback(payload: &[u8]) -> Option<(u16, u16)> {
-    std::str::from_utf8(payload)
-        .ok()
-        .filter(|payload| {
-            payload.len() == 8 && payload.bytes().all(|byte| byte.is_ascii_hexdigit())
-        })
-        .and_then(|payload| {
-            let (remaining, original) = payload.split_at(4);
-            Some((
-                u16::from_str_radix(remaining, 16).ok()?,
-                u16::from_str_radix(original, 16).ok()?,
-            ))
-        })
+fn format_control_readback(command: ControlCommand, replies: &[ReadReply]) -> String {
+    match command {
+        ControlCommand::SetAutomaticThresholds(requested) => format_threshold_readback(
+            requested,
+            find_readback_payload(replies, ReadCommand::AutoThresholds),
+        ),
+        ControlCommand::SetTimer(requested) => format_timer_readback(
+            requested,
+            find_readback_payload(replies, ReadCommand::Timer),
+        ),
+    }
+}
+
+fn find_readback_payload(replies: &[ReadReply], request: ReadCommand) -> Option<&[u8]> {
+    replies
+        .iter()
+        .find(|reply| reply.request == request)
+        .map(|reply| reply.response.payload())
+}
+
+fn format_threshold_readback(requested: AutomaticThresholds, payload: Option<&[u8]>) -> String {
+    let status = match payload.map(AutomaticThresholds::parse) {
+        Some(Ok(actual)) => describe_readback_match(actual == requested),
+        Some(Err(_)) => "unrecognized payload",
+        None => "unavailable",
+    };
+    format!("automatic threshold readback: {status}")
+}
+
+fn format_timer_readback(requested: Minutes, payload: Option<&[u8]>) -> String {
+    let timer = payload.and_then(|payload| TimerState::parse(payload).ok());
+    match timer {
+        Some(actual) => {
+            format!(
+                "timer readback: remaining={} minute(s), original={} minute(s); {}",
+                actual.remaining.value(),
+                actual.original.value(),
+                describe_readback_match(actual.matches_requested_duration(requested)),
+            )
+        }
+        None => "timer readback: unrecognized payload".to_owned(),
+    }
+}
+
+fn describe_readback_match(matches: bool) -> &'static str {
+    if matches {
+        "matches request"
+    } else {
+        "differs from request"
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{Cli, Parser};
+    use super::*;
+
+    #[test]
+    fn threshold_report_distinguishes_values_from_missing_or_invalid_data() {
+        let requested = AutomaticThresholds {
+            temperature: TemperatureTenthsF::new(1050),
+            humidity: HumidityTenthsPercent::new(300),
+        };
+        [
+            (Some(b"041a012c".as_slice()), "matches request"),
+            (Some(b"041b012c".as_slice()), "differs from request"),
+            (Some(b"invalid!".as_slice()), "unrecognized payload"),
+            (None, "unavailable"),
+        ]
+        .into_iter()
+        .for_each(|(payload, status)| {
+            assert_eq!(
+                format_threshold_readback(requested, payload),
+                format!("automatic threshold readback: {status}"),
+            );
+        });
+    }
+
+    #[test]
+    fn timer_report_accepts_elapsed_time_but_detects_inconsistent_duration() {
+        let requested = Minutes::new(5);
+        [
+            (b"00030005", 3, 5, "matches request"),
+            (b"00060005", 6, 5, "differs from request"),
+            (b"00030004", 3, 4, "differs from request"),
+        ]
+        .into_iter()
+        .for_each(|(payload, remaining, original, status)| {
+            assert_eq!(
+                format_timer_readback(requested, Some(payload)),
+                format!(
+                    "timer readback: remaining={remaining} minute(s), original={original} minute(s); {status}",
+                ),
+            );
+        });
+        assert_eq!(
+            format_timer_readback(requested, Some(b"bad data")),
+            "timer readback: unrecognized payload",
+        );
+    }
 
     #[test]
     fn scan_only_rejects_control_settings() {

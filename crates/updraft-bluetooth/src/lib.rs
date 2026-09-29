@@ -1,13 +1,16 @@
 //! Bluetooth discovery, state queries, and ordinary controls for GAF attic fans.
 
-use std::{collections::HashSet, time::Duration};
+use std::{collections::HashSet, pin::Pin, time::Duration};
 
 use anyhow::{Context, Result, bail};
 use btleplug::{
-    api::{Central, CharPropFlags, Manager as _, Peripheral as _, ScanFilter, WriteType},
-    platform::{Manager, Peripheral},
+    api::{
+        Central, CharPropFlags, Characteristic, Manager as _, Peripheral as _, ScanFilter,
+        ValueNotification, WriteType,
+    },
+    platform::{Adapter, Manager, Peripheral},
 };
-use futures_util::{StreamExt, TryStreamExt, future, stream};
+use futures_util::{Stream, StreamExt, TryStreamExt, future, stream};
 use tokio::time::{sleep, timeout};
 use updraft_protocol::{ControlCommand, Frame, FrameDecoder, ReadCommand};
 use uuid::Uuid;
@@ -100,9 +103,60 @@ struct Candidate {
     device: DiscoveredDevice,
 }
 
+enum CandidateSelection<'a> {
+    NoDevices,
+    Ambiguous,
+    Chosen(&'a Candidate),
+}
+
+struct ConnectedPeripheral<'a> {
+    peripheral: &'a Peripheral,
+}
+
+struct ReadySession<'connected, 'device> {
+    connected: &'connected ConnectedPeripheral<'device>,
+    characteristic: Characteristic,
+    write_type: WriteType,
+    notifications: Pin<Box<dyn Stream<Item = ValueNotification> + Send>>,
+    decoder: FrameDecoder,
+    response_timeout: Duration,
+}
+
 /// Discover GAF BLE peripherals and, when selected unambiguously, issue the
 /// read-only queries plus an optional ordinary control-setting write.
 pub async fn probe(options: ProbeOptions) -> Result<ProbeResult> {
+    let candidates = discover_candidates(options.scan_duration).await?;
+    let devices = candidates
+        .iter()
+        .map(|candidate| candidate.device.clone())
+        .collect();
+
+    match options.mode {
+        ProbeMode::Scan => Ok(summarize_scan(devices)),
+        ProbeMode::Query {
+            device_id,
+            control_command,
+        } => {
+            query_selected_device(
+                &candidates,
+                devices,
+                device_id.as_deref(),
+                control_command,
+                options.response_timeout,
+            )
+            .await
+        }
+    }
+}
+
+fn summarize_scan(devices: Vec<DiscoveredDevice>) -> ProbeResult {
+    match devices.as_slice() {
+        [] => ProbeResult::NoDevices,
+        _ => ProbeResult::Discovered { devices },
+    }
+}
+
+async fn discover_candidates(scan_duration: Duration) -> Result<Vec<Candidate>> {
     let manager = Manager::new().await.context("create Bluetooth manager")?;
     let adapter = manager
         .adapters()
@@ -118,85 +172,83 @@ pub async fn probe(options: ProbeOptions) -> Result<ProbeResult> {
         })
         .await
         .context("start BLE scan for GAF service 00FF")?;
-    sleep(options.scan_duration).await;
+    sleep(scan_duration).await;
     adapter.stop_scan().await.context("stop BLE scan")?;
 
+    collect_advertised_candidates(&adapter).await
+}
+
+async fn collect_advertised_candidates(adapter: &Adapter) -> Result<Vec<Candidate>> {
     let candidates = stream::iter(
         adapter
             .peripherals()
             .await
             .context("list BLE peripherals")?,
     )
-    .then(|peripheral| async move {
-        let properties = peripheral
-            .properties()
-            .await
-            .context("read BLE advertisement properties")?;
-        Ok::<_, anyhow::Error>((peripheral, properties))
-    })
-    .try_filter_map(|(peripheral, properties)| async move {
-        Ok(properties
-            .filter(|properties| properties.services.contains(&GAF_SERVICE_UUID))
-            .map(|properties| Candidate {
-                device: DiscoveredDevice {
-                    id: peripheral.id().to_string(),
-                    name: properties.local_name,
-                    rssi: properties.rssi,
-                },
-                peripheral,
-            }))
-    })
+    .then(read_gaf_advertisement)
+    .try_filter_map(|candidate| future::ready(Ok(candidate)))
     .try_collect::<Vec<_>>()
     .await?;
     let mut seen = HashSet::new();
-    let candidates: Vec<_> = candidates
+    Ok(candidates
         .into_iter()
         .filter(|candidate| seen.insert(candidate.device.id.clone()))
-        .collect();
-    let devices = candidates
-        .iter()
-        .map(|candidate| candidate.device.clone())
-        .collect();
+        .collect())
+}
 
-    let result = match options.mode {
-        ProbeMode::Scan => match candidates.as_slice() {
-            [] => ProbeResult::NoDevices,
-            _ => ProbeResult::Discovered { devices },
-        },
-        ProbeMode::Query {
-            device_id,
-            control_command,
-        } => {
-            let selected = match (device_id.as_deref(), candidates.as_slice()) {
-                (Some(id), _) => Some(
-                    candidates
-                        .iter()
-                        .find(|candidate| candidate.device.id == id)
-                        .with_context(|| format!("no scanned GAF peripheral has ID {id}"))?,
-                ),
-                (None, [candidate]) => Some(candidate),
-                (None, _) => None,
-            };
-            match (selected, candidates.as_slice()) {
-                (Some(candidate), _) => {
-                    let (replies, control_reply) = query_peripheral(
-                        &candidate.peripheral,
-                        options.response_timeout,
-                        control_command,
-                    )
-                    .await?;
-                    ProbeResult::Queried {
-                        devices,
-                        replies,
-                        control_reply,
-                    }
-                }
-                (None, []) => ProbeResult::NoDevices,
-                (None, _) => ProbeResult::Ambiguous { devices },
-            }
+async fn read_gaf_advertisement(peripheral: Peripheral) -> Result<Option<Candidate>> {
+    let properties = peripheral
+        .properties()
+        .await
+        .context("read BLE advertisement properties")?;
+    Ok(properties
+        .filter(|properties| properties.services.contains(&GAF_SERVICE_UUID))
+        .map(|properties| Candidate {
+            device: DiscoveredDevice {
+                id: peripheral.id().to_string(),
+                name: properties.local_name,
+                rssi: properties.rssi,
+            },
+            peripheral,
+        }))
+}
+
+fn select_candidate<'a>(
+    candidates: &'a [Candidate],
+    device_id: Option<&str>,
+) -> Result<CandidateSelection<'a>> {
+    match (device_id, candidates) {
+        (Some(id), _) => candidates
+            .iter()
+            .find(|candidate| candidate.device.id == id)
+            .map(CandidateSelection::Chosen)
+            .with_context(|| format!("no scanned GAF peripheral has ID {id}")),
+        (None, []) => Ok(CandidateSelection::NoDevices),
+        (None, [candidate]) => Ok(CandidateSelection::Chosen(candidate)),
+        (None, _) => Ok(CandidateSelection::Ambiguous),
+    }
+}
+
+async fn query_selected_device(
+    candidates: &[Candidate],
+    devices: Vec<DiscoveredDevice>,
+    device_id: Option<&str>,
+    control_command: Option<ControlCommand>,
+    response_timeout: Duration,
+) -> Result<ProbeResult> {
+    match select_candidate(candidates, device_id)? {
+        CandidateSelection::NoDevices => Ok(ProbeResult::NoDevices),
+        CandidateSelection::Ambiguous => Ok(ProbeResult::Ambiguous { devices }),
+        CandidateSelection::Chosen(candidate) => {
+            let (replies, control_reply) =
+                query_peripheral(&candidate.peripheral, response_timeout, control_command).await?;
+            Ok(ProbeResult::Queried {
+                devices,
+                replies,
+                control_reply,
+            })
         }
-    };
-    Ok(result)
+    }
 }
 
 async fn query_peripheral(
@@ -204,35 +256,45 @@ async fn query_peripheral(
     response_timeout: Duration,
     control_command: Option<ControlCommand>,
 ) -> Result<(Vec<ReadReply>, Option<Frame>)> {
-    peripheral
-        .connect()
-        .await
-        .context("connect to GAF BLE peripheral")?;
-    let result = query_connected(peripheral, response_timeout, control_command).await;
-    let disconnect = peripheral.disconnect().await;
+    let connected = ConnectedPeripheral::connect(peripheral).await?;
+    let query_result = async {
+        ReadySession::subscribe(&connected, response_timeout)
+            .await?
+            .query(control_command)
+            .await
+    }
+    .await;
+    let disconnect_result = connected.disconnect().await;
+    query_result.and_then(|replies| disconnect_result.map(|()| replies))
+}
 
-    match result {
-        Ok(replies) => {
-            disconnect.context("disconnect from GAF BLE peripheral")?;
-            Ok(replies)
-        }
-        Err(error) => {
-            let _ = disconnect;
-            Err(error)
-        }
+impl<'a> ConnectedPeripheral<'a> {
+    async fn connect(peripheral: &'a Peripheral) -> Result<Self> {
+        peripheral
+            .connect()
+            .await
+            .context("connect to GAF BLE peripheral")?;
+        Ok(Self { peripheral })
+    }
+
+    async fn disconnect(self) -> Result<()> {
+        self.peripheral
+            .disconnect()
+            .await
+            .context("disconnect from GAF BLE peripheral")
     }
 }
 
-async fn query_connected(
-    peripheral: &Peripheral,
-    response_timeout: Duration,
-    control_command: Option<ControlCommand>,
-) -> Result<(Vec<ReadReply>, Option<Frame>)> {
-    peripheral
+async fn writable_characteristic(
+    connected: &ConnectedPeripheral<'_>,
+) -> Result<(Characteristic, WriteType)> {
+    connected
+        .peripheral
         .discover_services()
         .await
         .context("discover GAF BLE services")?;
-    let characteristic = peripheral
+    let characteristic = connected
+        .peripheral
         .characteristics()
         .into_iter()
         .find(|characteristic| {
@@ -241,80 +303,112 @@ async fn query_connected(
         })
         .context("GAF service 00FF has no characteristic FF01")?;
 
-    let write_type = if characteristic.properties.contains(CharPropFlags::WRITE) {
-        WriteType::WithResponse
-    } else if characteristic
-        .properties
-        .contains(CharPropFlags::WRITE_WITHOUT_RESPONSE)
-    {
-        WriteType::WithoutResponse
-    } else {
-        bail!("GAF characteristic FF01 does not permit writes");
+    let write_type = match (
+        characteristic.properties.contains(CharPropFlags::WRITE),
+        characteristic
+            .properties
+            .contains(CharPropFlags::WRITE_WITHOUT_RESPONSE),
+    ) {
+        (true, _) => WriteType::WithResponse,
+        (false, true) => WriteType::WithoutResponse,
+        (false, false) => bail!("GAF characteristic FF01 does not permit writes"),
     };
+    Ok((characteristic, write_type))
+}
 
-    let mut notifications = peripheral
-        .notifications()
-        .await
-        .context("subscribe to BLE notifications")?;
-    peripheral
-        .subscribe(&characteristic)
-        .await
-        .context("enable responses on GAF characteristic FF01")?;
+impl<'connected, 'device> ReadySession<'connected, 'device> {
+    async fn subscribe(
+        connected: &'connected ConnectedPeripheral<'device>,
+        response_timeout: Duration,
+    ) -> Result<Self> {
+        let (characteristic, write_type) = writable_characteristic(connected).await?;
+        let notifications = connected
+            .peripheral
+            .notifications()
+            .await
+            .context("subscribe to BLE notifications")?;
+        connected
+            .peripheral
+            .subscribe(&characteristic)
+            .await
+            .context("enable responses on GAF characteristic FF01")?;
 
-    let mut decoder = FrameDecoder::default();
-    let control_reply = if let Some(command) = control_command {
-        let frame = command.frame();
-        peripheral
-            .write(&characteristic, &frame, write_type)
-            .await
-            .with_context(|| format!("send ordinary control command {}", frame.escape_ascii()))?;
-        Some(
-            await_response(
-                &mut notifications,
-                &mut decoder,
-                command.response_id(),
-                response_timeout,
-            )
-            .await
-            .with_context(|| format!("wait for {} acknowledgement", frame.escape_ascii()))?,
+        Ok(Self {
+            connected,
+            characteristic,
+            write_type,
+            notifications,
+            decoder: FrameDecoder::default(),
+            response_timeout,
+        })
+    }
+
+    async fn query(
+        mut self,
+        control_command: Option<ControlCommand>,
+    ) -> Result<(Vec<ReadReply>, Option<Frame>)> {
+        let control_reply = match control_command {
+            Some(command) => {
+                let frame = command.frame();
+                Some(
+                    self.exchange(&frame, command.response_id(), "ordinary control command")
+                        .await
+                        .with_context(|| {
+                            format!("wait for {} acknowledgement", frame.escape_ascii())
+                        })?,
+                )
+            }
+            None => None,
+        };
+        let replies = self.read_state().await?;
+        Ok((replies, control_reply))
+    }
+
+    async fn read_state(self) -> Result<Vec<ReadReply>> {
+        let (_, replies) = stream::iter([
+            ReadCommand::Identity,
+            ReadCommand::Mode,
+            ReadCommand::Sensors,
+            ReadCommand::AutoThresholds,
+            ReadCommand::Timer,
+        ])
+        .map(Ok::<_, anyhow::Error>)
+        .try_fold(
+            (self, Vec::new()),
+            |(mut session, mut replies), request| async move {
+                let response = session
+                    .exchange(request.frame(), request.response_id(), "state query")
+                    .await
+                    .with_context(|| {
+                        format!("waiting for {} response", request.frame().escape_ascii())
+                    })?;
+                replies.push(ReadReply { request, response });
+                Ok((session, replies))
+            },
         )
-    } else {
-        None
-    };
+        .await?;
+        Ok(replies)
+    }
 
-    let characteristic = &characteristic;
-    let (replies, _, _) = stream::iter([
-        ReadCommand::Identity,
-        ReadCommand::Mode,
-        ReadCommand::Sensors,
-        ReadCommand::AutoThresholds,
-        ReadCommand::Timer,
-    ])
-    .map(Ok::<_, anyhow::Error>)
-    .try_fold(
-        (Vec::new(), &mut notifications, &mut decoder),
-        |(mut replies, notifications, decoder), request| async move {
-            peripheral
-                .write(characteristic, request.frame(), write_type)
-                .await
-                .with_context(|| format!("send state query {}", request.frame().escape_ascii()))?;
-
-            let response = await_response(
-                notifications,
-                decoder,
-                request.response_id(),
-                response_timeout,
-            )
+    async fn exchange(
+        &mut self,
+        frame: &[u8],
+        response_id: [u8; 3],
+        operation: &str,
+    ) -> Result<Frame> {
+        self.connected
+            .peripheral
+            .write(&self.characteristic, frame, self.write_type)
             .await
-            .with_context(|| format!("waiting for {} response", request.frame().escape_ascii()))?;
-
-            replies.push(ReadReply { request, response });
-            Ok((replies, notifications, decoder))
-        },
-    )
-    .await?;
-
-    Ok((replies, control_reply))
+            .with_context(|| format!("send {operation} {}", frame.escape_ascii()))?;
+        await_response(
+            &mut self.notifications,
+            &mut self.decoder,
+            response_id,
+            self.response_timeout,
+        )
+        .await
+    }
 }
 
 async fn await_response(

@@ -1,4 +1,7 @@
-use updraft_protocol::{ControlCommand, Frame, FrameDecoder, FrameError, ReadCommand};
+use updraft_protocol::{
+    AutomaticThresholds, ControlCommand, Frame, FrameDecoder, FrameError, HumidityTenthsPercent,
+    Minutes, ReadCommand, ReadbackError, TemperatureTenthsF, TimerState,
+};
 
 #[test]
 fn read_only_commands_encode_the_observed_line_frames() {
@@ -18,10 +21,10 @@ fn read_only_commands_encode_the_observed_line_frames() {
 
 #[test]
 fn automatic_threshold_write_uses_tenths_and_uppercase_hex() {
-    let command = ControlCommand::SetAutomaticThresholds {
-        temperature_tenths_f: 1050,
-        humidity_tenths_percent: 300,
-    };
+    let command = ControlCommand::SetAutomaticThresholds(AutomaticThresholds {
+        temperature: TemperatureTenthsF::new(1050),
+        humidity: HumidityTenthsPercent::new(300),
+    });
 
     assert_eq!(command.frame(), b"#ams041A012C\n");
     assert_eq!(command.response_id(), *b"amr");
@@ -29,22 +32,71 @@ fn automatic_threshold_write_uses_tenths_and_uppercase_hex() {
 
 #[test]
 fn automatic_threshold_write_encodes_full_u16_fields() {
-    let command = ControlCommand::SetAutomaticThresholds {
-        temperature_tenths_f: u16::MAX,
-        humidity_tenths_percent: 0,
-    };
+    let command = ControlCommand::SetAutomaticThresholds(AutomaticThresholds {
+        temperature: TemperatureTenthsF::new(u16::MAX),
+        humidity: HumidityTenthsPercent::new(0),
+    });
 
     assert_eq!(command.frame(), b"#amsFFFF0000\n");
 }
 
 #[test]
 fn timer_write_encodes_minutes_as_uppercase_hex() {
-    let command = ControlCommand::SetTimer {
-        duration_minutes: 1,
-    };
+    let command = ControlCommand::SetTimer(Minutes::new(1));
 
     assert_eq!(command.frame(), b"#tms0001\n");
     assert_eq!(command.response_id(), *b"tmr");
+}
+
+#[test]
+fn threshold_and_timer_readbacks_parse_into_wire_units() {
+    assert_eq!(
+        AutomaticThresholds::parse(b"041a012C"),
+        Ok(AutomaticThresholds {
+            temperature: TemperatureTenthsF::new(1050),
+            humidity: HumidityTenthsPercent::new(300),
+        })
+    );
+    assert_eq!(
+        TimerState::parse(b"00010002"),
+        Ok(TimerState {
+            remaining: Minutes::new(1),
+            original: Minutes::new(2),
+        })
+    );
+    assert_eq!(
+        TimerState::parse(b"FFFF0000"),
+        Ok(TimerState {
+            remaining: Minutes::new(u16::MAX),
+            original: Minutes::new(0),
+        })
+    );
+}
+
+#[test]
+fn threshold_and_timer_readbacks_reject_wrong_length_and_non_hex() {
+    [b"041a012".as_slice(), b"041a012C0".as_slice()]
+        .into_iter()
+        .for_each(|payload| {
+            assert_eq!(
+                AutomaticThresholds::parse(payload),
+                Err(ReadbackError::InvalidLength)
+            );
+            assert_eq!(
+                TimerState::parse(payload),
+                Err(ReadbackError::InvalidLength)
+            );
+        });
+
+    [b"041g012C".as_slice(), b"041a012\xff".as_slice()]
+        .into_iter()
+        .for_each(|payload| {
+            assert_eq!(
+                AutomaticThresholds::parse(payload),
+                Err(ReadbackError::InvalidHex)
+            );
+            assert_eq!(TimerState::parse(payload), Err(ReadbackError::InvalidHex));
+        });
 }
 
 #[test]
