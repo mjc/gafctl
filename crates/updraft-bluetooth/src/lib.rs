@@ -1,6 +1,11 @@
 //! Bluetooth discovery, state queries, and ordinary controls for GAF attic fans.
 
-use std::{collections::HashSet, pin::Pin, time::Duration};
+use std::{
+    fmt::{self, Write as _},
+    future::Future,
+    pin::Pin,
+    time::Duration,
+};
 
 use anyhow::{Context, Result, bail};
 use btleplug::{
@@ -8,11 +13,14 @@ use btleplug::{
         Central, CharPropFlags, Characteristic, Manager as _, Peripheral as _, ScanFilter,
         ValueNotification, WriteType,
     },
-    platform::{Adapter, Manager, Peripheral},
+    platform::{Adapter, Manager, Peripheral, PeripheralId},
 };
 use bytes::Bytes;
 use futures_util::{Stream, StreamExt, TryStreamExt, future, stream};
-use tokio::time::{sleep, timeout};
+use tokio::{
+    runtime::Handle,
+    time::{sleep, timeout},
+};
 use updraft_protocol::{
     ControlCommand, ControlOutcome, DeviceSnapshot, Frame, FrameDecoder, FrameError, ReadCommand,
     Request,
@@ -29,7 +37,7 @@ pub const GAF_CHARACTERISTIC_UUID: Uuid = Uuid::from_u128(0x0000ff01_0000_1000_8
 pub struct ProbeOptions {
     /// How long to scan for the GAF service before selecting a peripheral.
     pub scan_duration: Duration,
-    /// Maximum time to wait for each command's response notification.
+    /// Maximum time for each BLE operation and each command response.
     pub response_timeout: Duration,
     /// Action to take after scanning.
     pub mode: ProbeMode,
@@ -66,7 +74,7 @@ impl Default for ProbeOptions {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DiscoveredDevice {
     /// Platform-specific peripheral identifier, accepted by `--device-id`.
-    pub id: String,
+    pub id: PeripheralId,
     /// BLE local name, if the device advertises one.
     pub name: Option<String>,
     /// Latest advertised RSSI, in dBm, when provided by the OS.
@@ -80,39 +88,154 @@ pub struct QueryResult {
     pub snapshot: DeviceSnapshot,
     /// Outcome of the optional ordinary control request, interpreted with readback.
     pub control: Option<ControlOutcome>,
+    /// Whether the BLE connection closed cleanly after the query.
+    pub disconnect: DisconnectOutcome,
+}
+
+/// Outcome of closing the BLE connection after a query.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum DisconnectOutcome {
+    /// The BLE connection closed successfully.
+    Disconnected,
+    /// The query succeeded but the platform reported an error while disconnecting.
+    Failed(String),
 }
 
 /// Result of scanning and, when selected, querying a peripheral.
-#[derive(Clone, Debug, Eq, PartialEq)]
+// Keep the query inline to avoid a per-query heap allocation.
+#[allow(clippy::large_enum_variant)]
+#[derive(Debug)]
 pub enum ProbeResult {
     /// No peripherals advertising the service were found.
     NoDevices,
     /// Scan-only mode found one or more candidates.
-    Discovered { devices: Vec<DiscoveredDevice> },
+    Discovered { devices: Vec<Candidate> },
     /// A query needs an exact device ID because multiple candidates were found.
-    Ambiguous { devices: Vec<DiscoveredDevice> },
+    Ambiguous { devices: Vec<Candidate> },
     /// One peripheral was queried successfully.
     Queried {
         /// The selected peripheral.
         device: DiscoveredDevice,
         /// Validated snapshot and optional control outcome.
-        result: Box<QueryResult>,
+        result: QueryResult,
     },
 }
 
-struct Candidate {
-    peripheral: Peripheral,
+/// A discovered device and its private platform handle, when a query may use it.
+#[derive(Debug)]
+pub struct Candidate {
+    peripheral: Option<Peripheral>,
     device: DiscoveredDevice,
+}
+
+impl Candidate {
+    /// Borrow the public description of this device.
+    #[must_use]
+    pub fn device(&self) -> &DiscoveredDevice {
+        &self.device
+    }
+
+    fn release_peripheral(&mut self) {
+        self.peripheral = None;
+    }
 }
 
 enum CandidateSelection {
     NoDevices,
-    Ambiguous(Vec<DiscoveredDevice>),
-    Chosen(Candidate),
+    Ambiguous(Vec<Candidate>),
+    Chosen {
+        device: DiscoveredDevice,
+        peripheral: Peripheral,
+    },
 }
 
 struct ConnectedPeripheral<'a> {
     peripheral: &'a Peripheral,
+    cleanup: DisconnectCleanup,
+}
+
+struct ScanCleanup {
+    adapter: Adapter,
+    operation_timeout: Duration,
+    runtime: Handle,
+    armed: bool,
+}
+
+impl ScanCleanup {
+    fn new(adapter: Adapter, operation_timeout: Duration) -> Self {
+        Self {
+            adapter,
+            operation_timeout,
+            runtime: Handle::current(),
+            armed: true,
+        }
+    }
+
+    async fn run(&mut self) -> Result<()> {
+        stop_ble_scan(&self.adapter, self.operation_timeout).await?;
+        self.armed = false;
+        Ok(())
+    }
+}
+
+impl Drop for ScanCleanup {
+    fn drop(&mut self) {
+        if self.armed {
+            let adapter = self.adapter.clone();
+            let operation_timeout = self.operation_timeout;
+            self.runtime.spawn(async move {
+                report_cleanup_failure(
+                    "stop BLE scan",
+                    stop_ble_scan(&adapter, operation_timeout).await,
+                );
+            });
+        }
+    }
+}
+
+struct DisconnectCleanup {
+    peripheral: Peripheral,
+    operation_timeout: Duration,
+    runtime: Handle,
+    armed: bool,
+}
+
+impl DisconnectCleanup {
+    fn new(peripheral: Peripheral, operation_timeout: Duration) -> Self {
+        Self {
+            peripheral,
+            operation_timeout,
+            runtime: Handle::current(),
+            armed: true,
+        }
+    }
+
+    async fn run(&mut self) -> Result<()> {
+        disconnect_peripheral(&self.peripheral, self.operation_timeout).await?;
+        self.armed = false;
+        Ok(())
+    }
+}
+
+impl Drop for DisconnectCleanup {
+    fn drop(&mut self) {
+        if self.armed {
+            let peripheral = self.peripheral.clone();
+            let operation_timeout = self.operation_timeout;
+            self.runtime.spawn(async move {
+                report_cleanup_failure(
+                    "disconnect from GAF BLE peripheral",
+                    disconnect_peripheral(&peripheral, operation_timeout).await,
+                );
+            });
+        }
+    }
+}
+
+fn report_cleanup_failure(operation: &'static str, result: Result<()>) {
+    if let Err(error) = result {
+        tracing::warn!(operation, %error, "best-effort BLE cleanup failed");
+    }
 }
 
 struct ReadySession<'connected, 'device> {
@@ -127,15 +250,10 @@ struct ReadySession<'connected, 'device> {
 /// Discover GAF BLE peripherals and, when selected unambiguously, issue the
 /// read-only queries plus an optional ordinary control-setting write.
 pub async fn probe(options: ProbeOptions) -> Result<ProbeResult> {
-    let candidates = discover_candidates(options.scan_duration).await?;
+    let candidates = discover_candidates(options.scan_duration, options.response_timeout).await?;
 
     match options.mode {
-        ProbeMode::Scan => Ok(summarize_scan(
-            candidates
-                .into_iter()
-                .map(|candidate| candidate.device)
-                .collect(),
-        )),
+        ProbeMode::Scan => Ok(summarize_scan(candidates)),
         ProbeMode::Query {
             device_id,
             control_command,
@@ -151,67 +269,126 @@ pub async fn probe(options: ProbeOptions) -> Result<ProbeResult> {
     }
 }
 
-fn summarize_scan(devices: Vec<DiscoveredDevice>) -> ProbeResult {
-    match devices.as_slice() {
-        [] => ProbeResult::NoDevices,
-        _ => ProbeResult::Discovered { devices },
+fn summarize_scan(mut candidates: Vec<Candidate>) -> ProbeResult {
+    if candidates.is_empty() {
+        ProbeResult::NoDevices
+    } else {
+        candidates
+            .iter_mut()
+            .for_each(Candidate::release_peripheral);
+        ProbeResult::Discovered {
+            devices: candidates,
+        }
     }
 }
 
-async fn discover_candidates(scan_duration: Duration) -> Result<Vec<Candidate>> {
-    let manager = Manager::new().await.context("create Bluetooth manager")?;
-    let adapter = manager
-        .adapters()
-        .await
-        .context("list Bluetooth adapters")?
-        .into_iter()
-        .next()
-        .context("no Bluetooth adapter is available")?;
+async fn discover_candidates(
+    scan_duration: Duration,
+    operation_timeout: Duration,
+) -> Result<Vec<Candidate>> {
+    let manager = complete_before(operation_timeout, "create Bluetooth manager", async {
+        Manager::new().await.context("create Bluetooth manager")
+    })
+    .await?;
+    let adapter = complete_before(operation_timeout, "list Bluetooth adapters", async {
+        manager.adapters().await.context("list Bluetooth adapters")
+    })
+    .await?
+    .into_iter()
+    .next()
+    .context("no Bluetooth adapter is available")?;
 
-    adapter
-        .start_scan(ScanFilter {
-            services: vec![GAF_SERVICE_UUID],
-        })
-        .await
-        .context("start BLE scan for GAF service 00FF")?;
+    let mut scan_cleanup = ScanCleanup::new(adapter.clone(), operation_timeout);
+    let scan_start = complete_before(operation_timeout, "start BLE scan", async {
+        adapter
+            .start_scan(ScanFilter {
+                services: vec![GAF_SERVICE_UUID],
+            })
+            .await
+            .context("start BLE scan for GAF service 00FF")
+    })
+    .await;
+    if let Err(error) = scan_start {
+        return fail_with_cleanup(error, scan_cleanup.run().await);
+    }
     sleep(scan_duration).await;
-    adapter.stop_scan().await.context("stop BLE scan")?;
+    scan_cleanup.run().await?;
 
-    collect_advertised_candidates(&adapter).await
+    collect_advertised_candidates(&adapter, operation_timeout).await
 }
 
-async fn collect_advertised_candidates(adapter: &Adapter) -> Result<Vec<Candidate>> {
-    let mut seen = HashSet::new();
-    stream::iter(
-        adapter
-            .peripherals()
-            .await
-            .context("list BLE peripherals")?,
-    )
-    .then(read_gaf_advertisement)
-    .try_filter_map(|candidate| {
-        future::ready(Ok(
-            candidate.filter(|candidate| seen.insert(candidate.peripheral.id()))
-        ))
+async fn complete_before<T>(
+    duration: Duration,
+    operation: &'static str,
+    future: impl Future<Output = Result<T>>,
+) -> Result<T> {
+    timeout(duration, future)
+        .await
+        .with_context(|| format!("{operation} timed out"))?
+}
+
+async fn stop_ble_scan(adapter: &Adapter, operation_timeout: Duration) -> Result<()> {
+    complete_before(operation_timeout, "stop BLE scan", async {
+        adapter.stop_scan().await.context("stop BLE scan")
     })
-    .try_collect::<Vec<_>>()
     .await
 }
 
-async fn read_gaf_advertisement(peripheral: Peripheral) -> Result<Option<Candidate>> {
-    let properties = peripheral
-        .properties()
+async fn collect_advertised_candidates(
+    adapter: &Adapter,
+    operation_timeout: Duration,
+) -> Result<Vec<Candidate>> {
+    let peripherals = complete_before(operation_timeout, "list BLE peripherals", async {
+        adapter.peripherals().await.context("list BLE peripherals")
+    })
+    .await?;
+    stream::iter(peripherals)
+        .then(|peripheral| read_gaf_advertisement(peripheral, operation_timeout))
+        .try_fold(Vec::new(), |mut candidates, candidate| {
+            if let Some(candidate) = candidate
+                && !already_discovered(&candidates, &candidate)
+            {
+                candidates.push(candidate);
+            }
+            future::ready(Ok(candidates))
+        })
         .await
-        .context("read BLE advertisement properties")?;
+}
+
+fn already_discovered(candidates: &[Candidate], candidate: &Candidate) -> bool {
+    candidate.peripheral.as_ref().is_some_and(|peripheral| {
+        candidates.iter().any(|seen| {
+            seen.peripheral
+                .as_ref()
+                .is_some_and(|seen| seen.id() == peripheral.id())
+        })
+    })
+}
+
+async fn read_gaf_advertisement(
+    peripheral: Peripheral,
+    operation_timeout: Duration,
+) -> Result<Option<Candidate>> {
+    let properties = complete_before(
+        operation_timeout,
+        "read BLE advertisement properties",
+        async {
+            peripheral
+                .properties()
+                .await
+                .context("read BLE advertisement properties")
+        },
+    )
+    .await?;
     Ok(properties
         .filter(|properties| properties.services.contains(&GAF_SERVICE_UUID))
         .map(|properties| Candidate {
             device: DiscoveredDevice {
-                id: peripheral.id().to_string(),
+                id: peripheral.id(),
                 name: properties.local_name,
                 rssi: properties.rssi,
             },
-            peripheral,
+            peripheral: Some(peripheral),
         }))
 }
 
@@ -222,17 +399,55 @@ fn select_candidate(
     match (device_id, candidates.len()) {
         (Some(id), _) => candidates
             .iter()
-            .position(|candidate| candidate.device.id == id)
-            .map(|index| CandidateSelection::Chosen(candidates.remove(index)))
-            .with_context(|| format!("no scanned GAF peripheral has ID {id}")),
+            .position(|candidate| peripheral_id_matches(&candidate.device.id, id))
+            .map(|index| candidates.remove(index))
+            .with_context(|| format!("no scanned GAF peripheral has ID {id}"))
+            .and_then(Candidate::select),
         (None, 0) => Ok(CandidateSelection::NoDevices),
-        (None, 1) => Ok(CandidateSelection::Chosen(candidates.remove(0))),
-        (None, _) => Ok(CandidateSelection::Ambiguous(
+        (None, 1) => Candidate::select(candidates.remove(0)),
+        (None, _) => {
             candidates
-                .into_iter()
-                .map(|candidate| candidate.device)
-                .collect(),
-        )),
+                .iter_mut()
+                .for_each(Candidate::release_peripheral);
+            Ok(CandidateSelection::Ambiguous(candidates))
+        }
+    }
+}
+
+fn peripheral_id_matches(peripheral_id: &PeripheralId, expected: &str) -> bool {
+    let mut output = StringMatch {
+        expected,
+        offset: 0,
+    };
+    write!(&mut output, "{peripheral_id}").is_ok() && output.offset == expected.len()
+}
+
+struct StringMatch<'a> {
+    expected: &'a str,
+    offset: usize,
+}
+
+impl fmt::Write for StringMatch<'_> {
+    fn write_str(&mut self, output: &str) -> fmt::Result {
+        let end = self.offset + output.len();
+        if self.expected.get(self.offset..end) != Some(output) {
+            return Err(fmt::Error);
+        }
+        self.offset = end;
+        Ok(())
+    }
+}
+
+impl Candidate {
+    fn select(mut self) -> Result<CandidateSelection> {
+        let peripheral = self
+            .peripheral
+            .take()
+            .context("scanned candidate lost its BLE peripheral handle")?;
+        Ok(CandidateSelection::Chosen {
+            device: self.device,
+            peripheral,
+        })
     }
 }
 
@@ -245,13 +460,9 @@ async fn query_selected_device(
     match select_candidate(candidates, device_id)? {
         CandidateSelection::NoDevices => Ok(ProbeResult::NoDevices),
         CandidateSelection::Ambiguous(devices) => Ok(ProbeResult::Ambiguous { devices }),
-        CandidateSelection::Chosen(candidate) => {
-            let result =
-                query_peripheral(&candidate.peripheral, response_timeout, control_command).await?;
-            Ok(ProbeResult::Queried {
-                device: candidate.device,
-                result: Box::new(result),
-            })
+        CandidateSelection::Chosen { device, peripheral } => {
+            let result = query_peripheral(&peripheral, response_timeout, control_command).await?;
+            Ok(ProbeResult::Queried { device, result })
         }
     }
 }
@@ -261,47 +472,108 @@ async fn query_peripheral(
     response_timeout: Duration,
     control_command: Option<ControlCommand>,
 ) -> Result<QueryResult> {
-    let connected = ConnectedPeripheral::connect(peripheral).await?;
+    let mut connected = ConnectedPeripheral::connect(peripheral, response_timeout).await?;
     let query_result = async {
         ReadySession::subscribe(&connected, response_timeout)
             .await?
             .query(control_command)
             .await
     }
-    .await;
-    let disconnect_result = connected.disconnect().await;
-    query_result.and_then(|replies| disconnect_result.map(|()| replies))
+    .await
+    .map(|mut result| {
+        result.disconnect = DisconnectOutcome::Disconnected;
+        result
+    });
+    let (mut result, disconnect) = finish_with_cleanup(query_result, connected.disconnect().await)?;
+    result.disconnect = disconnect;
+    Ok(result)
 }
 
 impl<'a> ConnectedPeripheral<'a> {
-    async fn connect(peripheral: &'a Peripheral) -> Result<Self> {
-        peripheral
-            .connect()
-            .await
-            .context("connect to GAF BLE peripheral")?;
-        Ok(Self { peripheral })
+    async fn connect(peripheral: &'a Peripheral, operation_timeout: Duration) -> Result<Self> {
+        let mut cleanup = DisconnectCleanup::new(peripheral.clone(), operation_timeout);
+        let connection =
+            complete_before(operation_timeout, "connect to GAF BLE peripheral", async {
+                peripheral
+                    .connect()
+                    .await
+                    .context("connect to GAF BLE peripheral")
+            })
+            .await;
+        match connection {
+            Ok(()) => Ok(Self {
+                peripheral,
+                cleanup,
+            }),
+            Err(error) => fail_with_cleanup(error, cleanup.run().await),
+        }
     }
 
-    async fn disconnect(self) -> Result<()> {
-        self.peripheral
-            .disconnect()
-            .await
-            .context("disconnect from GAF BLE peripheral")
+    async fn disconnect(&mut self) -> Result<()> {
+        self.cleanup.run().await
+    }
+}
+
+async fn disconnect_peripheral(peripheral: &Peripheral, operation_timeout: Duration) -> Result<()> {
+    complete_before(
+        operation_timeout,
+        "disconnect from GAF BLE peripheral",
+        async {
+            peripheral
+                .disconnect()
+                .await
+                .context("disconnect from GAF BLE peripheral")
+        },
+    )
+    .await
+}
+
+fn finish_with_cleanup<T>(
+    operation: Result<T>,
+    cleanup: Result<()>,
+) -> Result<(T, DisconnectOutcome)> {
+    match (operation, cleanup) {
+        (Ok(value), Ok(())) => Ok((value, DisconnectOutcome::Disconnected)),
+        (Ok(value), Err(error)) => Ok((value, DisconnectOutcome::Failed(format!("{error:#}")))),
+        (Err(error), Ok(())) => Err(error),
+        (Err(error), Err(cleanup_error)) => {
+            let operation = format!("{error:#}");
+            Err(error.context(format!(
+                "operation failed ({operation}); disconnect also failed ({cleanup_error:#})"
+            )))
+        }
+    }
+}
+
+fn fail_with_cleanup<T>(operation: anyhow::Error, cleanup: Result<()>) -> Result<T> {
+    match cleanup {
+        Ok(()) => Err(operation),
+        Err(cleanup_error) => {
+            let operation_message = format!("{operation:#}");
+            Err(operation.context(format!(
+                "operation failed ({operation_message}); cleanup also failed ({cleanup_error:#})"
+            )))
+        }
     }
 }
 
 async fn writable_characteristic(
     connected: &ConnectedPeripheral<'_>,
+    operation_timeout: Duration,
 ) -> Result<(Characteristic, WriteType)> {
-    connected
-        .peripheral
-        .discover_services()
-        .await
-        .context("discover GAF BLE services")?;
+    complete_before(operation_timeout, "discover GAF BLE services", async {
+        connected
+            .peripheral
+            .discover_services()
+            .await
+            .context("discover GAF BLE services")
+    })
+    .await?;
     let characteristic = connected
         .peripheral
-        .characteristics()
+        .services()
         .into_iter()
+        .flat_map(|service| service.characteristics)
         .find(|characteristic| {
             characteristic.service_uuid == GAF_SERVICE_UUID
                 && characteristic.uuid == GAF_CHARACTERISTIC_UUID
@@ -326,17 +598,25 @@ impl<'connected, 'device> ReadySession<'connected, 'device> {
         connected: &'connected ConnectedPeripheral<'device>,
         response_timeout: Duration,
     ) -> Result<Self> {
-        let (characteristic, write_type) = writable_characteristic(connected).await?;
-        let notifications = connected
-            .peripheral
-            .notifications()
-            .await
-            .context("subscribe to BLE notifications")?;
-        connected
-            .peripheral
-            .subscribe(&characteristic)
-            .await
-            .context("enable responses on GAF characteristic FF01")?;
+        let (characteristic, write_type) =
+            writable_characteristic(connected, response_timeout).await?;
+        let notifications =
+            complete_before(response_timeout, "subscribe to BLE notifications", async {
+                connected
+                    .peripheral
+                    .notifications()
+                    .await
+                    .context("subscribe to BLE notifications")
+            })
+            .await?;
+        complete_before(response_timeout, "enable GAF characteristic FF01", async {
+            connected
+                .peripheral
+                .subscribe(&characteristic)
+                .await
+                .context("enable responses on GAF characteristic FF01")
+        })
+        .await?;
 
         Ok(Self {
             connected,
@@ -363,7 +643,11 @@ impl<'connected, 'device> ReadySession<'connected, 'device> {
             .map(|(command, response)| ControlOutcome::from_response(command, response, &snapshot))
             .transpose()
             .context("validate ordinary control outcome")?;
-        Ok(QueryResult { snapshot, control })
+        Ok(QueryResult {
+            snapshot,
+            control,
+            disconnect: DisconnectOutcome::Disconnected,
+        })
     }
 
     async fn read_state(&mut self) -> Result<DeviceSnapshot> {
@@ -378,17 +662,20 @@ impl<'connected, 'device> ReadySession<'connected, 'device> {
 
     async fn exchange(&mut self, request: Request) -> Result<Frame<'static>> {
         let frame = request.frame();
-        self.connected
-            .peripheral
-            .write(&self.characteristic, frame.as_ref(), self.write_type)
-            .await
-            .with_context(|| {
-                format!(
-                    "send {} {}",
-                    request.operation(),
-                    frame.as_ref().escape_ascii()
-                )
-            })?;
+        complete_before(self.response_timeout, "write GAF BLE request", async {
+            self.connected
+                .peripheral
+                .write(&self.characteristic, frame.as_ref(), self.write_type)
+                .await
+                .with_context(|| {
+                    format!(
+                        "send {} {}",
+                        request.operation(),
+                        frame.as_ref().escape_ascii()
+                    )
+                })
+        })
+        .await?;
 
         let decoder = &mut self.decoder;
         let mut matching_responses = self
@@ -405,18 +692,25 @@ impl<'connected, 'device> ReadySession<'connected, 'device> {
                     .transpose(),
                 )
             });
-        timeout(self.response_timeout, matching_responses.try_next())
-            .await
-            .context("timed out waiting for matching BLE response")
-            .and_then(|result| result.map_err(anyhow::Error::from))
-            .and_then(|response| response.context("BLE notification stream ended"))
-            .with_context(|| {
-                format!(
-                    "waiting for {} response to {}",
-                    request.response_id().escape_ascii(),
-                    frame.as_ref().escape_ascii()
-                )
-            })
+        complete_before(
+            self.response_timeout,
+            "waiting for matching BLE response",
+            async {
+                matching_responses
+                    .try_next()
+                    .await
+                    .map_err(anyhow::Error::from)
+            },
+        )
+        .await
+        .and_then(|response| response.context("BLE notification stream ended"))
+        .with_context(|| {
+            format!(
+                "waiting for {} response to {}",
+                request.response_id().escape_ascii(),
+                frame.as_ref().escape_ascii()
+            )
+        })
     }
 }
 
@@ -437,6 +731,55 @@ fn decode_matching_response(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn string_match_compares_display_chunks_without_building_a_string() {
+        let mut output = StringMatch {
+            expected: "gaf-device-42",
+            offset: 0,
+        };
+
+        write!(&mut output, "gaf-device-{}", 42).unwrap();
+
+        assert_eq!(output.offset, output.expected.len());
+    }
+
+    #[tokio::test]
+    async fn platform_operation_deadline_names_the_timed_out_operation() {
+        let error = complete_before(
+            Duration::ZERO,
+            "test BLE operation",
+            future::pending::<Result<()>>(),
+        )
+        .await
+        .expect_err("pending operation should time out");
+
+        assert!(format!("{error:#}").contains("test BLE operation timed out"));
+    }
+
+    #[test]
+    fn successful_operation_keeps_its_value_when_cleanup_fails() {
+        let (value, disconnect) = finish_with_cleanup(Ok(42), Err(anyhow::anyhow!("disconnect")))
+            .expect("query result is retained");
+
+        assert_eq!(value, 42);
+        assert_eq!(
+            disconnect,
+            DisconnectOutcome::Failed("disconnect".to_owned())
+        );
+    }
+
+    #[test]
+    fn operation_and_cleanup_errors_are_both_reported() {
+        let error = finish_with_cleanup::<()>(
+            Err(anyhow::anyhow!("query failed")),
+            Err(anyhow::anyhow!("disconnect failed")),
+        )
+        .expect_err("both failures should remain visible");
+
+        assert!(error.to_string().contains("query failed"));
+        assert!(error.to_string().contains("disconnect failed"));
+    }
 
     #[test]
     fn first_matching_response_survives_later_notifications() {

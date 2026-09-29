@@ -27,7 +27,7 @@ fn automatic_threshold_write_uses_tenths_and_uppercase_hex() {
         humidity: HumidityTenthsPercent::new(300),
     });
 
-    assert_eq!(command.frame(), b"#ams041A012C\n");
+    assert_eq!(command.frame().as_ref(), b"#ams041A012C\n");
     assert_eq!(command.response_id(), *b"amr");
 }
 
@@ -38,14 +38,14 @@ fn automatic_threshold_write_encodes_full_u16_fields() {
         humidity: HumidityTenthsPercent::new(0),
     });
 
-    assert_eq!(command.frame(), b"#amsFFFF0000\n");
+    assert_eq!(command.frame().as_ref(), b"#amsFFFF0000\n");
 }
 
 #[test]
 fn timer_write_encodes_minutes_as_uppercase_hex() {
     let command = ControlCommand::SetTimer(Minutes::new(1));
 
-    assert_eq!(command.frame(), b"#tms0001\n");
+    assert_eq!(command.frame().as_ref(), b"#tms0001\n");
     assert_eq!(command.response_id(), *b"tmr");
 }
 

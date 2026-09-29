@@ -1,5 +1,3 @@
-use std::borrow::Cow;
-
 use bytes::Bytes;
 use updraft_protocol::{
     Acknowledgement, AutomaticThresholds, ControlCommand, ControlOutcome, ControlReadback,
@@ -43,7 +41,10 @@ fn request_carries_frame_response_and_operation_together() {
     .into_iter()
     .for_each(|(command, wire, response)| {
         let request = Request::from(command);
-        assert!(matches!(request.frame(), Cow::Borrowed(_)));
+        assert!(matches!(
+            request.frame(),
+            updraft_protocol::RequestFrame::Read(_)
+        ));
         assert_eq!(request.frame().as_ref(), wire);
         assert_eq!(request.response_id(), response);
         assert_eq!(request.operation(), "state query");
@@ -51,7 +52,10 @@ fn request_carries_frame_response_and_operation_together() {
 
     let command = ControlCommand::SetTimer(Minutes::new(1));
     let request = Request::from(command);
-    assert!(matches!(request.frame(), Cow::Owned(_)));
+    assert!(matches!(
+        request.frame(),
+        updraft_protocol::RequestFrame::Control(_)
+    ));
     assert_eq!(request.frame().as_ref(), b"#tms0001\n");
     assert_eq!(request.response_id(), *b"tmr");
     assert_eq!(request.operation(), "ordinary control command");
@@ -62,7 +66,10 @@ fn request_carries_frame_response_and_operation_together() {
             humidity: HumidityTenthsPercent::new(300),
         },
     ));
-    assert!(matches!(automatic.frame(), Cow::Owned(_)));
+    assert!(matches!(
+        automatic.frame(),
+        updraft_protocol::RequestFrame::Control(_)
+    ));
     assert_eq!(automatic.frame().as_ref(), b"#ams041A012C\n");
     assert_eq!(automatic.response_id(), *b"amr");
     assert_eq!(automatic.operation(), "ordinary control command");

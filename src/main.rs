@@ -50,7 +50,7 @@ struct BleOptions {
     #[arg(long, default_value_t = 6)]
     scan_seconds: u64,
 
-    /// Seconds to wait for each read response.
+    /// Seconds allowed for each BLE operation and each command response.
     #[arg(long, default_value_t = 3)]
     response_timeout_seconds: u64,
 
@@ -137,11 +137,11 @@ fn print_probe_result(result: ProbeResult, show_identity: bool) {
             println!("No nearby BLE device advertising GAF service 00FF was found.");
         }
         ProbeResult::Discovered { devices } => {
-            print_devices(&devices);
+            print_devices(devices.iter().map(|candidate| candidate.device()));
             println!("Scan-only mode: no connection or protocol request was made.");
         }
         ProbeResult::Ambiguous { devices } => {
-            print_devices(&devices);
+            print_devices(devices.iter().map(|candidate| candidate.device()));
             println!(
                 "More than one candidate found. Re-run with --device-id <id> to query one fan."
             );
@@ -155,13 +155,16 @@ fn print_probe_result(result: ProbeResult, show_identity: bool) {
             if let Some(control) = &result.control {
                 println!("{}", ControlReadbackDisplay(control.readback()));
             }
+            if let updraft_bluetooth::DisconnectOutcome::Failed(error) = &result.disconnect {
+                eprintln!("BLE query succeeded, but disconnect failed: {error}");
+            }
         }
     }
 }
 
-fn print_devices(devices: &[DiscoveredDevice]) {
+fn print_devices<'a>(devices: impl ExactSizeIterator<Item = &'a DiscoveredDevice>) {
     println!("Found {} GAF BLE device(s):", devices.len());
-    devices.iter().enumerate().for_each(|(index, device)| {
+    devices.enumerate().for_each(|(index, device)| {
         println!("  [{index}] {}", DeviceDescription(device));
     });
 }
