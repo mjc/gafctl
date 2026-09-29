@@ -10,10 +10,10 @@ fn read_only_commands_encode_the_observed_line_frames() {
         (ReadCommand::Timer, b"#ttg\n".as_slice(), *b"ttr"),
     ];
 
-    for (command, expected, response) in cases {
+    cases.into_iter().for_each(|(command, expected, response)| {
         assert_eq!(command.frame(), expected);
         assert_eq!(command.response_id(), response);
-    }
+    });
 }
 
 #[test]
@@ -78,20 +78,26 @@ fn sanitized_device_capture_replies_parse_without_losing_payloads() {
         (b"#amr0\n".as_slice(), *b"amr", b"0".as_slice()),
     ];
 
-    for (bytes, command, payload) in captures {
+    captures.into_iter().for_each(|(bytes, command, payload)| {
         let frame = Frame::parse(bytes).unwrap();
         assert_eq!(frame.command(), command);
         assert_eq!(frame.payload(), payload);
         assert_eq!(frame.encode(), bytes);
-    }
+    });
 }
 
 #[test]
 fn frame_parser_rejects_incomplete_or_malformed_frames() {
-    assert!(Frame::parse(b"#dmr").is_err());
-    assert!(Frame::parse(b"dmr\n").is_err());
-    assert!(Frame::parse(b"#d\n").is_err());
-    assert!(Frame::parse(b"#dmr\n#dmr\n").is_err());
+    [
+        (b"#dmr".as_slice(), FrameError::MissingLineFeed),
+        (b"dmr\n".as_slice(), FrameError::InvalidStart),
+        (b"#d\n".as_slice(), FrameError::InvalidCommand),
+        (b"#dmr\n#dmr\n".as_slice(), FrameError::TrailingData),
+    ]
+    .into_iter()
+    .for_each(|(bytes, expected_error)| {
+        assert_eq!(Frame::parse(bytes), Err(expected_error));
+    });
 }
 
 #[test]

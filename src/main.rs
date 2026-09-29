@@ -1,9 +1,9 @@
 use std::time::Duration;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use clap::{Args, Parser, Subcommand};
-use updraft_bluetooth::{ProbeOptions, probe};
-use updraft_protocol::{ControlCommand, ReadCommand};
+use updraft_bluetooth::{DiscoveredDevice, ProbeMode, ProbeOptions, ProbeResult, ReadReply, probe};
+use updraft_protocol::{ControlCommand, Frame, ReadCommand};
 
 #[derive(Debug, Parser)]
 #[command(name = "updraft", about = "GAF attic fan protocol probe")]
@@ -33,7 +33,10 @@ enum ProbeTransport {
 #[derive(Debug, Args)]
 struct BleOptions {
     /// Scan only. Do not connect or send any protocol request.
-    #[arg(long)]
+    #[arg(
+        long,
+        conflicts_with_all = ["device_id", "set_auto_thresholds_tenths", "set_timer_minutes"]
+    )]
     scan_only: bool,
 
     /// Peripheral ID printed by a scan-only run. Required if multiple fans are found.
@@ -81,31 +84,66 @@ async fn main() -> Result<()> {
 async fn run_ble_probe(options: BleOptions) -> Result<()> {
     let show_identity = options.show_identity;
     let control_command = match options.set_auto_thresholds_tenths {
-        Some(values) => Some(ControlCommand::SetAutomaticThresholds {
-            temperature_tenths_f: values[0],
-            humidity_tenths_percent: values[1],
-        }),
+        Some(values) => {
+            let [temperature_tenths_f, humidity_tenths_percent] = values
+                .try_into()
+                .expect("clap requires exactly two automatic thresholds");
+            Some(ControlCommand::SetAutomaticThresholds {
+                temperature_tenths_f,
+                humidity_tenths_percent,
+            })
+        }
         None => options
             .set_timer_minutes
             .map(|duration_minutes| ControlCommand::SetTimer { duration_minutes }),
     };
+    let mode = match options.scan_only {
+        true => ProbeMode::Scan,
+        false => ProbeMode::Query {
+            device_id: options.device_id,
+            control_command,
+        },
+    };
     let result = probe(ProbeOptions {
         scan_duration: Duration::from_secs(options.scan_seconds),
         response_timeout: Duration::from_secs(options.response_timeout_seconds),
-        device_id: options.device_id,
-        scan_only: options.scan_only,
-        control_command,
+        mode,
     })
     .await
     .context("BLE probe failed")?;
 
-    if result.devices.is_empty() {
-        println!("No nearby BLE device advertising GAF service 00FF was found.");
-        return Ok(());
+    match result {
+        ProbeResult::NoDevices => {
+            println!("No nearby BLE device advertising GAF service 00FF was found.");
+        }
+        ProbeResult::Discovered { devices } => {
+            print_devices(&devices);
+            println!("Scan-only mode: no connection or protocol request was made.");
+        }
+        ProbeResult::Ambiguous { devices } => {
+            print_devices(&devices);
+            println!(
+                "More than one candidate found. Re-run with --device-id <id> to query one fan."
+            );
+        }
+        ProbeResult::Queried {
+            devices,
+            replies,
+            control_reply,
+        } => {
+            print_devices(&devices);
+            print_control_reply(control_reply.as_ref());
+            print_replies(&replies, show_identity);
+            print_control_readback(control_command, &replies);
+        }
     }
 
-    println!("Found {} GAF BLE device(s):", result.devices.len());
-    for (index, device) in result.devices.iter().enumerate() {
+    Ok(())
+}
+
+fn print_devices(devices: &[DiscoveredDevice]) {
+    println!("Found {} GAF BLE device(s):", devices.len());
+    devices.iter().enumerate().for_each(|(index, device)| {
         println!(
             "  [{index}] id={} name={} rssi={}",
             device.id,
@@ -114,25 +152,14 @@ async fn run_ble_probe(options: BleOptions) -> Result<()> {
                 .rssi
                 .map_or_else(|| "(unknown)".to_owned(), |rssi| format!("{rssi} dBm")),
         );
-    }
+    });
+}
 
-    if options.scan_only {
-        println!("Scan-only mode: no connection or protocol request was made.");
-        return Ok(());
-    }
-    if result.replies.is_empty() && result.devices.len() > 1 {
-        println!("More than one candidate found. Re-run with --device-id <id> to query one fan.");
-        return Ok(());
-    }
-    if result.replies.is_empty() {
-        bail!("a GAF peripheral was found, but no read responses were collected");
-    }
-
-    if let Some(response) = result.control_reply {
-        let acknowledgement = if response.payload() == b"0" {
-            "success"
-        } else {
-            "unrecognized/error"
+fn print_control_reply(response: Option<&Frame>) {
+    if let Some(response) = response {
+        let acknowledgement = match response.payload() {
+            b"0" => "success",
+            _ => "unrecognized/error",
         };
         println!(
             "control acknowledgement: {acknowledgement} ({} payload={})",
@@ -140,8 +167,10 @@ async fn run_ble_probe(options: BleOptions) -> Result<()> {
             String::from_utf8_lossy(response.payload()),
         );
     }
+}
 
-    for reply in &result.replies {
+fn print_replies(replies: &[ReadReply], show_identity: bool) {
+    replies.iter().for_each(|reply| {
         let payload = if reply.request == ReadCommand::Identity && !show_identity {
             format!("<redacted; {} bytes>", reply.response.payload().len())
         } else {
@@ -157,49 +186,41 @@ async fn run_ble_probe(options: BleOptions) -> Result<()> {
             String::from_utf8_lossy(reply.request.frame()).trim_end(),
             String::from_utf8_lossy(&reply.response.command()),
         );
-    }
+    });
+}
 
+fn print_control_readback(control_command: Option<ControlCommand>, replies: &[ReadReply]) {
     match control_command {
-        Some(command @ ControlCommand::SetAutomaticThresholds { .. }) => {
-            let expected = command.frame();
-            let expected_payload = &expected[4..expected.len() - 1];
-            if let Some(reply) = result
-                .replies
+        Some(ControlCommand::SetAutomaticThresholds {
+            temperature_tenths_f,
+            humidity_tenths_percent,
+        }) => {
+            let expected_payload =
+                format!("{temperature_tenths_f:04X}{humidity_tenths_percent:04X}");
+            let status = replies
                 .iter()
                 .find(|reply| reply.request == ReadCommand::AutoThresholds)
-            {
-                let matches = reply
-                    .response
-                    .payload()
-                    .eq_ignore_ascii_case(expected_payload);
-                println!(
-                    "automatic threshold readback: {}",
-                    if matches {
+                .map(|reply| {
+                    if reply
+                        .response
+                        .payload()
+                        .eq_ignore_ascii_case(expected_payload.as_bytes())
+                    {
                         "matches request"
                     } else {
                         "differs from request"
                     }
-                );
-            }
+                })
+                .unwrap_or("unavailable");
+            println!("automatic threshold readback: {status}");
         }
         Some(ControlCommand::SetTimer { duration_minutes }) => {
-            if let Some(reply) = result
-                .replies
+            let timer = replies
                 .iter()
                 .find(|reply| reply.request == ReadCommand::Timer)
-            {
-                let timer = std::str::from_utf8(reply.response.payload())
-                    .ok()
-                    .filter(|payload| {
-                        payload.len() == 8 && payload.bytes().all(|byte| byte.is_ascii_hexdigit())
-                    })
-                    .and_then(|payload| {
-                        Some((
-                            u16::from_str_radix(&payload[..4], 16).ok()?,
-                            u16::from_str_radix(&payload[4..], 16).ok()?,
-                        ))
-                    });
-                if let Some((remaining_minutes, original_minutes)) = timer {
+                .and_then(|reply| parse_timer_readback(reply.response.payload()));
+            match timer {
+                Some((remaining_minutes, original_minutes)) => {
                     let matches = original_minutes == duration_minutes
                         && remaining_minutes <= duration_minutes;
                     println!(
@@ -210,13 +231,57 @@ async fn run_ble_probe(options: BleOptions) -> Result<()> {
                             "differs from request"
                         }
                     );
-                } else {
+                }
+                None => {
                     println!("timer readback: unrecognized payload");
                 }
             }
         }
         None => {}
     }
+}
 
-    Ok(())
+fn parse_timer_readback(payload: &[u8]) -> Option<(u16, u16)> {
+    std::str::from_utf8(payload)
+        .ok()
+        .filter(|payload| {
+            payload.len() == 8 && payload.bytes().all(|byte| byte.is_ascii_hexdigit())
+        })
+        .and_then(|payload| {
+            let (remaining, original) = payload.split_at(4);
+            Some((
+                u16::from_str_radix(remaining, 16).ok()?,
+                u16::from_str_radix(original, 16).ok()?,
+            ))
+        })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Cli, Parser};
+
+    #[test]
+    fn scan_only_rejects_control_settings() {
+        [
+            &[
+                "updraft",
+                "probe",
+                "ble",
+                "--scan-only",
+                "--set-timer-minutes",
+                "1",
+            ][..],
+            &[
+                "updraft",
+                "probe",
+                "ble",
+                "--scan-only",
+                "--set-auto-thresholds-tenths",
+                "1050",
+                "300",
+            ][..],
+        ]
+        .into_iter()
+        .for_each(|args| assert!(Cli::try_parse_from(args).is_err()));
+    }
 }

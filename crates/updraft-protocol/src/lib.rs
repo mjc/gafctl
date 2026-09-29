@@ -101,30 +101,23 @@ pub struct Frame {
 impl Frame {
     /// Parse one complete line, retaining the payload without interpretation.
     pub fn parse(bytes: &[u8]) -> Result<Self, FrameError> {
-        if bytes.first() != Some(&b'#') {
-            return Err(FrameError::InvalidStart);
-        }
-        if bytes.last() != Some(&b'\n') {
-            return Err(FrameError::MissingLineFeed);
-        }
-        if bytes[..bytes.len() - 1].contains(&b'\n') {
-            return Err(FrameError::TrailingData);
-        }
-        if bytes.len() < 5 {
-            return Err(FrameError::InvalidCommand);
-        }
+        let body = bytes.strip_prefix(b"#").ok_or(FrameError::InvalidStart)?;
+        let body = body
+            .strip_suffix(b"\n")
+            .ok_or(FrameError::MissingLineFeed)?;
 
-        let command: [u8; 3] = bytes[1..4]
-            .try_into()
-            .map_err(|_| FrameError::InvalidCommand)?;
-        if !command.iter().all(u8::is_ascii_alphabetic) {
-            return Err(FrameError::InvalidCommand);
+        match (body.contains(&b'\n'), body.split_at_checked(3)) {
+            (true, _) => Err(FrameError::TrailingData),
+            (false, Some((&[a, b, c], payload)))
+                if [a, b, c].iter().all(u8::is_ascii_alphabetic) =>
+            {
+                Ok(Self {
+                    command: [a, b, c],
+                    payload: payload.to_vec(),
+                })
+            }
+            _ => Err(FrameError::InvalidCommand),
         }
-
-        Ok(Self {
-            command,
-            payload: bytes[4..bytes.len() - 1].to_vec(),
-        })
     }
 
     /// Return the three-byte command identifier.
@@ -161,27 +154,30 @@ impl FrameDecoder {
     /// Add transport bytes and return every complete frame now available.
     pub fn push(&mut self, bytes: &[u8]) -> Result<Vec<Frame>, FrameError> {
         const MAX_FRAME_LEN: usize = 1024;
-        let mut frames = Vec::new();
 
-        for byte in bytes {
-            self.pending.push(*byte);
-            if self.pending.len() > MAX_FRAME_LEN {
-                self.pending.clear();
-                return Err(FrameError::TooLong);
-            }
-            if *byte == b'\n' {
-                match Frame::parse(&self.pending) {
-                    Ok(frame) => frames.push(frame),
-                    Err(error) => {
+        let frames = bytes.split_inclusive(|byte| *byte == b'\n').try_fold(
+            Vec::new(),
+            |mut frames, chunk| {
+                self.pending.extend_from_slice(chunk);
+                match (self.pending.len() > MAX_FRAME_LEN, chunk.ends_with(b"\n")) {
+                    (true, _) => Err(FrameError::TooLong),
+                    (false, true) => {
+                        frames.push(Frame::parse(&self.pending)?);
                         self.pending.clear();
-                        return Err(error);
+                        Ok(frames)
                     }
+                    (false, false) => Ok(frames),
                 }
+            },
+        );
+
+        match frames {
+            Ok(frames) => Ok(frames),
+            Err(error) => {
                 self.pending.clear();
+                Err(error)
             }
         }
-
-        Ok(frames)
     }
 }
 
