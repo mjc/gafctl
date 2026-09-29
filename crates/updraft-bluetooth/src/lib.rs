@@ -20,6 +20,14 @@ pub const GAF_SERVICE_UUID: Uuid = Uuid::from_u128(0x000000ff_0000_1000_8000_008
 /// GAF's observed command/response BLE characteristic UUID.
 pub const GAF_CHARACTERISTIC_UUID: Uuid = Uuid::from_u128(0x0000ff01_0000_1000_8000_00805f9b34fb);
 
+const STATE_READS: [ReadCommand; 5] = [
+    ReadCommand::Identity,
+    ReadCommand::Mode,
+    ReadCommand::Sensors,
+    ReadCommand::AutoThresholds,
+    ReadCommand::Timer,
+];
+
 /// Settings for one GAF BLE inspection.
 #[derive(Clone, Debug)]
 pub struct ProbeOptions {
@@ -126,20 +134,20 @@ struct ReadySession<'connected, 'device> {
 /// read-only queries plus an optional ordinary control-setting write.
 pub async fn probe(options: ProbeOptions) -> Result<ProbeResult> {
     let candidates = discover_candidates(options.scan_duration).await?;
-    let devices = candidates
-        .iter()
-        .map(|candidate| candidate.device.clone())
-        .collect();
 
     match options.mode {
-        ProbeMode::Scan => Ok(summarize_scan(devices)),
+        ProbeMode::Scan => Ok(summarize_scan(
+            candidates
+                .into_iter()
+                .map(|candidate| candidate.device)
+                .collect(),
+        )),
         ProbeMode::Query {
             device_id,
             control_command,
         } => {
             query_selected_device(
-                &candidates,
-                devices,
+                candidates,
                 device_id.as_deref(),
                 control_command,
                 options.response_timeout,
@@ -179,21 +187,21 @@ async fn discover_candidates(scan_duration: Duration) -> Result<Vec<Candidate>> 
 }
 
 async fn collect_advertised_candidates(adapter: &Adapter) -> Result<Vec<Candidate>> {
-    let candidates = stream::iter(
+    let mut seen = HashSet::new();
+    stream::iter(
         adapter
             .peripherals()
             .await
             .context("list BLE peripherals")?,
     )
     .then(read_gaf_advertisement)
-    .try_filter_map(|candidate| future::ready(Ok(candidate)))
+    .try_filter_map(|candidate| {
+        future::ready(Ok(
+            candidate.filter(|candidate| seen.insert(candidate.peripheral.id()))
+        ))
+    })
     .try_collect::<Vec<_>>()
-    .await?;
-    let mut seen = HashSet::new();
-    Ok(candidates
-        .into_iter()
-        .filter(|candidate| seen.insert(candidate.device.id.clone()))
-        .collect())
+    .await
 }
 
 async fn read_gaf_advertisement(peripheral: Peripheral) -> Result<Option<Candidate>> {
@@ -230,20 +238,27 @@ fn select_candidate<'a>(
 }
 
 async fn query_selected_device(
-    candidates: &[Candidate],
-    devices: Vec<DiscoveredDevice>,
+    candidates: Vec<Candidate>,
     device_id: Option<&str>,
     control_command: Option<ControlCommand>,
     response_timeout: Duration,
 ) -> Result<ProbeResult> {
-    match select_candidate(candidates, device_id)? {
+    match select_candidate(&candidates, device_id)? {
         CandidateSelection::NoDevices => Ok(ProbeResult::NoDevices),
-        CandidateSelection::Ambiguous => Ok(ProbeResult::Ambiguous { devices }),
+        CandidateSelection::Ambiguous => Ok(ProbeResult::Ambiguous {
+            devices: candidates
+                .into_iter()
+                .map(|candidate| candidate.device)
+                .collect(),
+        }),
         CandidateSelection::Chosen(candidate) => {
             let (replies, control_reply) =
                 query_peripheral(&candidate.peripheral, response_timeout, control_command).await?;
             Ok(ProbeResult::Queried {
-                devices,
+                devices: candidates
+                    .into_iter()
+                    .map(|candidate| candidate.device)
+                    .collect(),
                 replies,
                 control_reply,
             })
@@ -365,28 +380,22 @@ impl<'connected, 'device> ReadySession<'connected, 'device> {
     }
 
     async fn read_state(self) -> Result<Vec<ReadReply>> {
-        let (_, replies) = stream::iter([
-            ReadCommand::Identity,
-            ReadCommand::Mode,
-            ReadCommand::Sensors,
-            ReadCommand::AutoThresholds,
-            ReadCommand::Timer,
-        ])
-        .map(Ok::<_, anyhow::Error>)
-        .try_fold(
-            (self, Vec::new()),
-            |(mut session, mut replies), request| async move {
-                let response = session
-                    .exchange(request.frame(), request.response_id(), "state query")
-                    .await
-                    .with_context(|| {
-                        format!("waiting for {} response", request.frame().escape_ascii())
-                    })?;
-                replies.push(ReadReply { request, response });
-                Ok((session, replies))
-            },
-        )
-        .await?;
+        let (_, replies) = stream::iter(STATE_READS)
+            .map(Ok::<_, anyhow::Error>)
+            .try_fold(
+                (self, Vec::with_capacity(STATE_READS.len())),
+                |(mut session, mut replies), request| async move {
+                    let response = session
+                        .exchange(request.frame(), request.response_id(), "state query")
+                        .await
+                        .with_context(|| {
+                            format!("waiting for {} response", request.frame().escape_ascii())
+                        })?;
+                    replies.push(ReadReply { request, response });
+                    Ok((session, replies))
+                },
+            )
+            .await?;
         Ok(replies)
     }
 

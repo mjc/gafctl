@@ -172,4 +172,25 @@ fn frame_decoder_rejects_oversized_complete_and_partial_frames() {
 
     assert_eq!(decoder.push(&oversized_frame), Err(FrameError::TooLong));
     assert_eq!(decoder.push(&vec![b'x'; 1025]), Err(FrameError::TooLong));
+    assert_eq!(
+        decoder.push(b"#dmr0\n").unwrap(),
+        vec![Frame::parse(b"#dmr0\n").unwrap()]
+    );
+}
+
+#[test]
+fn frame_decoder_accepts_maximum_length_and_recovers_after_malformed_partial() {
+    let mut decoder = FrameDecoder::default();
+    let maximum_frame = [b"#sdr".as_slice(), &vec![b'x'; 1019], b"\n"].concat();
+
+    assert_eq!(
+        decoder.push(&maximum_frame).unwrap()[0].payload().len(),
+        1019
+    );
+    assert!(decoder.push(b"#x").unwrap().is_empty());
+    assert_eq!(decoder.push(b"!\n"), Err(FrameError::InvalidCommand));
+    assert_eq!(
+        decoder.push(b"#dmr0\n").unwrap(),
+        vec![Frame::parse(b"#dmr0\n").unwrap()]
+    );
 }

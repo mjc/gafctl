@@ -1,4 +1,4 @@
-use std::time::Duration;
+use std::{fmt, time::Duration};
 
 use anyhow::{Context, Result};
 use clap::{Args, Parser, Subcommand};
@@ -162,7 +162,7 @@ fn print_probe_result(
             }
             print_replies(&replies, show_identity);
             if let Some(command) = requested_control {
-                println!("{}", format_control_readback(command, &replies));
+                println!("{}", compare_control_readback(command, &replies));
             }
         }
     }
@@ -175,9 +175,7 @@ fn print_devices(devices: &[DiscoveredDevice]) {
             "  [{index}] id={} name={} rssi={}",
             device.id,
             device.name.as_deref().unwrap_or("(not advertised)"),
-            device
-                .rssi
-                .map_or_else(|| "(unknown)".to_owned(), |rssi| format!("{rssi} dBm")),
+            SignalStrength(device.rssi),
         );
     });
 }
@@ -196,7 +194,7 @@ fn print_control_acknowledgement(response: &Frame) {
 
 fn print_replies(replies: &[ReadReply], show_identity: bool) {
     replies.iter().for_each(|reply| {
-        let payload = format_reply_payload(reply, show_identity);
+        let payload = display_reply_payload(reply, show_identity);
         println!(
             "{} -> {} payload_hex={payload}",
             String::from_utf8_lossy(reply.request.frame()).trim_end(),
@@ -205,27 +203,75 @@ fn print_replies(replies: &[ReadReply], show_identity: bool) {
     });
 }
 
-fn format_reply_payload(reply: &ReadReply, show_identity: bool) -> String {
+fn display_reply_payload(reply: &ReadReply, show_identity: bool) -> ReplyPayload<'_> {
     match (reply.request, show_identity) {
-        (ReadCommand::Identity, false) => {
-            format!("<redacted; {} bytes>", reply.response.payload().len())
-        }
-        _ => reply
-            .response
-            .payload()
-            .iter()
-            .map(|byte| format!("{byte:02X}"))
-            .collect(),
+        (ReadCommand::Identity, false) => ReplyPayload::Redacted(reply.response.payload().len()),
+        _ => ReplyPayload::Hex(reply.response.payload()),
     }
 }
 
-fn format_control_readback(command: ControlCommand, replies: &[ReadReply]) -> String {
+struct SignalStrength(Option<i16>);
+
+impl fmt::Display for SignalStrength {
+    fn fmt(&self, output: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self.0 {
+            Some(rssi) => write!(output, "{rssi} dBm"),
+            None => output.write_str("(unknown)"),
+        }
+    }
+}
+
+enum ReplyPayload<'a> {
+    Redacted(usize),
+    Hex(&'a [u8]),
+}
+
+impl fmt::Display for ReplyPayload<'_> {
+    fn fmt(&self, output: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Redacted(length) => write!(output, "<redacted; {length} bytes>"),
+            Self::Hex(bytes) => bytes
+                .iter()
+                .try_for_each(|byte| write!(output, "{byte:02X}")),
+        }
+    }
+}
+
+enum ControlReadback {
+    Thresholds(&'static str),
+    Timer {
+        actual: TimerState,
+        matches_request: bool,
+    },
+    UnrecognizedTimer,
+}
+
+impl fmt::Display for ControlReadback {
+    fn fmt(&self, output: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Thresholds(status) => write!(output, "automatic threshold readback: {status}"),
+            Self::Timer {
+                actual,
+                matches_request,
+            } => write!(
+                output,
+                "timer readback: remaining={} minute(s), original={} minute(s); {}",
+                actual.remaining.value(),
+                actual.original.value(),
+                describe_readback_match(*matches_request),
+            ),
+            Self::UnrecognizedTimer => output.write_str("timer readback: unrecognized payload"),
+        }
+    }
+}
+
+fn compare_control_readback(command: ControlCommand, replies: &[ReadReply]) -> ControlReadback {
     match command {
-        ControlCommand::SetAutomaticThresholds(requested) => format_threshold_readback(
+        ControlCommand::SetAutomaticThresholds(requested) => compare_threshold_readback(
             requested,
             find_readback_payload(replies, ReadCommand::AutoThresholds),
         ),
-        ControlCommand::SetTimer(requested) => format_timer_readback(
+        ControlCommand::SetTimer(requested) => compare_timer_readback(
             requested,
             find_readback_payload(replies, ReadCommand::Timer),
         ),
@@ -239,27 +285,26 @@ fn find_readback_payload(replies: &[ReadReply], request: ReadCommand) -> Option<
         .map(|reply| reply.response.payload())
 }
 
-fn format_threshold_readback(requested: AutomaticThresholds, payload: Option<&[u8]>) -> String {
+fn compare_threshold_readback(
+    requested: AutomaticThresholds,
+    payload: Option<&[u8]>,
+) -> ControlReadback {
     let status = match payload.map(AutomaticThresholds::parse) {
         Some(Ok(actual)) => describe_readback_match(actual == requested),
         Some(Err(_)) => "unrecognized payload",
         None => "unavailable",
     };
-    format!("automatic threshold readback: {status}")
+    ControlReadback::Thresholds(status)
 }
 
-fn format_timer_readback(requested: Minutes, payload: Option<&[u8]>) -> String {
+fn compare_timer_readback(requested: Minutes, payload: Option<&[u8]>) -> ControlReadback {
     let timer = payload.and_then(|payload| TimerState::parse(payload).ok());
     match timer {
-        Some(actual) => {
-            format!(
-                "timer readback: remaining={} minute(s), original={} minute(s); {}",
-                actual.remaining.value(),
-                actual.original.value(),
-                describe_readback_match(actual.matches_requested_duration(requested)),
-            )
-        }
-        None => "timer readback: unrecognized payload".to_owned(),
+        Some(actual) => ControlReadback::Timer {
+            matches_request: actual.matches_requested_duration(requested),
+            actual,
+        },
+        None => ControlReadback::UnrecognizedTimer,
     }
 }
 
@@ -276,6 +321,25 @@ mod tests {
     use super::*;
 
     #[test]
+    fn borrowed_payload_display_preserves_hex_and_identity_redaction() {
+        let identity = ReadReply {
+            request: ReadCommand::Identity,
+            response: Frame::parse(b"#idrAB\n").unwrap(),
+        };
+        assert_eq!(
+            display_reply_payload(&identity, false).to_string(),
+            "<redacted; 2 bytes>"
+        );
+        assert_eq!(display_reply_payload(&identity, true).to_string(), "4142");
+
+        let sensors = ReadReply {
+            request: ReadCommand::Sensors,
+            response: Frame::parse(b"#sdr\x00\xAF\n").unwrap(),
+        };
+        assert_eq!(display_reply_payload(&sensors, false).to_string(), "00AF");
+    }
+
+    #[test]
     fn threshold_report_distinguishes_values_from_missing_or_invalid_data() {
         let requested = AutomaticThresholds {
             temperature: TemperatureTenthsF::new(1050),
@@ -290,7 +354,7 @@ mod tests {
         .into_iter()
         .for_each(|(payload, status)| {
             assert_eq!(
-                format_threshold_readback(requested, payload),
+                compare_threshold_readback(requested, payload).to_string(),
                 format!("automatic threshold readback: {status}"),
             );
         });
@@ -307,14 +371,14 @@ mod tests {
         .into_iter()
         .for_each(|(payload, remaining, original, status)| {
             assert_eq!(
-                format_timer_readback(requested, Some(payload)),
+                compare_timer_readback(requested, Some(payload)).to_string(),
                 format!(
                     "timer readback: remaining={remaining} minute(s), original={original} minute(s); {status}",
                 ),
             );
         });
         assert_eq!(
-            format_timer_readback(requested, Some(b"bad data")),
+            compare_timer_readback(requested, Some(b"bad data")).to_string(),
             "timer readback: unrecognized payload",
         );
     }

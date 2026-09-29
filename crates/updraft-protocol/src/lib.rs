@@ -212,7 +212,7 @@ impl ControlCommand {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Frame {
     command: [u8; 3],
-    payload: Vec<u8>,
+    payload: Box<[u8]>,
 }
 
 impl Frame {
@@ -230,7 +230,7 @@ impl Frame {
             {
                 Ok(Self {
                     command: [a, b, c],
-                    payload: payload.to_vec(),
+                    payload: payload.into(),
                 })
             }
             _ => Err(FrameError::InvalidCommand),
@@ -274,16 +274,25 @@ impl FrameDecoder {
 
         let frames = bytes.split_inclusive(|byte| *byte == b'\n').try_fold(
             Vec::new(),
-            |mut frames, chunk| {
-                self.pending.extend_from_slice(chunk);
-                match (self.pending.len() > MAX_FRAME_LEN, chunk.ends_with(b"\n")) {
-                    (true, _) => Err(FrameError::TooLong),
-                    (false, true) => {
-                        frames.push(Frame::parse(&self.pending)?);
-                        self.pending.clear();
-                        Ok(frames)
-                    }
-                    (false, false) => Ok(frames),
+            |mut frames, chunk| match (
+                chunk.len() > MAX_FRAME_LEN.saturating_sub(self.pending.len()),
+                chunk.ends_with(b"\n"),
+                self.pending.is_empty(),
+            ) {
+                (true, _, _) => Err(FrameError::TooLong),
+                (false, true, true) => {
+                    frames.push(Frame::parse(chunk)?);
+                    Ok(frames)
+                }
+                (false, true, false) => {
+                    self.pending.extend_from_slice(chunk);
+                    frames.push(Frame::parse(&self.pending)?);
+                    self.pending.clear();
+                    Ok(frames)
+                }
+                (false, false, _) => {
+                    self.pending.extend_from_slice(chunk);
+                    Ok(frames)
                 }
             },
         );
