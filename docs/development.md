@@ -23,13 +23,13 @@ Versions are declared in `[workspace.dependencies]`. Each crate opts into the de
 | Protocol tests | `proptest` | Generated valid/invalid inputs and codec round trips once the format is known |
 | API tests | `tower`, `http-body-util` | Exercise the Axum router and inspect response bodies without opening a port |
 
-[Axum](https://docs.rs/axum/0.8.9/axum/) fits the Tokio runtime and Tower middleware. HTTP/JSON is the planned interface between the service and a thin Home Assistant adapter. Endpoint paths and device schema are still being defined.
+[Axum](https://docs.rs/axum/0.8.9/axum/) runs on Tokio and supports Tower middleware. The planned service API uses HTTP/JSON. Endpoint paths and the device schema are not defined.
 
-[btleplug](https://github.com/deviceplug/btleplug) provides the GAF Wi-Fi Vent app's Bluetooth transport. It supports BLE central operation on macOS and Linux; it does not support Bluetooth Classic. Device captures still need to confirm GAF's services, characteristics, and handshake. Linux builds need D-Bus development files, included by devenv; runtime access needs BlueZ and a usable adapter. On macOS, the process needs Bluetooth permission before device operations can work.
+[btleplug](https://github.com/deviceplug/btleplug) provides BLE Central on macOS and Linux. Updraft uses it with the GAF Wi-Fi Vent service `00FF` and characteristic `FF01`. Linux builds need D-Bus development files and BlueZ at runtime. macOS requires Bluetooth permission.
 
-Tokio provides TCP/UDP support. The GAF Wi-Fi Vent accepts connections on its access point; home-LAN connectivity is unverified.
+Tokio provides TCP/UDP support. The GAF Wi-Fi Vent accepts connections on its access point. Home-LAN access is unverified.
 
-## Add when needed
+## Optional dependencies
 
 - `reqwest` with rustls for a verified HTTP device API or a later QuickConnect cloud backend.
 - `tokio-rustls` for a verified TLS socket protocol.
@@ -39,7 +39,7 @@ Tokio provides TCP/UDP support. The GAF Wi-Fi Vent accepts connections on its ac
 - OpenAPI generation once the local API schema exists.
 - Fuzzing once there is a parser, and benchmarks once there is a measured performance question.
 
-Add these dependencies when their features enter implementation. The workspace does not use AWS SDK, a database, or MQTT.
+Add dependencies when implementing these features. AWS SDK, database, and MQTT support are not used.
 
 ## Checks
 
@@ -53,9 +53,9 @@ cargo nextest run --workspace --all-targets --locked
 cargo test --workspace --doc --locked
 ```
 
-`devenv tasks run check:test` runs the workspace test targets with nextest. It fails when no tests are discovered. `devenv tasks run check:all` runs formatting, Clippy, all-target nextest, and doctests. Nextest does not run doctests, so they have their own command. Protocol frame and control-command encoding have focused integration tests. The nextest CI profile disables fail-fast and writes JUnit results under `target/nextest/ci/`.
+`check:test` runs nextest and fails when it finds no tests. `check:all` runs formatting, Clippy, nextest, and doctests. Nextest does not run doctests. The CI profile disables fail-fast and writes JUnit results under `target/nextest/ci/`.
 
-Useful tools as implementation grows:
+Tools:
 
 ```sh
 bacon clippy
@@ -65,4 +65,4 @@ cargo machete
 cargo tree --duplicates
 ```
 
-Run coverage for the code paths with tests. Review unused-dependency reports as dependencies enter use. `cargo deny check advisories sources` checks dependency advisories and sources; the license policy is unset.
+Review unused-dependency reports as code changes.
