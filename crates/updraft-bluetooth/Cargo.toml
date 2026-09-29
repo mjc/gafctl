@@ -7,6 +7,7 @@ description = "Bluetooth transport for GAF Master Flow attic fans"
 [dependencies]
 anyhow.workspace = true
 btleplug.workspace = true
+bytes.workspace = true
 futures-util.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["sync", "time"] }

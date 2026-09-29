@@ -10,9 +10,10 @@ use btleplug::{
     },
     platform::{Adapter, Manager, Peripheral},
 };
+use bytes::Bytes;
 use futures_util::{Stream, StreamExt, TryStreamExt, future, stream};
 use tokio::time::{sleep, timeout};
-use updraft_protocol::{ControlCommand, Frame, FrameDecoder, ReadCommand};
+use updraft_protocol::{ControlCommand, Frame, FrameDecoder, FrameError, ReadCommand};
 use uuid::Uuid;
 
 /// GAF's observed primary BLE service UUID.
@@ -410,48 +411,35 @@ impl<'connected, 'device> ReadySession<'connected, 'device> {
             .write(&self.characteristic, frame, self.write_type)
             .await
             .with_context(|| format!("send {operation} {}", frame.escape_ascii()))?;
-        await_response(
-            &mut self.notifications,
-            &mut self.decoder,
-            response_id,
-            self.response_timeout,
-        )
-        .await
-    }
-}
 
-async fn await_response(
-    notifications: &mut (impl StreamExt<Item = btleplug::api::ValueNotification> + Unpin),
-    decoder: &mut FrameDecoder,
-    response_id: [u8; 3],
-    response_timeout: Duration,
-) -> Result<Frame<'static>> {
-    timeout(
-        response_timeout,
-        notifications
+        let decoder = &mut self.decoder;
+        let mut matching_responses = self
+            .notifications
             .by_ref()
             .filter(|notification| future::ready(notification.uuid == GAF_CHARACTERISTIC_UUID))
-            .map(|notification| {
-                decode_matching_response(decoder, &notification.value, response_id)
-                    .map_err(anyhow::Error::from)
-            })
-            .try_filter_map(|frame| future::ready(Ok::<_, anyhow::Error>(frame)))
-            .try_next(),
-    )
-    .await
-    .context("timed out waiting for matching BLE response")??
-    .context("BLE notification stream ended")
+            .filter_map(|notification| {
+                future::ready(
+                    decode_matching_response(decoder, notification.value.into(), response_id)
+                        .transpose(),
+                )
+            });
+        let response = timeout(self.response_timeout, matching_responses.try_next())
+            .await
+            .context("timed out waiting for matching BLE response")?;
+
+        response?.context("BLE notification stream ended")
+    }
 }
 
 fn decode_matching_response(
     decoder: &mut FrameDecoder,
-    bytes: &[u8],
+    bytes: Bytes,
     response_id: [u8; 3],
-) -> Result<Option<Frame<'static>>, updraft_protocol::FrameError> {
+) -> Result<Option<Frame<'static>>, FrameError> {
     let mut matching = None;
     decoder.push(bytes, |frame| {
         if matching.is_none() && frame.command() == response_id {
-            matching = Some(frame.into_owned());
+            matching = Some(frame);
         }
     })?;
     Ok(matching)
@@ -460,21 +448,22 @@ fn decode_matching_response(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use updraft_protocol::FrameError;
 
     #[test]
     fn first_matching_response_survives_later_notifications() {
         let mut decoder = FrameDecoder::default();
         assert_eq!(
-            decode_matching_response(&mut decoder, b"#dm", *b"dmr").unwrap(),
+            decode_matching_response(&mut decoder, Bytes::from_static(b"#dm"), *b"dmr").unwrap(),
             None
         );
-        let response = decode_matching_response(&mut decoder, b"ran\n#dmraf\n", *b"dmr")
-            .unwrap()
-            .unwrap();
-        decode_matching_response(&mut decoder, b"#atr", *b"dmr").unwrap();
+        let response =
+            decode_matching_response(&mut decoder, Bytes::from_static(b"ran\n#dmraf\n"), *b"dmr")
+                .unwrap()
+                .unwrap();
+        decode_matching_response(&mut decoder, Bytes::from_static(b"#atr"), *b"dmr").unwrap();
         assert_eq!(
-            decode_matching_response(&mut decoder, b"041a012c\n", *b"dmr").unwrap(),
+            decode_matching_response(&mut decoder, Bytes::from_static(b"041a012c\n"), *b"dmr")
+                .unwrap(),
             None
         );
         assert_eq!(response.as_bytes(), b"#dmran\n");
@@ -483,7 +472,22 @@ mod tests {
     #[test]
     fn malformed_trailing_frame_invalidates_matching_response() {
         let mut decoder = FrameDecoder::default();
-        let error = decode_matching_response(&mut decoder, b"#dmran\nx\n", *b"dmr").unwrap_err();
+        let error =
+            decode_matching_response(&mut decoder, Bytes::from_static(b"#dmran\nx\n"), *b"dmr")
+                .unwrap_err();
         assert_eq!(error, FrameError::InvalidStart);
+    }
+
+    #[test]
+    fn matching_response_shares_notification_storage() {
+        let notification = b"#amr0\n#dmran\n".to_vec();
+        let response_pointer = notification[6..].as_ptr();
+        let response =
+            decode_matching_response(&mut FrameDecoder::default(), notification.into(), *b"dmr")
+                .unwrap()
+                .unwrap();
+
+        assert_eq!(response.as_bytes(), b"#dmran\n");
+        assert_eq!(response.as_bytes().as_ptr(), response_pointer);
     }
 }

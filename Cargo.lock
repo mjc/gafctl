@@ -1429,6 +1429,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "btleplug",
+ "bytes",
  "futures-util",
  "thiserror",
  "tokio",
@@ -1441,6 +1442,7 @@ dependencies = [
 name = "updraft-protocol"
 version = "0.1.0"
 dependencies = [
+ "bytes",
  "proptest",
  "serde",
  "thiserror",

@@ -1,3 +1,4 @@
+use bytes::Bytes;
 use updraft_protocol::{
     AutomaticThresholds, ControlCommand, Frame, FrameDecoder, FrameError, HumidityTenthsPercent,
     Minutes, ReadCommand, ReadbackError, TemperatureTenthsF, TimerState,
@@ -119,9 +120,27 @@ fn parsed_frame_borrows_input_until_explicitly_owned() {
     let owned_pointer = retained.as_bytes().as_ptr();
     let retained = retained.into_owned();
     assert_eq!(retained.as_bytes().as_ptr(), owned_pointer);
+    let clone = retained.clone();
+    assert_eq!(clone.as_bytes().as_ptr(), retained.as_bytes().as_ptr());
+    assert_eq!(retained, Frame::parse(b"#sdr00AF7F2A\n").unwrap());
 
     input[4] = b'X';
     assert_eq!(retained.as_bytes(), b"#sdr00AF7F2A\n");
+}
+
+#[test]
+fn shared_frame_validates_without_copying_input() {
+    let wire = Bytes::from_static(b"#sdr00AF7F2A\n");
+    let pointer = wire.as_ptr();
+    let frame = Frame::from_bytes(wire).unwrap();
+
+    assert_eq!(frame.as_bytes().as_ptr(), pointer);
+    assert_eq!(frame.clone().as_bytes().as_ptr(), pointer);
+    assert_eq!(frame, Frame::parse(b"#sdr00AF7F2A\n").unwrap());
+    assert_eq!(
+        Frame::from_bytes(Bytes::from_static(b"#x!\n")),
+        Err(FrameError::InvalidCommand)
+    );
 }
 
 #[test]
@@ -172,18 +191,19 @@ fn frame_parser_rejects_incomplete_or_malformed_frames() {
 fn frame_decoder_handles_partial_and_coalesced_notifications() {
     let mut decoder = FrameDecoder::default();
     let mut frames = Vec::new();
-    let completion = b"r\n#amr1\n";
+    let completion = Bytes::from_static(b"r\n#amr1\n");
+    let complete_pointer = completion[2..].as_ptr();
 
     decoder
-        .push(b"#dm", |frame| frames.push(frame.into_owned()))
+        .push(Bytes::from_static(b"#dm"), |frame| frames.push(frame))
         .unwrap();
     assert!(frames.is_empty());
     decoder
         .push(completion, |frame| {
             if frame.command() == *b"amr" {
-                assert_eq!(frame.as_bytes().as_ptr(), completion[2..].as_ptr());
+                assert_eq!(frame.as_bytes().as_ptr(), complete_pointer);
             }
-            frames.push(frame.into_owned());
+            frames.push(frame);
         })
         .unwrap();
 
@@ -194,21 +214,46 @@ fn frame_decoder_handles_partial_and_coalesced_notifications() {
 }
 
 #[test]
+fn fragmented_frame_owns_assembled_bytes_after_decoder_reuse() {
+    let mut decoder = FrameDecoder::default();
+    let mut retained = None;
+
+    decoder
+        .push(Bytes::from_static(b"#dm"), |_| unreachable!())
+        .unwrap();
+    decoder
+        .push(Bytes::from_static(b"r0\n"), |frame| retained = Some(frame))
+        .unwrap();
+    let retained = retained.unwrap();
+    let pointer = retained.as_bytes().as_ptr();
+
+    decoder
+        .push(Bytes::from_static(b"#am"), |_| unreachable!())
+        .unwrap();
+    decoder.push(Bytes::from_static(b"r1\n"), |_| {}).unwrap();
+
+    assert_eq!(retained.as_bytes(), b"#dmr0\n");
+    assert_eq!(retained.clone().as_bytes().as_ptr(), pointer);
+}
+
+#[test]
 fn frame_decoder_rejects_oversized_complete_and_partial_frames() {
     let mut decoder = FrameDecoder::default();
     let oversized_frame = [b"#sdr".as_slice(), &vec![b'x'; 1021], b"\n"].concat();
 
     assert_eq!(
-        decoder.push(&oversized_frame, |_| {}),
+        decoder.push(Bytes::from(oversized_frame), |_| {}),
         Err(FrameError::TooLong)
     );
     assert_eq!(
-        decoder.push(&vec![b'x'; 1025], |_| {}),
+        decoder.push(Bytes::from(vec![b'x'; 1025]), |_| {}),
         Err(FrameError::TooLong)
     );
     let mut recovered = Vec::new();
     decoder
-        .push(b"#dmr0\n", |frame| recovered.push(frame.into_owned()))
+        .push(Bytes::from_static(b"#dmr0\n"), |frame| {
+            recovered.push(frame)
+        })
         .unwrap();
     assert_eq!(recovered, vec![Frame::parse(b"#dmr0\n").unwrap()]);
 }
@@ -220,19 +265,21 @@ fn frame_decoder_accepts_maximum_length_and_recovers_after_malformed_partial() {
 
     let mut visited = 0;
     decoder
-        .push(&maximum_frame, |frame| {
+        .push(Bytes::from(maximum_frame), |frame| {
             assert_eq!(frame.payload().len(), 1019);
             visited += 1;
         })
         .unwrap();
     assert_eq!(visited, 1);
-    decoder.push(b"#x", |_| unreachable!()).unwrap();
+    decoder
+        .push(Bytes::from_static(b"#x"), |_| unreachable!())
+        .unwrap();
     assert_eq!(
-        decoder.push(b"!\n", |_| unreachable!()),
+        decoder.push(Bytes::from_static(b"!\n"), |_| unreachable!()),
         Err(FrameError::InvalidCommand)
     );
     decoder
-        .push(b"#dmr0\n", |frame| {
+        .push(Bytes::from_static(b"#dmr0\n"), |frame| {
             assert_eq!(frame.command(), *b"dmr");
             visited += 1;
         })
@@ -246,10 +293,12 @@ fn frame_decoder_can_visit_before_later_frame_errors() {
     let mut visited = 0;
 
     assert_eq!(
-        decoder.push(b"#dmr0\n#x!\n", |_| visited += 1),
+        decoder.push(Bytes::from_static(b"#dmr0\n#x!\n"), |_| visited += 1),
         Err(FrameError::InvalidCommand)
     );
     assert_eq!(visited, 1);
-    decoder.push(b"#dmr0\n", |_| visited += 1).unwrap();
+    decoder
+        .push(Bytes::from_static(b"#dmr0\n"), |_| visited += 1)
+        .unwrap();
     assert_eq!(visited, 2);
 }
