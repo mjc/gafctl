@@ -1,0 +1,59 @@
+[package]
+name = "updraft"
+version = "0.1.0"
+edition = "2024"
+description = "A Rust proxy for GAF Master Flow attic fans"
+readme = "README.md"
+keywords = ["attic-fan", "gaf", "home-assistant", "ventilation"]
+
+[workspace]
+members = [
+    "crates/updraft-protocol",
+    "crates/updraft-bluetooth",
+    "crates/updraft-wifi",
+]
+default-members = [
+    ".",
+    "crates/updraft-protocol",
+    "crates/updraft-bluetooth",
+    "crates/updraft-wifi",
+]
+resolver = "3"
+
+[workspace.dependencies]
+anyhow = "1.0.104"
+axum = { version = "0.8.9", default-features = false, features = ["http1", "json", "tokio", "tracing"] }
+btleplug = "0.13.3"
+clap = { version = "4.6.7", features = ["derive", "env"] }
+futures-util = { version = "0.3.34", default-features = false, features = ["std", "async-await"] }
+http-body-util = "0.1"
+proptest = { version = "1.11.0", default-features = false, features = ["std"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+thiserror = "2.0.21"
+tokio = { version = "1.53.1", default-features = false }
+toml = { version = "0.9.8", default-features = false, features = ["std", "serde", "parse"] }
+tower = { version = "0.5", default-features = false }
+tower-http = { version = "0.7.1", default-features = false, features = ["trace", "timeout", "limit", "request-id"] }
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter", "json"] }
+uuid = "1.26.1"
+
+[dependencies]
+anyhow.workspace = true
+axum.workspace = true
+clap.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "net", "signal", "sync", "time"] }
+toml.workspace = true
+tower-http.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+updraft-bluetooth = { path = "crates/updraft-bluetooth" }
+updraft-protocol = { path = "crates/updraft-protocol" }
+updraft-wifi = { path = "crates/updraft-wifi" }
+
+[dev-dependencies]
+http-body-util.workspace = true
+tower = { workspace = true, features = ["util"] }
