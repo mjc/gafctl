@@ -58,6 +58,11 @@ pub enum ControlCommand {
         /// Humidity threshold in tenths of a percent.
         humidity_tenths_percent: u16,
     },
+    /// Start timer mode for the specified number of minutes.
+    SetTimer {
+        /// Duration in minutes.
+        duration_minutes: u16,
+    },
 }
 
 impl ControlCommand {
@@ -70,6 +75,9 @@ impl ControlCommand {
                 humidity_tenths_percent,
             } => format!("#ams{temperature_tenths_f:04X}{humidity_tenths_percent:04X}\n")
                 .into_bytes(),
+            Self::SetTimer { duration_minutes } => {
+                format!("#tms{duration_minutes:04X}\n").into_bytes()
+            }
         }
     }
 
@@ -78,6 +86,7 @@ impl ControlCommand {
     pub const fn response_id(self) -> [u8; 3] {
         match self {
             Self::SetAutomaticThresholds { .. } => *b"amr",
+            Self::SetTimer { .. } => *b"tmr",
         }
     }
 }

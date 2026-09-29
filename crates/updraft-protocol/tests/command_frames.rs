@@ -38,6 +38,16 @@ fn automatic_threshold_write_encodes_full_u16_fields() {
 }
 
 #[test]
+fn timer_write_encodes_minutes_as_uppercase_hex() {
+    let command = ControlCommand::SetTimer {
+        duration_minutes: 1,
+    };
+
+    assert_eq!(command.frame(), b"#tms0001\n");
+    assert_eq!(command.response_id(), *b"tmr");
+}
+
+#[test]
 fn response_frame_parser_preserves_uninterpreted_payload_bytes() {
     let frame = Frame::parse(b"#sdr00AF7F2A\n").unwrap();
 

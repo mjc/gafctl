@@ -2,7 +2,7 @@
 
 Updraft is a Rust proxy for GAF Master Flow powered attic vents. The first target is the older **GAF Wi-Fi Vent** generation controlled by the `com.gaf.wifivent` app. The goal is to read fan state and control the fan from Home Assistant while keeping the GAF controller's stock firmware.
 
-The repository contains a BLE diagnostic probe for the legacy fan. It can discover a fan, query state, and optionally set automatic temperature/humidity thresholds. The service and Home Assistant API are still scaffolding.
+The repository contains a BLE diagnostic probe for the legacy fan. It can discover a fan, query state, and optionally set automatic temperature/humidity thresholds or a timer. The service and Home Assistant API are still scaffolding.
 
 ## How it will work
 
@@ -10,7 +10,7 @@ The repository contains a BLE diagnostic probe for the legacy fan. It can discov
 GAF attic fan <-- verified Wi-Fi or Bluetooth protocol --> Updraft <-- local API --> Home Assistant adapter
 ```
 
-Static reverse engineering found the legacy app uses the same command family over BLE GATT and a Wi-Fi TCP connection. BLE uses service `00FF` and characteristic `FF01`; the app's Wi-Fi host is `192.168.4.1`. The installed app's setup guide joins the fan's `GAFVent_XXXX` access point. The probe has received identity, mode, sensor, threshold, and timer replies over BLE without joining that access point. An opt-in automatic-threshold write also received an acknowledgement and matching threshold readback. The capture and remaining uncertainties are documented in [protocol findings](docs/protocol-findings.md).
+Static reverse engineering found the legacy app uses the same command family over BLE GATT and a Wi-Fi TCP connection. BLE uses service `00FF` and characteristic `FF01`; the app's Wi-Fi host is `192.168.4.1`. The installed app's setup guide joins the fan's `GAFVent_XXXX` access point. The probe has received identity, mode, sensor, threshold, and timer replies over BLE without joining that access point. Automatic-threshold and timer writes have both received successful acknowledgements and matching readbacks. The capture and remaining uncertainties are documented in [protocol findings](docs/protocol-findings.md).
 
 The Cargo workspace has four crates:
 
@@ -50,7 +50,7 @@ Open ESP32 and ESPHome fan projects are useful design references. They are not a
 
 ## Development status
 
-`updraft-protocol` encodes five state queries and the automatic-threshold control, and incrementally parses complete response lines while retaining payload bytes unchanged. `updraft-bluetooth` scans for the GAF service, selects a peripheral, subscribes to the response characteristic, sends queries, and can send the explicit automatic-threshold write. Firmware update operations are not implemented. Identity output is redacted by default; `--show-identity` prints the raw response and may reveal a device identifier.
+`updraft-protocol` encodes five state queries and two ordinary controls, and incrementally parses complete response lines while retaining payload bytes unchanged. `updraft-bluetooth` scans for the GAF service, selects a peripheral, subscribes to the response characteristic, sends queries, and can set automatic thresholds or timer duration. Firmware update operations are not implemented. Identity output is redacted by default; `--show-identity` prints the raw response and may reveal a device identifier.
 
 Run a scan without connecting or sending protocol commands:
 
@@ -77,6 +77,12 @@ cargo run -- probe ble --set-auto-thresholds-tenths 1050 300
 ```
 
 This sends the normal fan-control command `ams` and checks the subsequent threshold response. The acknowledgement and configuration readback do not prove physical airflow. Firmware update commands are not exposed.
+
+To exercise timer mode, pass a duration in whole minutes. A one-minute timer may run the fan; the probe reads the remaining and original timer values immediately afterward:
+
+```sh
+cargo run -- probe ble --set-timer-minutes 1
+```
 
 The Wi-Fi server port and TLS trust setup remain unknown, so the Wi-Fi client is not implemented yet. If Wi-Fi investigation is still needed, the target can run from one of the Linux boxes whose Wi-Fi is available for joining the fan AP; that is separate from the working BLE path.
 

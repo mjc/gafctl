@@ -57,10 +57,15 @@ struct BleOptions {
     /// fan-control write, not a firmware operation.
     #[arg(
         long,
+        conflicts_with = "set_timer_minutes",
         num_args = 2,
         value_names = ["TEMP_TENTHS_F", "HUMIDITY_TENTHS_PERCENT"]
     )]
     set_auto_thresholds_tenths: Option<Vec<u16>>,
+
+    /// Start timer mode for the given duration in minutes.
+    #[arg(long, conflicts_with = "set_auto_thresholds_tenths")]
+    set_timer_minutes: Option<u16>,
 }
 
 #[tokio::main]
@@ -75,13 +80,15 @@ async fn main() -> Result<()> {
 
 async fn run_ble_probe(options: BleOptions) -> Result<()> {
     let show_identity = options.show_identity;
-    let control_command =
-        options
-            .set_auto_thresholds_tenths
-            .map(|values| ControlCommand::SetAutomaticThresholds {
-                temperature_tenths_f: values[0],
-                humidity_tenths_percent: values[1],
-            });
+    let control_command = match options.set_auto_thresholds_tenths {
+        Some(values) => Some(ControlCommand::SetAutomaticThresholds {
+            temperature_tenths_f: values[0],
+            humidity_tenths_percent: values[1],
+        }),
+        None => options
+            .set_timer_minutes
+            .map(|duration_minutes| ControlCommand::SetTimer { duration_minutes }),
+    };
     let result = probe(ProbeOptions {
         scan_duration: Duration::from_secs(options.scan_seconds),
         response_timeout: Duration::from_secs(options.response_timeout_seconds),
@@ -152,27 +159,63 @@ async fn run_ble_probe(options: BleOptions) -> Result<()> {
         );
     }
 
-    if let Some(expected) = control_command {
-        let expected = expected.frame();
-        let expected_threshold_payload = &expected[4..expected.len() - 1];
-        let threshold_reply = result
-            .replies
-            .iter()
-            .find(|reply| reply.request == ReadCommand::AutoThresholds);
-        if let Some(threshold_reply) = threshold_reply {
-            let matches = threshold_reply
-                .response
-                .payload()
-                .eq_ignore_ascii_case(expected_threshold_payload);
-            println!(
-                "automatic threshold readback: {}",
-                if matches {
-                    "matches request"
-                } else {
-                    "differs from request"
-                }
-            );
+    match control_command {
+        Some(command @ ControlCommand::SetAutomaticThresholds { .. }) => {
+            let expected = command.frame();
+            let expected_payload = &expected[4..expected.len() - 1];
+            if let Some(reply) = result
+                .replies
+                .iter()
+                .find(|reply| reply.request == ReadCommand::AutoThresholds)
+            {
+                let matches = reply
+                    .response
+                    .payload()
+                    .eq_ignore_ascii_case(expected_payload);
+                println!(
+                    "automatic threshold readback: {}",
+                    if matches {
+                        "matches request"
+                    } else {
+                        "differs from request"
+                    }
+                );
+            }
         }
+        Some(ControlCommand::SetTimer { duration_minutes }) => {
+            if let Some(reply) = result
+                .replies
+                .iter()
+                .find(|reply| reply.request == ReadCommand::Timer)
+            {
+                let timer = std::str::from_utf8(reply.response.payload())
+                    .ok()
+                    .filter(|payload| {
+                        payload.len() == 8 && payload.bytes().all(|byte| byte.is_ascii_hexdigit())
+                    })
+                    .and_then(|payload| {
+                        Some((
+                            u16::from_str_radix(&payload[..4], 16).ok()?,
+                            u16::from_str_radix(&payload[4..], 16).ok()?,
+                        ))
+                    });
+                if let Some((remaining_minutes, original_minutes)) = timer {
+                    let matches = original_minutes == duration_minutes
+                        && remaining_minutes <= duration_minutes;
+                    println!(
+                        "timer readback: remaining={remaining_minutes} minute(s), original={original_minutes} minute(s); {}",
+                        if matches {
+                            "matches request"
+                        } else {
+                            "differs from request"
+                        }
+                    );
+                } else {
+                    println!("timer readback: unrecognized payload");
+                }
+            }
+        }
+        None => {}
     }
 
     Ok(())

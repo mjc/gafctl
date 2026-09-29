@@ -13,9 +13,9 @@ This document combines static findings from the installed `com.gaf.wifivent` app
 - Instruction-level analysis confirms the GAF application explicitly selects `WIFI_MODE_AP` during Wi-Fi startup. The image reports ESP-IDF `v3.1-dev-1193-g64b56bef-dirty`; the linked SDK contains generic station-mode code, but no GAF application flow for home SSID/password provisioning or router connection was found. Station mode is supported by the ESP32 SDK, so adding it appears technically feasible with firmware changes; changing the AP mode value alone would not implement credential setup, station connection, or reconnect handling. This is evidence about this app and bundled image, not proof that every hardware/firmware revision lacks such a feature.
 - The image appears to be a custom GAF application built on ESP-IDF and its bundled open-source components. The `dirty` SDK version suffix indicates local changes in the SDK checkout at build time; it does not establish that the GAF application is a modified public project or that its source is available.
 
-## Read-only commands
+## Command inventory
 
-`%04X` is uppercase, zero-padded hexadecimal as constructed by the app. `%04x` and `%1d` are firmware reply formatting. The app's response decoder establishes the read field order, scales, and units below. The app parser accepts the exact `amr` payload `0` as a successful acknowledgement; other values are rejected as invalid data. One successful `ams` acknowledgement and matching threshold readback have been observed; accepted ranges remain unverified.
+`%04X` is uppercase, zero-padded hexadecimal as constructed by the app. `%04x` and `%1d` are firmware reply formatting. The app's response decoder establishes the read field order, scales, and units below. The app parser accepts the exact `amr` and `tmr` payload `0` as successful acknowledgements; other values are rejected as invalid data. Both ordinary setters have now received successful acknowledgements and matching readbacks on-device; accepted ranges remain unverified.
 
 | Request | Response | Interpretation |
 | --- | --- | --- |
@@ -25,13 +25,13 @@ This document combines static findings from the installed `com.gaf.wifivent` app
 | `#atg\n` | `#atr%04x%04x\n` | Read automatic temperature then humidity thresholds; both are tenths (`105.0°F`, `30.0%` in the observed capture). |
 | `#ttg\n` | `#ttr%04x%04x\n` | Read remaining timer minutes then original timer minutes; app converts them to seconds internally. |
 | `#ams%04X%04X\n` | `#amr%1d\n` | Start automatic mode with temperature tenths Fahrenheit first, humidity tenths percent second. App scales each input by 0.1 before formatting. One write using the existing 105.0°F / 30.0% settings was acknowledged and read back unchanged. |
-| `#tms%04X\n` | `#tmr%1d\n` | Start timer mode. Payload is duration in minutes; the app converts input seconds to rounded minutes before formatting. Setter behavior has not been tried on-device. |
+| `#tms%04X\n` | `#tmr%1d\n` | Start timer mode. Payload is duration in minutes; the app converts input seconds to rounded minutes before formatting. One-minute and zero-minute writes both succeeded; timer readback matched 1/1 and 0/0 respectively. |
 
 The app also constructs firmware-update and reboot operations: `ois`, `oms`, `ome`, and `rbs`, with replies `oir`, `osr`, `oer`, and `rbr`. They are documented for completeness and must not be used for ordinary discovery. The firmware has an additional unexplained `#pptP` token; it is not mapped to an app operation.
 
 ## Exact-device BLE capture and control verification
 
-On 2026-09-29, Updraft scanned for service `00FF`, found one GAF BLE peripheral, connected to characteristic `FF01`, subscribed to notifications, sent the five getter commands, matched their replies, and disconnected. The peripheral identifier and identity suffix are omitted. A separate ordinary threshold-setting request was also sent as described below. No OTA, reboot, reset, or pairing-change operation was sent.
+On 2026-09-29, Updraft scanned for service `00FF`, found one GAF BLE peripheral, connected to characteristic `FF01`, subscribed to notifications, sent the five getter commands, matched their replies, and disconnected. The peripheral identifier and identity suffix are omitted. Automatic-threshold and timer settings were changed and read back as described below. No OTA, reboot, reset, or pairing-change operation was sent.
 
 | Request | Reply mnemonic | Redacted reply payload | App-decoded result |
 | --- | --- | --- | --- |
@@ -45,16 +45,24 @@ A repeat run of the built CLI later the same day received all five replies again
 
 The sensor and threshold values are decoded by parsing each four-character hexadecimal field and multiplying by 0.1. The app displays temperature in Fahrenheit. Timer fields are hexadecimal minutes in remaining/original order. These are controller reports captured at one point in time and do not confirm physical airflow.
 
-An explicit control run sent `#ams041A012C\n`, which sets automatic mode with the already reported 105.0°F / 30.0% thresholds. The device replied `#amr0\n`; static app analysis confirms payload `0` is parsed as ACK and invokes the success callback. The same session queried all five values: the controller still reported automatic/off, `sdg` payload `03e200a0` decoded to `99.4°F` and `16.0%`, `atg` returned `041a012c` matching the requested thresholds, and `ttg` remained zero; identity version stayed `030000` with the suffix redacted. No threshold change was intended. No firmware update command was sent, and Updraft does not expose firmware update operations.
+The ordinary controls were exercised and then restored:
+
+1. Before testing, the controller reported automatic/on, thresholds of 105.0°F / 30.0%, and a zero timer.
+2. `#ams041B012D\n` changed thresholds slightly to 105.1°F / 30.1%. The device replied `#amr0\n` (the app parses this exact payload as ACK), and `atg` returned `#atr041b012d\n`. The controller then reported automatic/off; sensors were 98.3°F / 16.9%.
+3. `#tms0001\n` started a one-minute timer. `#tmr0\n` was accepted as ACK; the controller reported timer/on and `ttg` returned one remaining and one original minute.
+4. `#tms0000\n` cleared the timer. It returned `#tmr0\n`; the controller reported timer/off and `ttg` returned zero/zero.
+5. `#ams041A012C\n` restored the original thresholds and automatic mode. It returned `#amr0\n`, `atg` read back 105.0°F / 30.0%, and `ttg` read zero/zero. The final controller report was automatic/off, with sensors at 99.7°F / 15.8%.
+
+The configuration settings and timer were restored to the values observed before testing. The controller-reported fan flag changed from on to off during the test and remained off in the final readback; physical airflow was not measured. No firmware update command was sent, and Updraft does not expose firmware update operations.
 
 ## Probe safety and next steps
 
-The diagnostic tool defaults to BLE and redacts device identity by default. It exposes the read-only requests above and one ordinary fan-control write for automatic thresholds, with immediate state readback. Firmware update operations are not implemented. The currently confirmed control result is setter acknowledgement plus matching configuration readback, not physical airflow confirmation.
+The diagnostic tool defaults to BLE and redacts device identity by default. It exposes the read-only requests above and ordinary automatic-threshold and timer writes, each followed by state readback. Firmware update operations are not implemented. These tests confirm acknowledgements and reported configuration, not physical airflow.
 
 Next evidence needed:
 
 1. Confirm the exact fan/controller model and installed firmware revision independently of the redacted identity field.
-2. Re-run only identity/mode/sensor/threshold/timer reads as needed and retain redacted request/response bytes with timestamps.
+2. Re-run identity/mode/sensor/threshold/timer reads and ordinary control tests as needed; retain redacted request/response bytes with timestamps.
 3. Implement a separate Wi-Fi TLS probe if needed. The spare Linux box with unused Wi-Fi can join the fan AP for that investigation; this is not needed for the currently working BLE read path. Do not inspect or publish certificate/private-key contents.
 4. Extend the same acknowledgement and readback approach for other ordinary controls only after their ranges and effects are understood; do not treat a setter acknowledgement as proof of physical airflow.
 
