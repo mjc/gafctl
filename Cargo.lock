@@ -1428,9 +1428,11 @@ name = "updraft-bluetooth"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "bluez-async",
  "btleplug",
  "bytes",
  "futures-util",
+ "serde_json",
  "thiserror",
  "tokio",
  "tracing",

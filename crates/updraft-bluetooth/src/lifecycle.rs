@@ -1,10 +1,9 @@
 use std::{future::Future, time::Duration};
 
 use anyhow::{Context, Result};
-use btleplug::{
-    api::{Central as _, Peripheral as _},
-    platform::{Adapter, Peripheral},
-};
+use btleplug::{api::Central as _, platform::Adapter};
+#[cfg(not(target_os = "linux"))]
+use btleplug::{api::Peripheral as _, platform::Peripheral};
 use tokio::{runtime::Handle, time::timeout};
 
 use crate::DisconnectOutcome;
@@ -48,6 +47,7 @@ impl Drop for ScanCleanup {
     }
 }
 
+#[cfg(not(target_os = "linux"))]
 pub(super) struct DisconnectCleanup {
     peripheral: Peripheral,
     operation_timeout: Duration,
@@ -55,6 +55,7 @@ pub(super) struct DisconnectCleanup {
     armed: bool,
 }
 
+#[cfg(not(target_os = "linux"))]
 impl DisconnectCleanup {
     pub(super) fn new(peripheral: Peripheral, operation_timeout: Duration) -> Self {
         Self {
@@ -72,6 +73,7 @@ impl DisconnectCleanup {
     }
 }
 
+#[cfg(not(target_os = "linux"))]
 impl Drop for DisconnectCleanup {
     fn drop(&mut self) {
         if self.armed {
@@ -110,6 +112,7 @@ pub(super) async fn stop_ble_scan(adapter: &Adapter, operation_timeout: Duration
     .await
 }
 
+#[cfg(not(target_os = "linux"))]
 pub(super) async fn disconnect_peripheral(
     peripheral: &Peripheral,
     operation_timeout: Duration,
