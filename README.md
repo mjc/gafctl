@@ -1,8 +1,6 @@
 # Updraft
 
-Updraft is a Rust BLE probe for the GAF Wi-Fi Vent. It reads device state and sends threshold and timer commands without changing the firmware.
-
-It discovers the fan, reads state, sets automatic thresholds, and starts or clears the timer. The HTTP API and Home Assistant integration are planned.
+Updraft is a Rust BLE probe for the GAF Wi-Fi Vent. It reads state, sets automatic thresholds, and starts or clears the timer. It does not change firmware. HTTP and Home Assistant support are planned.
 
 ## Workspace
 
@@ -13,15 +11,11 @@ It discovers the fan, reads state, sets automatic thresholds, and starts or clea
 | `updraft-wifi` | Reserved for Wi-Fi transport. |
 | `updraft` | CLI. The HTTP service is planned. |
 
-Show the requested command, acknowledgement, controller readback, and running state separately. The fan flag reports controller state, not airflow. Mark stale or unreachable devices unavailable.
-
 ## GAF Wi-Fi Vent
 
 The GAF Wi-Fi Vent app (`com.gaf.wifivent`) uses the same command family over BLE and Wi-Fi TCP. BLE service `00FF` and characteristic `FF01` carry commands and replies. The fan access point is `192.168.4.1`; setup connects to `GAFVent_XXXX`.
 
 BLE reads return identity, mode, sensors, thresholds, and timer state. Threshold and timer writes return acknowledgements and readbacks. The Wi-Fi port and TLS configuration are unknown. Home-LAN setup is unconfirmed, and Wi-Fi control is not implemented. See [protocol findings](docs/protocol-findings.md).
-
-Master Flow QuickConnect / Vent Control uses the GAF/Keen Home cloud API. It has not been tested with the GAF Wi-Fi Vent.
 
 ## BLE probe
 
