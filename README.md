@@ -104,6 +104,14 @@ devenv tasks run check:all
 
 Inside the environment, Cargo commands run directly. The checks cover formatting, Clippy, nextest, and doctests. Protocol framing and incremental response decoding have focused integration tests. The Bluetooth probe has passed a live read/write/readback cycle against the nearby vent; that device evidence is separate from automated tests.
 
+Build with `heap-track` to print Rust global-allocator counts around one BLE probe:
+
+```sh
+cargo run --features heap-track -- probe ble
+```
+
+Use `--scan-only` to measure discovery without connecting. The report counts successful Rust allocator calls across the workspace and dependencies during `probe()`, including allocation, zeroed allocation, reallocation, and deallocation events and their requested byte totals. Runtime startup and output formatting are outside the measured interval; allocations made directly by native Bluetooth libraries are not counted.
+
 See [development tooling and dependencies](docs/development.md) for the crate choices, individual commands, platform requirements, and dependencies to consider when the device protocol is known.
 
 No account credentials, device secrets, private keys, or unredacted traffic captures belong in this repository.
