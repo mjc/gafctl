@@ -13,21 +13,16 @@ use btleplug::{
 use bytes::Bytes;
 use futures_util::{Stream, StreamExt, TryStreamExt, future, stream};
 use tokio::time::{sleep, timeout};
-use updraft_protocol::{ControlCommand, Frame, FrameDecoder, FrameError, ReadCommand};
+use updraft_protocol::{
+    ControlCommand, ControlOutcome, DeviceSnapshot, Frame, FrameDecoder, FrameError, ReadCommand,
+    Request,
+};
 use uuid::Uuid;
 
 /// GAF's observed primary BLE service UUID.
 pub const GAF_SERVICE_UUID: Uuid = Uuid::from_u128(0x000000ff_0000_1000_8000_00805f9b34fb);
 /// GAF's observed command/response BLE characteristic UUID.
 pub const GAF_CHARACTERISTIC_UUID: Uuid = Uuid::from_u128(0x0000ff01_0000_1000_8000_00805f9b34fb);
-
-const STATE_READS: [ReadCommand; 5] = [
-    ReadCommand::Identity,
-    ReadCommand::Mode,
-    ReadCommand::Sensors,
-    ReadCommand::AutoThresholds,
-    ReadCommand::Timer,
-];
 
 /// Settings for one GAF BLE inspection.
 #[derive(Clone, Debug)]
@@ -78,13 +73,13 @@ pub struct DiscoveredDevice {
     pub rssi: Option<i16>,
 }
 
-/// One request and its raw, uninterpreted protocol response.
+/// Validated state and optional ordinary-control outcome from one device query.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ReadReply {
-    /// Read-only request sent to the device.
-    pub request: ReadCommand,
-    /// Matching response frame, preserving its raw payload bytes.
-    pub response: Frame<'static>,
+pub struct QueryResult {
+    /// All five mandatory device-state observations.
+    pub snapshot: DeviceSnapshot,
+    /// Outcome of the optional ordinary control request, interpreted with readback.
+    pub control: Option<ControlOutcome>,
 }
 
 /// Result of scanning and, when selected, querying a peripheral.
@@ -98,12 +93,10 @@ pub enum ProbeResult {
     Ambiguous { devices: Vec<DiscoveredDevice> },
     /// One peripheral was queried successfully.
     Queried {
-        /// Matching peripherals discovered during the scan.
-        devices: Vec<DiscoveredDevice>,
-        /// Responses to all state queries, in request order.
-        replies: Vec<ReadReply>,
-        /// Response to the optional ordinary control-setting write.
-        control_reply: Option<Frame<'static>>,
+        /// The selected peripheral.
+        device: DiscoveredDevice,
+        /// Validated snapshot and optional control outcome.
+        result: Box<QueryResult>,
     },
 }
 
@@ -112,10 +105,10 @@ struct Candidate {
     device: DiscoveredDevice,
 }
 
-enum CandidateSelection<'a> {
+enum CandidateSelection {
     NoDevices,
-    Ambiguous,
-    Chosen(&'a Candidate),
+    Ambiguous(Vec<DiscoveredDevice>),
+    Chosen(Candidate),
 }
 
 struct ConnectedPeripheral<'a> {
@@ -222,19 +215,24 @@ async fn read_gaf_advertisement(peripheral: Peripheral) -> Result<Option<Candida
         }))
 }
 
-fn select_candidate<'a>(
-    candidates: &'a [Candidate],
+fn select_candidate(
+    mut candidates: Vec<Candidate>,
     device_id: Option<&str>,
-) -> Result<CandidateSelection<'a>> {
-    match (device_id, candidates) {
+) -> Result<CandidateSelection> {
+    match (device_id, candidates.len()) {
         (Some(id), _) => candidates
             .iter()
-            .find(|candidate| candidate.device.id == id)
-            .map(CandidateSelection::Chosen)
+            .position(|candidate| candidate.device.id == id)
+            .map(|index| CandidateSelection::Chosen(candidates.remove(index)))
             .with_context(|| format!("no scanned GAF peripheral has ID {id}")),
-        (None, []) => Ok(CandidateSelection::NoDevices),
-        (None, [candidate]) => Ok(CandidateSelection::Chosen(candidate)),
-        (None, _) => Ok(CandidateSelection::Ambiguous),
+        (None, 0) => Ok(CandidateSelection::NoDevices),
+        (None, 1) => Ok(CandidateSelection::Chosen(candidates.remove(0))),
+        (None, _) => Ok(CandidateSelection::Ambiguous(
+            candidates
+                .into_iter()
+                .map(|candidate| candidate.device)
+                .collect(),
+        )),
     }
 }
 
@@ -244,24 +242,15 @@ async fn query_selected_device(
     control_command: Option<ControlCommand>,
     response_timeout: Duration,
 ) -> Result<ProbeResult> {
-    match select_candidate(&candidates, device_id)? {
+    match select_candidate(candidates, device_id)? {
         CandidateSelection::NoDevices => Ok(ProbeResult::NoDevices),
-        CandidateSelection::Ambiguous => Ok(ProbeResult::Ambiguous {
-            devices: candidates
-                .into_iter()
-                .map(|candidate| candidate.device)
-                .collect(),
-        }),
+        CandidateSelection::Ambiguous(devices) => Ok(ProbeResult::Ambiguous { devices }),
         CandidateSelection::Chosen(candidate) => {
-            let (replies, control_reply) =
+            let result =
                 query_peripheral(&candidate.peripheral, response_timeout, control_command).await?;
             Ok(ProbeResult::Queried {
-                devices: candidates
-                    .into_iter()
-                    .map(|candidate| candidate.device)
-                    .collect(),
-                replies,
-                control_reply,
+                device: candidate.device,
+                result: Box::new(result),
             })
         }
     }
@@ -271,7 +260,7 @@ async fn query_peripheral(
     peripheral: &Peripheral,
     response_timeout: Duration,
     control_command: Option<ControlCommand>,
-) -> Result<(Vec<ReadReply>, Option<Frame<'static>>)> {
+) -> Result<QueryResult> {
     let connected = ConnectedPeripheral::connect(peripheral).await?;
     let query_result = async {
         ReadySession::subscribe(&connected, response_timeout)
@@ -359,58 +348,47 @@ impl<'connected, 'device> ReadySession<'connected, 'device> {
         })
     }
 
-    async fn query(
-        mut self,
-        control_command: Option<ControlCommand>,
-    ) -> Result<(Vec<ReadReply>, Option<Frame<'static>>)> {
-        let control_reply = match control_command {
-            Some(command) => {
-                let frame = command.frame();
-                Some(
-                    self.exchange(&frame, command.response_id(), "ordinary control command")
-                        .await
-                        .with_context(|| {
-                            format!("wait for {} acknowledgement", frame.escape_ascii())
-                        })?,
-                )
-            }
+    async fn query(mut self, control_command: Option<ControlCommand>) -> Result<QueryResult> {
+        let control_response = match control_command {
+            Some(command) => Some((
+                command,
+                self.exchange(command.into())
+                    .await
+                    .context("wait for ordinary control acknowledgement")?,
+            )),
             None => None,
         };
-        let replies = self.read_state().await?;
-        Ok((replies, control_reply))
+        let snapshot = self.read_state().await?;
+        let control = control_response
+            .map(|(command, response)| ControlOutcome::from_response(command, response, &snapshot))
+            .transpose()
+            .context("validate ordinary control outcome")?;
+        Ok(QueryResult { snapshot, control })
     }
 
-    async fn read_state(self) -> Result<Vec<ReadReply>> {
-        let (_, replies) = stream::iter(STATE_READS)
-            .map(Ok::<_, anyhow::Error>)
-            .try_fold(
-                (self, Vec::with_capacity(STATE_READS.len())),
-                |(mut session, mut replies), request| async move {
-                    let response = session
-                        .exchange(request.frame(), request.response_id(), "state query")
-                        .await
-                        .with_context(|| {
-                            format!("waiting for {} response", request.frame().escape_ascii())
-                        })?;
-                    replies.push(ReadReply { request, response });
-                    Ok((session, replies))
-                },
-            )
-            .await?;
-        Ok(replies)
+    async fn read_state(&mut self) -> Result<DeviceSnapshot> {
+        let identity = self.exchange(ReadCommand::Identity.into()).await?;
+        let mode = self.exchange(ReadCommand::Mode.into()).await?;
+        let sensors = self.exchange(ReadCommand::Sensors.into()).await?;
+        let thresholds = self.exchange(ReadCommand::AutoThresholds.into()).await?;
+        let timer = self.exchange(ReadCommand::Timer.into()).await?;
+        DeviceSnapshot::from_frames(identity, mode, sensors, thresholds, timer)
+            .context("validate device snapshot")
     }
 
-    async fn exchange(
-        &mut self,
-        frame: &[u8],
-        response_id: [u8; 3],
-        operation: &str,
-    ) -> Result<Frame<'static>> {
+    async fn exchange(&mut self, request: Request) -> Result<Frame<'static>> {
+        let frame = request.frame();
         self.connected
             .peripheral
-            .write(&self.characteristic, frame, self.write_type)
+            .write(&self.characteristic, frame.as_ref(), self.write_type)
             .await
-            .with_context(|| format!("send {operation} {}", frame.escape_ascii()))?;
+            .with_context(|| {
+                format!(
+                    "send {} {}",
+                    request.operation(),
+                    frame.as_ref().escape_ascii()
+                )
+            })?;
 
         let decoder = &mut self.decoder;
         let mut matching_responses = self
@@ -419,15 +397,26 @@ impl<'connected, 'device> ReadySession<'connected, 'device> {
             .filter(|notification| future::ready(notification.uuid == GAF_CHARACTERISTIC_UUID))
             .filter_map(|notification| {
                 future::ready(
-                    decode_matching_response(decoder, notification.value.into(), response_id)
-                        .transpose(),
+                    decode_matching_response(
+                        decoder,
+                        notification.value.into(),
+                        request.response_id(),
+                    )
+                    .transpose(),
                 )
             });
-        let response = timeout(self.response_timeout, matching_responses.try_next())
+        timeout(self.response_timeout, matching_responses.try_next())
             .await
-            .context("timed out waiting for matching BLE response")?;
-
-        response?.context("BLE notification stream ended")
+            .context("timed out waiting for matching BLE response")
+            .and_then(|result| result.map_err(anyhow::Error::from))
+            .and_then(|response| response.context("BLE notification stream ended"))
+            .with_context(|| {
+                format!(
+                    "waiting for {} response to {}",
+                    request.response_id().escape_ascii(),
+                    frame.as_ref().escape_ascii()
+                )
+            })
     }
 }
 

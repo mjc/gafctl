@@ -54,6 +54,10 @@ Open ESP32 and ESPHome fan projects are useful design references. They are not a
 
 `Frame::parse` borrows raw wire slices, while `Frame::from_bytes` takes shared `Bytes` storage. Payload and complete wire bytes are available as slices. `into_owned()` copies a raw borrow when needed; frames backed by `Bytes` can be retained or cloned without copying their contents. The decoder takes transport buffers as `Bytes`, visits complete frame slices directly, and assembles fragments in `BytesMut` before freezing them into shared storage. Bluetooth moves each notification's byte vector into `Bytes` and retains only its first matching response, while checking every complete frame for errors before accepting it. A retained slice keeps its backing allocation alive until the last shared frame is dropped.
 
+A successful query identifies the selected device and returns a `DeviceSnapshot` with identity, mode, sensors, automatic thresholds, and timer observations. These are five sequential reads, not an atomic sample. Each observation retains its original frame alongside either its decoded value or a payload error, so unfamiliar device data remains available for inspection. Missing transport replies fail the query; unfamiliar payloads remain in the completed snapshot. Optional control results keep the requested command, acknowledgement, and typed readback comparison together. The protocol crate interprets those results, and the CLI formats them.
+
+Command exchange takes a `Request` that supplies its wire encoding, expected response identifier, and diagnostic operation name together. Successful query output identifies the device that answered; scan-only and ambiguous results retain their candidate lists.
+
 Run a scan without connecting or sending protocol commands:
 
 ```sh

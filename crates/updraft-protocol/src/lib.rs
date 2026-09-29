@@ -5,8 +5,18 @@
 //! payloads remain opaque unless their semantics are verified from app code or
 //! device capture. Firmware update commands are not represented here.
 
+use std::borrow::Cow;
+
 use bytes::{Bytes, BytesMut};
 use thiserror::Error;
+
+mod state;
+
+pub use state::{
+    Acknowledgement, ControlOutcome, ControlReadback, DeviceMode, DeviceSnapshot, FanState,
+    FirmwareVersion, Identity, Observation, OperatingMode, PayloadError, Readback, ReadbackMatch,
+    SensorReadings, UnexpectedResponse,
+};
 
 /// Temperature in tenths of a degree Fahrenheit, as carried on the wire.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -205,6 +215,56 @@ impl ControlCommand {
         match self {
             Self::SetAutomaticThresholds(_) => *b"amr",
             Self::SetTimer(_) => *b"tmr",
+        }
+    }
+}
+
+/// A state read or an ordinary fan-control write.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Request {
+    /// Query one state field.
+    Read(ReadCommand),
+    /// Change an ordinary fan setting.
+    Control(ControlCommand),
+}
+
+impl From<ReadCommand> for Request {
+    fn from(command: ReadCommand) -> Self {
+        Self::Read(command)
+    }
+}
+
+impl From<ControlCommand> for Request {
+    fn from(command: ControlCommand) -> Self {
+        Self::Control(command)
+    }
+}
+
+impl Request {
+    /// Encode a request, borrowing fixed getter frames and owning setter frames.
+    #[must_use]
+    pub fn frame(self) -> Cow<'static, [u8]> {
+        match self {
+            Self::Read(command) => Cow::Borrowed(command.frame()),
+            Self::Control(command) => Cow::Owned(command.frame()),
+        }
+    }
+
+    /// Return the response identifier expected for this request.
+    #[must_use]
+    pub const fn response_id(self) -> [u8; 3] {
+        match self {
+            Self::Read(command) => command.response_id(),
+            Self::Control(command) => command.response_id(),
+        }
+    }
+
+    /// Name the operation for transport diagnostics.
+    #[must_use]
+    pub const fn operation(self) -> &'static str {
+        match self {
+            Self::Read(_) => "state query",
+            Self::Control(_) => "ordinary control command",
         }
     }
 }

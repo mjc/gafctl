@@ -2,10 +2,10 @@ use std::{fmt, time::Duration};
 
 use anyhow::{Context, Result};
 use clap::{Args, Parser, Subcommand};
-use updraft_bluetooth::{DiscoveredDevice, ProbeMode, ProbeOptions, ProbeResult, ReadReply, probe};
+use updraft_bluetooth::{DiscoveredDevice, ProbeMode, ProbeOptions, ProbeResult, probe};
 use updraft_protocol::{
-    AutomaticThresholds, ControlCommand, Frame, HumidityTenthsPercent, Minutes, ReadCommand,
-    TemperatureTenthsF, TimerState,
+    Acknowledgement, AutomaticThresholds, ControlCommand, ControlOutcome, ControlReadback,
+    DeviceSnapshot, HumidityTenthsPercent, Minutes, ReadCommand, ReadbackMatch, TemperatureTenthsF,
 };
 
 #[derive(Debug, Parser)]
@@ -124,19 +124,14 @@ async fn main() -> Result<()> {
 
 async fn run_ble_probe(options: BleOptions) -> Result<()> {
     let show_identity = options.show_identity;
-    let requested_control = options.requested_control();
     let result = probe(options.into_probe_options())
         .await
         .context("BLE probe failed")?;
-    print_probe_result(result, requested_control, show_identity);
+    print_probe_result(result, show_identity);
     Ok(())
 }
 
-fn print_probe_result(
-    result: ProbeResult,
-    requested_control: Option<ControlCommand>,
-    show_identity: bool,
-) {
+fn print_probe_result(result: ProbeResult, show_identity: bool) {
     match result {
         ProbeResult::NoDevices => {
             println!("No nearby BLE device advertising GAF service 00FF was found.");
@@ -151,18 +146,14 @@ fn print_probe_result(
                 "More than one candidate found. Re-run with --device-id <id> to query one fan."
             );
         }
-        ProbeResult::Queried {
-            devices,
-            replies,
-            control_reply,
-        } => {
-            print_devices(&devices);
-            if let Some(response) = control_reply {
-                print_control_acknowledgement(&response);
+        ProbeResult::Queried { device, result } => {
+            println!("Queried GAF BLE device: {}", DeviceDescription(&device));
+            if let Some(control) = &result.control {
+                print_control_acknowledgement(control);
             }
-            print_replies(&replies, show_identity);
-            if let Some(command) = requested_control {
-                println!("{}", compare_control_readback(command, &replies));
+            print_snapshot(&result.snapshot, show_identity);
+            if let Some(control) = &result.control {
+                println!("{}", ControlReadbackDisplay(control.readback()));
             }
         }
     }
@@ -171,19 +162,15 @@ fn print_probe_result(
 fn print_devices(devices: &[DiscoveredDevice]) {
     println!("Found {} GAF BLE device(s):", devices.len());
     devices.iter().enumerate().for_each(|(index, device)| {
-        println!(
-            "  [{index}] id={} name={} rssi={}",
-            device.id,
-            device.name.as_deref().unwrap_or("(not advertised)"),
-            SignalStrength(device.rssi),
-        );
+        println!("  [{index}] {}", DeviceDescription(device));
     });
 }
 
-fn print_control_acknowledgement(response: &Frame<'_>) {
-    let acknowledgement = match response.payload() {
-        b"0" => "success",
-        _ => "unrecognized/error",
+fn print_control_acknowledgement(control: &ControlOutcome) {
+    let response = control.frame();
+    let acknowledgement = match control.acknowledgement() {
+        Acknowledgement::Accepted => "success",
+        Acknowledgement::Unrecognized => "unrecognized/error",
     };
     println!(
         "control acknowledgement: {acknowledgement} ({} payload={})",
@@ -192,21 +179,40 @@ fn print_control_acknowledgement(response: &Frame<'_>) {
     );
 }
 
-fn print_replies(replies: &[ReadReply], show_identity: bool) {
-    replies.iter().for_each(|reply| {
-        let payload = display_reply_payload(reply, show_identity);
+fn print_snapshot(snapshot: &DeviceSnapshot, show_identity: bool) {
+    snapshot.frames().for_each(|(request, response)| {
+        let payload = display_reply_payload(request, response.payload(), show_identity);
         println!(
             "{} -> {} payload_hex={payload}",
-            String::from_utf8_lossy(reply.request.frame()).trim_end(),
-            String::from_utf8_lossy(&reply.response.command()),
+            String::from_utf8_lossy(request.frame()).trim_end(),
+            String::from_utf8_lossy(&response.command()),
         );
     });
 }
 
-fn display_reply_payload(reply: &ReadReply, show_identity: bool) -> ReplyPayload<'_> {
-    match (reply.request, show_identity) {
-        (ReadCommand::Identity, false) => ReplyPayload::Redacted(reply.response.payload().len()),
-        _ => ReplyPayload::Hex(reply.response.payload()),
+fn display_reply_payload(
+    request: ReadCommand,
+    payload: &[u8],
+    show_identity: bool,
+) -> ReplyPayload<'_> {
+    match (request, show_identity) {
+        (ReadCommand::Identity, false) => ReplyPayload::Redacted(payload.len()),
+        _ => ReplyPayload::Hex(payload),
+    }
+}
+
+struct DeviceDescription<'a>(&'a DiscoveredDevice);
+
+impl fmt::Display for DeviceDescription<'_> {
+    fn fmt(&self, output: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let device = self.0;
+        write!(
+            output,
+            "id={} name={} rssi={}",
+            device.id,
+            device.name.as_deref().unwrap_or("(not advertised)"),
+            SignalStrength(device.rssi),
+        )
     }
 }
 
@@ -237,82 +243,37 @@ impl fmt::Display for ReplyPayload<'_> {
     }
 }
 
-enum ControlReadback {
-    Thresholds(&'static str),
-    Timer {
-        actual: TimerState,
-        matches_request: bool,
-    },
-    UnrecognizedTimer,
-}
+struct ControlReadbackDisplay<'a>(&'a ControlReadback);
 
-impl fmt::Display for ControlReadback {
+impl fmt::Display for ControlReadbackDisplay<'_> {
     fn fmt(&self, output: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Thresholds(status) => write!(output, "automatic threshold readback: {status}"),
-            Self::Timer {
-                actual,
-                matches_request,
-            } => write!(
+        match self.0 {
+            ControlReadback::Thresholds(Ok(readback)) => write!(
+                output,
+                "automatic threshold readback: {}",
+                describe_readback_match(readback.comparison),
+            ),
+            ControlReadback::Thresholds(Err(_)) => {
+                output.write_str("automatic threshold readback: unrecognized payload")
+            }
+            ControlReadback::Timer(Ok(readback)) => write!(
                 output,
                 "timer readback: remaining={} minute(s), original={} minute(s); {}",
-                actual.remaining.value(),
-                actual.original.value(),
-                describe_readback_match(*matches_request),
+                readback.actual.remaining.value(),
+                readback.actual.original.value(),
+                describe_readback_match(readback.comparison),
             ),
-            Self::UnrecognizedTimer => output.write_str("timer readback: unrecognized payload"),
+            ControlReadback::Timer(Err(_)) => {
+                output.write_str("timer readback: unrecognized payload")
+            }
         }
     }
 }
 
-fn compare_control_readback(command: ControlCommand, replies: &[ReadReply]) -> ControlReadback {
-    match command {
-        ControlCommand::SetAutomaticThresholds(requested) => compare_threshold_readback(
-            requested,
-            find_readback_payload(replies, ReadCommand::AutoThresholds),
-        ),
-        ControlCommand::SetTimer(requested) => compare_timer_readback(
-            requested,
-            find_readback_payload(replies, ReadCommand::Timer),
-        ),
-    }
-}
-
-fn find_readback_payload(replies: &[ReadReply], request: ReadCommand) -> Option<&[u8]> {
-    replies
-        .iter()
-        .find(|reply| reply.request == request)
-        .map(|reply| reply.response.payload())
-}
-
-fn compare_threshold_readback(
-    requested: AutomaticThresholds,
-    payload: Option<&[u8]>,
-) -> ControlReadback {
-    let status = match payload.map(AutomaticThresholds::parse) {
-        Some(Ok(actual)) => describe_readback_match(actual == requested),
-        Some(Err(_)) => "unrecognized payload",
-        None => "unavailable",
-    };
-    ControlReadback::Thresholds(status)
-}
-
-fn compare_timer_readback(requested: Minutes, payload: Option<&[u8]>) -> ControlReadback {
-    let timer = payload.and_then(|payload| TimerState::parse(payload).ok());
-    match timer {
-        Some(actual) => ControlReadback::Timer {
-            matches_request: actual.matches_requested_duration(requested),
-            actual,
-        },
-        None => ControlReadback::UnrecognizedTimer,
-    }
-}
-
-fn describe_readback_match(matches: bool) -> &'static str {
-    if matches {
-        "matches request"
-    } else {
-        "differs from request"
+fn describe_readback_match(comparison: ReadbackMatch) -> &'static str {
+    match comparison {
+        ReadbackMatch::Matches => "matches request",
+        ReadbackMatch::Differs => "differs from request",
     }
 }
 
@@ -320,65 +281,73 @@ fn describe_readback_match(matches: bool) -> &'static str {
 mod tests {
     use super::*;
 
+    use updraft_protocol::{PayloadError, Readback, ReadbackError, TimerState};
+
     #[test]
     fn borrowed_payload_display_preserves_hex_and_identity_redaction() {
-        let identity = ReadReply {
-            request: ReadCommand::Identity,
-            response: Frame::parse(b"#idrAB\n").unwrap(),
-        };
         assert_eq!(
-            display_reply_payload(&identity, false).to_string(),
-            "<redacted; 2 bytes>"
+            display_reply_payload(ReadCommand::Identity, b"AB", false).to_string(),
+            "<redacted; 2 bytes>",
         );
-        assert_eq!(display_reply_payload(&identity, true).to_string(), "4142");
-
-        let sensors = ReadReply {
-            request: ReadCommand::Sensors,
-            response: Frame::parse(b"#sdr\x00\xAF\n").unwrap(),
-        };
-        assert_eq!(display_reply_payload(&sensors, false).to_string(), "00AF");
+        assert_eq!(
+            display_reply_payload(ReadCommand::Identity, b"AB", true).to_string(),
+            "4142",
+        );
+        assert_eq!(
+            display_reply_payload(ReadCommand::Sensors, &[0x00, 0xAF], false).to_string(),
+            "00AF",
+        );
     }
 
     #[test]
-    fn threshold_report_distinguishes_values_from_missing_or_invalid_data() {
-        let requested = AutomaticThresholds {
+    fn threshold_report_formats_typed_outcomes() {
+        let actual = AutomaticThresholds {
             temperature: TemperatureTenthsF::new(1050),
             humidity: HumidityTenthsPercent::new(300),
         };
         [
-            (Some(b"041a012c".as_slice()), "matches request"),
-            (Some(b"041b012c".as_slice()), "differs from request"),
-            (Some(b"invalid!".as_slice()), "unrecognized payload"),
-            (None, "unavailable"),
+            (ReadbackMatch::Matches, "matches request"),
+            (ReadbackMatch::Differs, "differs from request"),
         ]
         .into_iter()
-        .for_each(|(payload, status)| {
+        .for_each(|(comparison, status)| {
+            let outcome = ControlReadback::Thresholds(Ok(Readback { actual, comparison }));
             assert_eq!(
-                compare_threshold_readback(requested, payload).to_string(),
+                ControlReadbackDisplay(&outcome).to_string(),
                 format!("automatic threshold readback: {status}"),
             );
         });
+        let outcome =
+            ControlReadback::Thresholds(Err(PayloadError::from(ReadbackError::InvalidHex)));
+        assert_eq!(
+            ControlReadbackDisplay(&outcome).to_string(),
+            "automatic threshold readback: unrecognized payload",
+        );
     }
 
     #[test]
-    fn timer_report_accepts_elapsed_time_but_detects_inconsistent_duration() {
-        let requested = Minutes::new(5);
+    fn timer_report_formats_typed_outcomes() {
         [
-            (b"00030005", 3, 5, "matches request"),
-            (b"00060005", 6, 5, "differs from request"),
-            (b"00030004", 3, 4, "differs from request"),
+            (ReadbackMatch::Matches, "matches request"),
+            (ReadbackMatch::Differs, "differs from request"),
         ]
         .into_iter()
-        .for_each(|(payload, remaining, original, status)| {
+        .for_each(|(comparison, status)| {
+            let outcome = ControlReadback::Timer(Ok(Readback {
+                actual: TimerState {
+                    remaining: Minutes::new(3),
+                    original: Minutes::new(5),
+                },
+                comparison,
+            }));
             assert_eq!(
-                compare_timer_readback(requested, Some(payload)).to_string(),
-                format!(
-                    "timer readback: remaining={remaining} minute(s), original={original} minute(s); {status}",
-                ),
+                ControlReadbackDisplay(&outcome).to_string(),
+                format!("timer readback: remaining=3 minute(s), original=5 minute(s); {status}"),
             );
         });
+        let outcome = ControlReadback::Timer(Err(PayloadError::from(ReadbackError::InvalidHex)));
         assert_eq!(
-            compare_timer_readback(requested, Some(b"bad data")).to_string(),
+            ControlReadbackDisplay(&outcome).to_string(),
             "timer readback: unrecognized payload",
         );
     }
