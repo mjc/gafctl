@@ -105,7 +105,23 @@ fn response_frame_parser_preserves_uninterpreted_payload_bytes() {
 
     assert_eq!(frame.command(), *b"sdr");
     assert_eq!(frame.payload(), b"00AF7F2A");
-    assert_eq!(frame.encode(), b"#sdr00AF7F2A\n");
+    assert_eq!(frame.as_bytes(), b"#sdr00AF7F2A\n");
+}
+
+#[test]
+fn parsed_frame_borrows_input_until_explicitly_owned() {
+    let mut input = b"#sdr00AF7F2A\n".to_vec();
+    let frame = Frame::parse(&input).unwrap();
+
+    assert_eq!(frame.as_bytes().as_ptr(), input.as_ptr());
+    let retained = frame.into_owned();
+    assert_ne!(retained.as_bytes().as_ptr(), input.as_ptr());
+    let owned_pointer = retained.as_bytes().as_ptr();
+    let retained = retained.into_owned();
+    assert_eq!(retained.as_bytes().as_ptr(), owned_pointer);
+
+    input[4] = b'X';
+    assert_eq!(retained.as_bytes(), b"#sdr00AF7F2A\n");
 }
 
 #[test]
@@ -134,7 +150,7 @@ fn sanitized_device_capture_replies_parse_without_losing_payloads() {
         let frame = Frame::parse(bytes).unwrap();
         assert_eq!(frame.command(), command);
         assert_eq!(frame.payload(), payload);
-        assert_eq!(frame.encode(), bytes);
+        assert_eq!(frame.as_bytes(), bytes);
     });
 }
 
@@ -155,9 +171,21 @@ fn frame_parser_rejects_incomplete_or_malformed_frames() {
 #[test]
 fn frame_decoder_handles_partial_and_coalesced_notifications() {
     let mut decoder = FrameDecoder::default();
+    let mut frames = Vec::new();
+    let completion = b"r\n#amr1\n";
 
-    assert!(decoder.push(b"#dm").unwrap().is_empty());
-    let frames = decoder.push(b"r\n#amr1\n").unwrap();
+    decoder
+        .push(b"#dm", |frame| frames.push(frame.into_owned()))
+        .unwrap();
+    assert!(frames.is_empty());
+    decoder
+        .push(completion, |frame| {
+            if frame.command() == *b"amr" {
+                assert_eq!(frame.as_bytes().as_ptr(), completion[2..].as_ptr());
+            }
+            frames.push(frame.into_owned());
+        })
+        .unwrap();
 
     assert_eq!(frames.len(), 2);
     assert_eq!(frames[0].command(), *b"dmr");
@@ -170,12 +198,19 @@ fn frame_decoder_rejects_oversized_complete_and_partial_frames() {
     let mut decoder = FrameDecoder::default();
     let oversized_frame = [b"#sdr".as_slice(), &vec![b'x'; 1021], b"\n"].concat();
 
-    assert_eq!(decoder.push(&oversized_frame), Err(FrameError::TooLong));
-    assert_eq!(decoder.push(&vec![b'x'; 1025]), Err(FrameError::TooLong));
     assert_eq!(
-        decoder.push(b"#dmr0\n").unwrap(),
-        vec![Frame::parse(b"#dmr0\n").unwrap()]
+        decoder.push(&oversized_frame, |_| {}),
+        Err(FrameError::TooLong)
     );
+    assert_eq!(
+        decoder.push(&vec![b'x'; 1025], |_| {}),
+        Err(FrameError::TooLong)
+    );
+    let mut recovered = Vec::new();
+    decoder
+        .push(b"#dmr0\n", |frame| recovered.push(frame.into_owned()))
+        .unwrap();
+    assert_eq!(recovered, vec![Frame::parse(b"#dmr0\n").unwrap()]);
 }
 
 #[test]
@@ -183,14 +218,38 @@ fn frame_decoder_accepts_maximum_length_and_recovers_after_malformed_partial() {
     let mut decoder = FrameDecoder::default();
     let maximum_frame = [b"#sdr".as_slice(), &vec![b'x'; 1019], b"\n"].concat();
 
+    let mut visited = 0;
+    decoder
+        .push(&maximum_frame, |frame| {
+            assert_eq!(frame.payload().len(), 1019);
+            visited += 1;
+        })
+        .unwrap();
+    assert_eq!(visited, 1);
+    decoder.push(b"#x", |_| unreachable!()).unwrap();
     assert_eq!(
-        decoder.push(&maximum_frame).unwrap()[0].payload().len(),
-        1019
+        decoder.push(b"!\n", |_| unreachable!()),
+        Err(FrameError::InvalidCommand)
     );
-    assert!(decoder.push(b"#x").unwrap().is_empty());
-    assert_eq!(decoder.push(b"!\n"), Err(FrameError::InvalidCommand));
+    decoder
+        .push(b"#dmr0\n", |frame| {
+            assert_eq!(frame.command(), *b"dmr");
+            visited += 1;
+        })
+        .unwrap();
+    assert_eq!(visited, 2);
+}
+
+#[test]
+fn frame_decoder_can_visit_before_later_frame_errors() {
+    let mut decoder = FrameDecoder::default();
+    let mut visited = 0;
+
     assert_eq!(
-        decoder.push(b"#dmr0\n").unwrap(),
-        vec![Frame::parse(b"#dmr0\n").unwrap()]
+        decoder.push(b"#dmr0\n#x!\n", |_| visited += 1),
+        Err(FrameError::InvalidCommand)
     );
+    assert_eq!(visited, 1);
+    decoder.push(b"#dmr0\n", |_| visited += 1).unwrap();
+    assert_eq!(visited, 2);
 }

@@ -52,6 +52,8 @@ Open ESP32 and ESPHome fan projects are useful design references. They are not a
 
 `updraft-protocol` encodes five state queries and two ordinary controls, and incrementally parses complete response lines while retaining payload bytes unchanged. `updraft-bluetooth` scans for the GAF service, selects a peripheral, subscribes to the response characteristic, sends queries, and can set automatic thresholds or timer duration. Firmware update operations are not implemented. Identity output is redacted by default; `--show-identity` prints the raw response and may reveal a device identifier.
 
+Parsed `Frame<'a>` values borrow the original wire bytes. Their payload and complete wire representation are available as slices; `into_owned()` retains a frame beyond the source buffer's lifetime. The decoder visits complete frames directly and reuses a buffer for fragmented frames. Bluetooth retains only the first matching response from each notification, while checking every complete frame for errors before accepting that response.
+
 Run a scan without connecting or sending protocol commands:
 
 ```sh

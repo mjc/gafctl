@@ -180,7 +180,7 @@ fn print_devices(devices: &[DiscoveredDevice]) {
     });
 }
 
-fn print_control_acknowledgement(response: &Frame) {
+fn print_control_acknowledgement(response: &Frame<'_>) {
     let acknowledgement = match response.payload() {
         b"0" => "success",
         _ => "unrecognized/error",

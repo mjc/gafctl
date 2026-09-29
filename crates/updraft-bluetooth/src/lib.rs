@@ -83,7 +83,7 @@ pub struct ReadReply {
     /// Read-only request sent to the device.
     pub request: ReadCommand,
     /// Matching response frame, preserving its raw payload bytes.
-    pub response: Frame,
+    pub response: Frame<'static>,
 }
 
 /// Result of scanning and, when selected, querying a peripheral.
@@ -102,7 +102,7 @@ pub enum ProbeResult {
         /// Responses to all state queries, in request order.
         replies: Vec<ReadReply>,
         /// Response to the optional ordinary control-setting write.
-        control_reply: Option<Frame>,
+        control_reply: Option<Frame<'static>>,
     },
 }
 
@@ -270,7 +270,7 @@ async fn query_peripheral(
     peripheral: &Peripheral,
     response_timeout: Duration,
     control_command: Option<ControlCommand>,
-) -> Result<(Vec<ReadReply>, Option<Frame>)> {
+) -> Result<(Vec<ReadReply>, Option<Frame<'static>>)> {
     let connected = ConnectedPeripheral::connect(peripheral).await?;
     let query_result = async {
         ReadySession::subscribe(&connected, response_timeout)
@@ -361,7 +361,7 @@ impl<'connected, 'device> ReadySession<'connected, 'device> {
     async fn query(
         mut self,
         control_command: Option<ControlCommand>,
-    ) -> Result<(Vec<ReadReply>, Option<Frame>)> {
+    ) -> Result<(Vec<ReadReply>, Option<Frame<'static>>)> {
         let control_reply = match control_command {
             Some(command) => {
                 let frame = command.frame();
@@ -404,7 +404,7 @@ impl<'connected, 'device> ReadySession<'connected, 'device> {
         frame: &[u8],
         response_id: [u8; 3],
         operation: &str,
-    ) -> Result<Frame> {
+    ) -> Result<Frame<'static>> {
         self.connected
             .peripheral
             .write(&self.characteristic, frame, self.write_type)
@@ -425,27 +425,65 @@ async fn await_response(
     decoder: &mut FrameDecoder,
     response_id: [u8; 3],
     response_timeout: Duration,
-) -> Result<Frame> {
+) -> Result<Frame<'static>> {
     timeout(
         response_timeout,
         notifications
             .by_ref()
             .filter(|notification| future::ready(notification.uuid == GAF_CHARACTERISTIC_UUID))
             .map(|notification| {
-                decoder
-                    .push(&notification.value)
+                decode_matching_response(decoder, &notification.value, response_id)
                     .map_err(anyhow::Error::from)
             })
-            .try_filter_map(|frames| {
-                future::ready(Ok::<_, anyhow::Error>(
-                    frames
-                        .into_iter()
-                        .find(|frame| frame.command() == response_id),
-                ))
-            })
+            .try_filter_map(|frame| future::ready(Ok::<_, anyhow::Error>(frame)))
             .try_next(),
     )
     .await
     .context("timed out waiting for matching BLE response")??
     .context("BLE notification stream ended")
+}
+
+fn decode_matching_response(
+    decoder: &mut FrameDecoder,
+    bytes: &[u8],
+    response_id: [u8; 3],
+) -> Result<Option<Frame<'static>>, updraft_protocol::FrameError> {
+    let mut matching = None;
+    decoder.push(bytes, |frame| {
+        if matching.is_none() && frame.command() == response_id {
+            matching = Some(frame.into_owned());
+        }
+    })?;
+    Ok(matching)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use updraft_protocol::FrameError;
+
+    #[test]
+    fn first_matching_response_survives_later_notifications() {
+        let mut decoder = FrameDecoder::default();
+        assert_eq!(
+            decode_matching_response(&mut decoder, b"#dm", *b"dmr").unwrap(),
+            None
+        );
+        let response = decode_matching_response(&mut decoder, b"ran\n#dmraf\n", *b"dmr")
+            .unwrap()
+            .unwrap();
+        decode_matching_response(&mut decoder, b"#atr", *b"dmr").unwrap();
+        assert_eq!(
+            decode_matching_response(&mut decoder, b"041a012c\n", *b"dmr").unwrap(),
+            None
+        );
+        assert_eq!(response.as_bytes(), b"#dmran\n");
+    }
+
+    #[test]
+    fn malformed_trailing_frame_invalidates_matching_response() {
+        let mut decoder = FrameDecoder::default();
+        let error = decode_matching_response(&mut decoder, b"#dmran\nx\n", *b"dmr").unwrap_err();
+        assert_eq!(error, FrameError::InvalidStart);
+    }
 }

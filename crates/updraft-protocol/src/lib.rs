@@ -5,6 +5,8 @@
 //! payloads remain opaque unless their semantics are verified from app code or
 //! device capture. Firmware update commands are not represented here.
 
+use std::borrow::Cow;
+
 use thiserror::Error;
 
 /// Temperature in tenths of a degree Fahrenheit, as carried on the wire.
@@ -208,16 +210,18 @@ impl ControlCommand {
     }
 }
 
-/// One complete `#<three-byte-id><payload>\n` protocol line.
+/// One validated `#<three-byte-id><payload>\n` protocol line.
+///
+/// Parsed frames borrow transport bytes. Call [`Self::into_owned`] only when a
+/// response must outlive its input buffer.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct Frame {
-    command: [u8; 3],
-    payload: Box<[u8]>,
+pub struct Frame<'a> {
+    wire: Cow<'a, [u8]>,
 }
 
-impl Frame {
-    /// Parse one complete line, retaining the payload without interpretation.
-    pub fn parse(bytes: &[u8]) -> Result<Self, FrameError> {
+impl<'a> Frame<'a> {
+    /// Validate one complete line without copying its bytes.
+    pub fn parse(bytes: &'a [u8]) -> Result<Self, FrameError> {
         let body = bytes.strip_prefix(b"#").ok_or(FrameError::InvalidStart)?;
         let body = body
             .strip_suffix(b"\n")
@@ -225,12 +229,9 @@ impl Frame {
 
         match (body.contains(&b'\n'), body.split_at_checked(3)) {
             (true, _) => Err(FrameError::TrailingData),
-            (false, Some((&[a, b, c], payload)))
-                if [a, b, c].iter().all(u8::is_ascii_alphabetic) =>
-            {
+            (false, Some((&[a, b, c], _))) if [a, b, c].iter().all(u8::is_ascii_alphabetic) => {
                 Ok(Self {
-                    command: [a, b, c],
-                    payload: payload.into(),
+                    wire: Cow::Borrowed(bytes),
                 })
             }
             _ => Err(FrameError::InvalidCommand),
@@ -239,25 +240,28 @@ impl Frame {
 
     /// Return the three-byte command identifier.
     #[must_use]
-    pub const fn command(&self) -> [u8; 3] {
-        self.command
+    pub fn command(&self) -> [u8; 3] {
+        [self.wire[1], self.wire[2], self.wire[3]]
     }
 
     /// Return the unparsed bytes between the command identifier and line feed.
     #[must_use]
     pub fn payload(&self) -> &[u8] {
-        &self.payload
+        &self.wire[4..self.wire.len() - 1]
     }
 
-    /// Encode this frame with the observed prefix and line terminator.
+    /// Return the complete, original wire bytes without allocating.
     #[must_use]
-    pub fn encode(&self) -> Vec<u8> {
-        let mut bytes = Vec::with_capacity(self.payload.len() + 5);
-        bytes.push(b'#');
-        bytes.extend_from_slice(&self.command);
-        bytes.extend_from_slice(&self.payload);
-        bytes.push(b'\n');
-        bytes
+    pub fn as_bytes(&self) -> &[u8] {
+        self.wire.as_ref()
+    }
+
+    /// Copy borrowed wire bytes only when the response must be retained.
+    #[must_use]
+    pub fn into_owned(self) -> Frame<'static> {
+        Frame {
+            wire: Cow::Owned(self.wire.into_owned()),
+        }
     }
 }
 
@@ -268,37 +272,46 @@ pub struct FrameDecoder {
 }
 
 impl FrameDecoder {
-    /// Add transport bytes and return every complete frame now available.
-    pub fn push(&mut self, bytes: &[u8]) -> Result<Vec<Frame>, FrameError> {
+    /// Visit each complete frame without allocating an output collection.
+    ///
+    /// A callback may have run before a later malformed frame returns an error.
+    /// Borrowed frames are valid only during the callback; retain one with
+    /// [`Frame::into_owned`] when it must outlive this call.
+    pub fn push(
+        &mut self,
+        bytes: &[u8],
+        mut visit: impl for<'frame> FnMut(Frame<'frame>),
+    ) -> Result<(), FrameError> {
         const MAX_FRAME_LEN: usize = 1024;
 
-        let frames = bytes.split_inclusive(|byte| *byte == b'\n').try_fold(
-            Vec::new(),
-            |mut frames, chunk| match (
-                chunk.len() > MAX_FRAME_LEN.saturating_sub(self.pending.len()),
-                chunk.ends_with(b"\n"),
-                self.pending.is_empty(),
-            ) {
-                (true, _, _) => Err(FrameError::TooLong),
-                (false, true, true) => {
-                    frames.push(Frame::parse(chunk)?);
-                    Ok(frames)
+        let result = bytes
+            .split_inclusive(|byte| *byte == b'\n')
+            .try_for_each(|chunk| {
+                match (
+                    chunk.len() > MAX_FRAME_LEN.saturating_sub(self.pending.len()),
+                    chunk.ends_with(b"\n"),
+                    self.pending.is_empty(),
+                ) {
+                    (true, _, _) => Err(FrameError::TooLong),
+                    (false, true, true) => {
+                        visit(Frame::parse(chunk)?);
+                        Ok(())
+                    }
+                    (false, true, false) => {
+                        self.pending.extend_from_slice(chunk);
+                        visit(Frame::parse(&self.pending)?);
+                        self.pending.clear();
+                        Ok(())
+                    }
+                    (false, false, _) => {
+                        self.pending.extend_from_slice(chunk);
+                        Ok(())
+                    }
                 }
-                (false, true, false) => {
-                    self.pending.extend_from_slice(chunk);
-                    frames.push(Frame::parse(&self.pending)?);
-                    self.pending.clear();
-                    Ok(frames)
-                }
-                (false, false, _) => {
-                    self.pending.extend_from_slice(chunk);
-                    Ok(frames)
-                }
-            },
-        );
+            });
 
-        match frames {
-            Ok(frames) => Ok(frames),
+        match result {
+            Ok(()) => Ok(()),
             Err(error) => {
                 self.pending.clear();
                 Err(error)
