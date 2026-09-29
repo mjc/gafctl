@@ -1,6 +1,4 @@
 mod cli;
-#[cfg(feature = "heap-track")]
-mod heap_track;
 mod output;
 
 use anyhow::Result;

@@ -122,11 +122,7 @@ pub(crate) async fn run() -> Result<()> {
 
 async fn run_ble_probe(options: BleOptions) -> Result<()> {
     let show_identity = options.show_identity;
-    #[cfg(feature = "heap-track")]
-    let before = crate::heap_track::snapshot();
     let probe_result = probe(options.into_probe_options()).await;
-    #[cfg(feature = "heap-track")]
-    crate::heap_track::report_since(before);
     let result = probe_result.context("BLE probe failed")?;
     crate::output::print_probe_result(result, show_identity);
     Ok(())

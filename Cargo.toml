@@ -20,9 +20,6 @@ default-members = [
 ]
 resolver = "3"
 
-[features]
-heap-track = []
-
 [workspace.dependencies]
 anyhow = "1.0.104"
 axum = { version = "0.8.9", default-features = false, features = ["http1", "json", "tokio", "tracing"] }

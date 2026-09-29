@@ -49,16 +49,6 @@ The protocol has five state queries and two controls. Queries run in sequence. E
 
 `Frame::parse` borrows a slice. `Frame::from_bytes` shares `Bytes` storage. `into_owned()` copies only when needed. The decoder parses complete frames in place and assembles fragments in `BytesMut`. BLE retains notification storage for the matching response.
 
-## Heap tracking
-
-The optional `heap-track` feature prints Rust allocation counts during a BLE probe:
-
-```sh
-cargo run --features heap-track -- probe ble
-```
-
-Use `--scan-only` to count discovery. The report includes allocations, zeroed allocations, reallocations, deallocations, and requested or released bytes. Startup and output formatting are outside the measurement. Native Bluetooth allocations are not counted.
-
 ## Development
 
 The repository uses devenv and pins Rust in `rust-toolchain.toml`:
