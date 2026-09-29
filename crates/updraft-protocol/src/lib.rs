@@ -1,7 +1,7 @@
 //! GAF attic fan protocol types and codecs.
 //!
 //! State query and ordinary control IDs and ASCII line framing are recovered
-//! from the legacy `com.gaf.wifivent` app and its bundled firmware. Reply
+//! from the GAF Wi-Fi Vent app (`com.gaf.wifivent`) and its bundled firmware. Reply
 //! payloads remain opaque unless their semantics are verified from app code or
 //! device capture. Firmware update commands are not represented here.
 

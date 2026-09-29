@@ -10,7 +10,7 @@ The environment includes Clippy, rustfmt, rust-analyzer, Rust sources, LLVM cove
 
 ## Dependencies
 
-Versions are declared in `[workspace.dependencies]`. Each crate opts into the dependencies and features it uses. The scaffold includes these dependencies ahead of their implementation.
+Versions are declared in `[workspace.dependencies]`. Each crate opts into the dependencies and features it uses.
 
 | Area | Crates | Intended use |
 | --- | --- | --- |
@@ -23,11 +23,11 @@ Versions are declared in `[workspace.dependencies]`. Each crate opts into the de
 | Protocol tests | `proptest` | Generated valid/invalid inputs and codec round trips once the format is known |
 | API tests | `tower`, `http-body-util` | Exercise the Axum router and inspect response bodies without opening a port |
 
-[Axum](https://docs.rs/axum/0.8.9/axum/) fits the Tokio runtime and Tower middleware. HTTP/JSON is the planned interface between the service and a thin Home Assistant adapter. No endpoint paths or device schema are fixed yet.
+[Axum](https://docs.rs/axum/0.8.9/axum/) fits the Tokio runtime and Tower middleware. HTTP/JSON is the planned interface between the service and a thin Home Assistant adapter. Endpoint paths and device schema are still being defined.
 
-[btleplug](https://github.com/deviceplug/btleplug) is a candidate for the legacy app's Bluetooth path. It supports BLE central operation on macOS and Linux; it does not support Bluetooth Classic. Device captures still need to confirm GAF's services, characteristics, and handshake. Linux builds need D-Bus development files, included by devenv; runtime access needs BlueZ and a usable adapter. On macOS, the process needs Bluetooth permission before device operations can work.
+[btleplug](https://github.com/deviceplug/btleplug) provides the GAF Wi-Fi Vent app's Bluetooth transport. It supports BLE central operation on macOS and Linux; it does not support Bluetooth Classic. Device captures still need to confirm GAF's services, characteristics, and handshake. Linux builds need D-Bus development files, included by devenv; runtime access needs BlueZ and a usable adapter. On macOS, the process needs Bluetooth permission before device operations can work.
 
-Wi-Fi starts with Tokio's TCP/UDP support. Socket availability does not establish whether the fan accepts connections on a home LAN or only its own access point.
+Tokio provides TCP/UDP support. The GAF Wi-Fi Vent accepts connections on its access point; home-LAN connectivity is unverified.
 
 ## Add when needed
 
@@ -39,7 +39,7 @@ Wi-Fi starts with Tokio's TCP/UDP support. Socket availability does not establis
 - OpenAPI generation once the local API schema exists.
 - Fuzzing once there is a parser, and benchmarks once there is a measured performance question.
 
-These are candidates, not installed dependencies. No AWS SDK, database, or MQTT broker is required for the current scaffold.
+Add these dependencies when their features enter implementation. The workspace does not use AWS SDK, a database, or MQTT.
 
 ## Checks
 
@@ -65,4 +65,4 @@ cargo machete
 cargo tree --duplicates
 ```
 
-Coverage becomes useful once tests exist. Machete will currently report planned dependencies as unused; review those findings as code lands. Do not suppress them globally. The dependency check command covers advisories and sources; a project license policy has not yet been selected.
+Run coverage for the code paths with tests. Review unused-dependency reports as dependencies enter use. `cargo deny check advisories sources` checks dependency advisories and sources; the license policy is unset.

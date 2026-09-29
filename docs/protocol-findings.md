@@ -1,16 +1,16 @@
-# Legacy GAF Wi-Fi Vent protocol findings
+# GAF Wi-Fi Vent protocol findings
 
-This document combines static findings from the installed `com.gaf.wifivent` app and bundled firmware with live BLE queries and one ordinary fan-control write against the nearby GAF vent. The captures confirm query responses, a setter acknowledgement, and matching configuration readback; the device identifier is intentionally redacted. They do not prove physical fan operation.
+This document records static analysis of the GAF Wi-Fi Vent app and firmware, plus BLE queries and ordinary control writes against one fan. The device identifier is redacted. Controller responses report configuration and status; they do not measure airflow.
 
 ## Transport findings
 
-- Installed app: `/Applications/Wi-Fi® Vent.app/Wrapper/gafs.app`, bundle ID `com.gaf.wifivent`, version 2.1.
+- GAF Wi-Fi Vent app: version 2.1, bundle ID `com.gaf.wifivent`.
 - The bundled setup instructions direct the phone to join the fan's `GAFVent_XXXX` Wi-Fi access point before opening the app.
 - The app uses Wi-Fi TCP at `192.168.4.1` and Bluetooth LE. Both transport paths use the same text command family.
 - BLE service UUID: `00FF`; command characteristic UUID: `FF01`.
 - Text framing: `#<three-character-command><payload>\n`. The Wi-Fi OTA path can append a binary payload before the final line feed.
 - The bundled `GAFVent_030000.bin` (1,039,680 bytes; SHA-256 `badf3a57571fd66ca3df76eeaeb988549334ceff72b5c9f7e58082732089f260`) is a structurally valid ESP32 application image. It contains GAF fan-control code, BLE GATT, a TLS TCP server, AP/DHCP setup, and OTA partition-writing code. Its listening port has not yet been recovered, and no OTA operation was sent to the device.
-- Instruction-level analysis confirms the GAF application explicitly selects `WIFI_MODE_AP` during Wi-Fi startup. The image reports ESP-IDF `v3.1-dev-1193-g64b56bef-dirty`; the linked SDK contains generic station-mode code, but no GAF application flow for home SSID/password provisioning or router connection was found. Station mode is supported by the ESP32 SDK, so adding it appears technically feasible with firmware changes; changing the AP mode value alone would not implement credential setup, station connection, or reconnect handling. This is evidence about this app and bundled image, not proof that every hardware/firmware revision lacks such a feature.
+- Instruction-level analysis confirms the GAF application explicitly selects `WIFI_MODE_AP` during Wi-Fi startup. The image reports ESP-IDF `v3.1-dev-1193-g64b56bef-dirty`; the linked SDK contains generic station-mode code, but no GAF application flow for home SSID/password provisioning or router connection was found. Station mode is supported by the ESP32 SDK, so adding it appears technically feasible with firmware changes; changing the AP mode value alone would not implement credential setup, station connection, or reconnect handling. This describes app version 2.1 and the analyzed image. Other firmware revisions may differ.
 - The image appears to be a custom GAF application built on ESP-IDF and its bundled open-source components. The `dirty` SDK version suffix indicates local changes in the SDK checkout at build time; it does not establish that the GAF application is a modified public project or that its source is available.
 
 ## Command inventory
@@ -27,7 +27,7 @@ This document combines static findings from the installed `com.gaf.wifivent` app
 | `#ams%04X%04X\n` | `#amr%1d\n` | Start automatic mode with temperature tenths Fahrenheit first, humidity tenths percent second. App scales each input by 0.1 before formatting. One write using the existing 105.0°F / 30.0% settings was acknowledged and read back unchanged. |
 | `#tms%04X\n` | `#tmr%1d\n` | Start timer mode. Payload is duration in minutes; the app converts input seconds to rounded minutes before formatting. One-minute and zero-minute writes both succeeded; timer readback matched 1/1 and 0/0 respectively. |
 
-The app also constructs firmware-update and reboot operations: `ois`, `oms`, `ome`, and `rbs`, with replies `oir`, `osr`, `oer`, and `rbr`. They are documented for completeness and must not be used for ordinary discovery. The firmware has an additional unexplained `#pptP` token; it is not mapped to an app operation.
+The app also contains firmware-update and reboot operations: `ois`, `oms`, `ome`, and `rbs`, with replies `oir`, `osr`, `oer`, and `rbr`. They are documented for completeness and must not be used for ordinary discovery. The firmware has an additional unexplained `#pptP` token; it is not mapped to an app operation.
 
 ## Exact-device BLE capture and control verification
 
@@ -43,7 +43,7 @@ On 2026-09-29, Updraft scanned for service `00FF`, found one GAF BLE peripheral,
 
 A repeat run of the built CLI later the same day received all five replies again. The CLI represents payload bytes as hex, so sensor payload `3033646130306130` is the ASCII text `03da00a0`, which the app decoder reads as `98.6°F` and `16.0%`; threshold, mode, timer, and firmware-version fields were unchanged. The changing sensor values are consistent with live readings, while the repeated getters show the response path is reproducible.
 
-The sensor and threshold values are decoded by parsing each four-character hexadecimal field and multiplying by 0.1. The app displays temperature in Fahrenheit. Timer fields are hexadecimal minutes in remaining/original order. These are controller reports captured at one point in time and do not confirm physical airflow.
+Temperature and humidity fields are four-character hexadecimal values in tenths; the app displays temperature in Fahrenheit. Timer fields contain remaining and original minutes. The controller-reported fan flag and sensor values do not measure physical airflow.
 
 The ordinary controls were exercised and then restored:
 
@@ -53,17 +53,17 @@ The ordinary controls were exercised and then restored:
 4. `#tms0000\n` cleared the timer. It returned `#tmr0\n`; the controller reported timer/off and `ttg` returned zero/zero.
 5. `#ams041A012C\n` restored the original thresholds and automatic mode. It returned `#amr0\n`, `atg` read back 105.0°F / 30.0%, and `ttg` read zero/zero. The final controller report was automatic/off, with sensors at 99.7°F / 15.8%.
 
-The configuration settings and timer were restored to the values observed before testing. The controller-reported fan flag changed from on to off during the test and remained off in the final readback; physical airflow was not measured. No firmware update command was sent, and Updraft does not expose firmware update operations.
+The test restored the original thresholds, zero timer, and automatic mode. The controller-reported fan flag changed from on to off. No firmware update command was sent; Updraft has no firmware-update operation.
 
-## Probe safety and next steps
+## Tool scope and remaining work
 
-The diagnostic tool defaults to BLE and redacts device identity by default. It exposes the read-only requests above and ordinary automatic-threshold and timer writes, each followed by state readback. Firmware update operations are not implemented. These tests confirm acknowledgements and reported configuration, not physical airflow.
+The tool defaults to BLE and redacts device identity. It supports the listed state queries and ordinary threshold and timer writes, followed by state readback. It has no firmware-update operation.
 
-Next evidence needed:
+Remaining work:
 
 1. Confirm the exact fan/controller model and installed firmware revision independently of the redacted identity field.
 2. Re-run identity/mode/sensor/threshold/timer reads and ordinary control tests as needed; retain redacted request/response bytes with timestamps.
-3. Implement a separate Wi-Fi TLS probe if needed. The spare Linux box with unused Wi-Fi can join the fan AP for that investigation; this is not needed for the currently working BLE read path. Do not inspect or publish certificate/private-key contents.
+3. Capture the Wi-Fi TLS exchange from the fan access point if implementing Wi-Fi support. Keep certificate and private-key contents out of the repository.
 4. Extend the same acknowledgement and readback approach for other ordinary controls only after their ranges and effects are understood; do not treat a setter acknowledgement as proof of physical airflow.
 
-Home-LAN Wi-Fi provisioning remains unconfirmed. BLE queries and an ordinary threshold write have succeeded on the nearby exact device, so a nearby proxy can communicate with it without requiring the Home Assistant host to join the fan AP. Wi-Fi control is still a separate, unimplemented transport path.
+Home-LAN Wi-Fi provisioning remains unconfirmed. BLE queries and a threshold write succeeded without joining the fan access point. Wi-Fi control is not implemented.

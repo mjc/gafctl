@@ -16,7 +16,7 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
-    /// Inspect the legacy GAF protocol over a device transport.
+    /// Inspect the GAF Wi-Fi Vent over a device transport.
     Probe(ProbeCommand),
 }
 
