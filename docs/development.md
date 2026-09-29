@@ -49,11 +49,11 @@ From the active devenv environment:
 cargo check --workspace --all-targets --locked
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets --locked -- -D warnings
-cargo nextest run --workspace --locked --no-tests=warn
+cargo nextest run --workspace --all-targets --locked
 cargo test --workspace --doc --locked
 ```
 
-`devenv tasks run check:all` runs formatting, Clippy, nextest, and doctests. Nextest does not run doctests, so they have their own command. The scaffold currently has no tests; `--no-tests=warn` makes that visible without failing setup. Remove the allowance when the first tests are added. The nextest CI profile disables fail-fast and writes JUnit results under `target/nextest/ci/`.
+`devenv tasks run check:test` runs the workspace test targets with nextest. It fails when no tests are discovered. `devenv tasks run check:all` runs formatting, Clippy, all-target nextest, and doctests. Nextest does not run doctests, so they have their own command. Protocol frame and control-command encoding have focused integration tests. The nextest CI profile disables fail-fast and writes JUnit results under `target/nextest/ci/`.
 
 Useful tools as implementation grows:
 

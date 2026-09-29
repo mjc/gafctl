@@ -1427,6 +1427,7 @@ dependencies = [
 name = "updraft-bluetooth"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "btleplug",
  "futures-util",
  "thiserror",

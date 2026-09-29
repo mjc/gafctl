@@ -1,0 +1,61 @@
+# Legacy GAF Wi-Fi Vent protocol findings
+
+This document combines static findings from the installed `com.gaf.wifivent` app and bundled firmware with live BLE queries and one ordinary fan-control write against the nearby GAF vent. The captures confirm query responses, a setter acknowledgement, and matching configuration readback; the device identifier is intentionally redacted. They do not prove physical fan operation.
+
+## Transport findings
+
+- Installed app: `/Applications/Wi-Fi® Vent.app/Wrapper/gafs.app`, bundle ID `com.gaf.wifivent`, version 2.1.
+- The bundled setup instructions direct the phone to join the fan's `GAFVent_XXXX` Wi-Fi access point before opening the app.
+- The app uses Wi-Fi TCP at `192.168.4.1` and Bluetooth LE. Both transport paths use the same text command family.
+- BLE service UUID: `00FF`; command characteristic UUID: `FF01`.
+- Text framing: `#<three-character-command><payload>\n`. The Wi-Fi OTA path can append a binary payload before the final line feed.
+- The bundled `GAFVent_030000.bin` (1,039,680 bytes; SHA-256 `badf3a57571fd66ca3df76eeaeb988549334ceff72b5c9f7e58082732089f260`) is a structurally valid ESP32 application image. It contains GAF fan-control code, BLE GATT, a TLS TCP server, AP/DHCP setup, and OTA partition-writing code. Its listening port has not yet been recovered, and no OTA operation was sent to the device.
+- Instruction-level analysis confirms the GAF application explicitly selects `WIFI_MODE_AP` during Wi-Fi startup. The image reports ESP-IDF `v3.1-dev-1193-g64b56bef-dirty`; the linked SDK contains generic station-mode code, but no GAF application flow for home SSID/password provisioning or router connection was found. Station mode is supported by the ESP32 SDK, so adding it appears technically feasible with firmware changes; changing the AP mode value alone would not implement credential setup, station connection, or reconnect handling. This is evidence about this app and bundled image, not proof that every hardware/firmware revision lacks such a feature.
+- The image appears to be a custom GAF application built on ESP-IDF and its bundled open-source components. The `dirty` SDK version suffix indicates local changes in the SDK checkout at build time; it does not establish that the GAF application is a modified public project or that its source is available.
+
+## Read-only commands
+
+`%04X` is uppercase, zero-padded hexadecimal as constructed by the app. `%04x` and `%1d` are firmware reply formatting. The app's response decoder establishes the read field order, scales, and units below. The app parser accepts the exact `amr` payload `0` as a successful acknowledgement; other values are rejected as invalid data. One successful `ams` acknowledgement and matching threshold readback have been observed; accepted ranges remain unverified.
+
+| Request | Response | Interpretation |
+| --- | --- | --- |
+| `#idg\n` | `#idr%s%s\n` | Read identity. First six decimal characters encode firmware version (`030000` = 3.0.0); the remaining identity is sensitive and must be redacted. |
+| `#dmg\n` | `#dmr\n` | Read mode. First response character `a` = automatic, `t` = timer, `o` = OTA; second character `f`/`n` is the controller's fan-off/on flag. |
+| `#sdg\n` | `#sdr%04x%04x\n` | Read temperature then humidity; both hexadecimal fields are tenths (`97.0°F`, `17.0%` in the observed capture). |
+| `#atg\n` | `#atr%04x%04x\n` | Read automatic temperature then humidity thresholds; both are tenths (`105.0°F`, `30.0%` in the observed capture). |
+| `#ttg\n` | `#ttr%04x%04x\n` | Read remaining timer minutes then original timer minutes; app converts them to seconds internally. |
+| `#ams%04X%04X\n` | `#amr%1d\n` | Start automatic mode with temperature tenths Fahrenheit first, humidity tenths percent second. App scales each input by 0.1 before formatting. One write using the existing 105.0°F / 30.0% settings was acknowledged and read back unchanged. |
+| `#tms%04X\n` | `#tmr%1d\n` | Start timer mode. Payload is duration in minutes; the app converts input seconds to rounded minutes before formatting. Setter behavior has not been tried on-device. |
+
+The app also constructs firmware-update and reboot operations: `ois`, `oms`, `ome`, and `rbs`, with replies `oir`, `osr`, `oer`, and `rbr`. They are documented for completeness and must not be used for ordinary discovery. The firmware has an additional unexplained `#pptP` token; it is not mapped to an app operation.
+
+## Exact-device BLE capture and control verification
+
+On 2026-09-29, Updraft scanned for service `00FF`, found one GAF BLE peripheral, connected to characteristic `FF01`, subscribed to notifications, sent the five getter commands, matched their replies, and disconnected. The peripheral identifier and identity suffix are omitted. A separate ordinary threshold-setting request was also sent as described below. No OTA, reboot, reset, or pairing-change operation was sent.
+
+| Request | Reply mnemonic | Redacted reply payload | App-decoded result |
+| --- | --- | --- | --- |
+| `idg` | `idr` | `030000…` | Firmware version field `030000` (3.0.0); remaining device identity redacted. |
+| `dmg` | `dmr` | `af` | Automatic mode; controller reports fan off. This is not proof of motor state. |
+| `sdg` | `sdr` | `03ca00aa` | `97.0°F`, `17.0%` relative humidity. |
+| `atg` | `atr` | `041a012c` | `105.0°F`, `30.0%` thresholds. |
+| `ttg` | `ttr` | `00000000` | 0 remaining minutes, 0 original minutes. |
+
+A repeat run of the built CLI later the same day received all five replies again. The CLI represents payload bytes as hex, so sensor payload `3033646130306130` is the ASCII text `03da00a0`, which the app decoder reads as `98.6°F` and `16.0%`; threshold, mode, timer, and firmware-version fields were unchanged. The changing sensor values are consistent with live readings, while the repeated getters show the response path is reproducible.
+
+The sensor and threshold values are decoded by parsing each four-character hexadecimal field and multiplying by 0.1. The app displays temperature in Fahrenheit. Timer fields are hexadecimal minutes in remaining/original order. These are controller reports captured at one point in time and do not confirm physical airflow.
+
+An explicit control run sent `#ams041A012C\n`, which sets automatic mode with the already reported 105.0°F / 30.0% thresholds. The device replied `#amr0\n`; static app analysis confirms payload `0` is parsed as ACK and invokes the success callback. The same session queried all five values: the controller still reported automatic/off, `sdg` payload `03e200a0` decoded to `99.4°F` and `16.0%`, `atg` returned `041a012c` matching the requested thresholds, and `ttg` remained zero; identity version stayed `030000` with the suffix redacted. No threshold change was intended. No firmware update command was sent, and Updraft does not expose firmware update operations.
+
+## Probe safety and next steps
+
+The diagnostic tool defaults to BLE and redacts device identity by default. It exposes the read-only requests above and one ordinary fan-control write for automatic thresholds, with immediate state readback. Firmware update operations are not implemented. The currently confirmed control result is setter acknowledgement plus matching configuration readback, not physical airflow confirmation.
+
+Next evidence needed:
+
+1. Confirm the exact fan/controller model and installed firmware revision independently of the redacted identity field.
+2. Re-run only identity/mode/sensor/threshold/timer reads as needed and retain redacted request/response bytes with timestamps.
+3. Implement a separate Wi-Fi TLS probe if needed. The spare Linux box with unused Wi-Fi can join the fan AP for that investigation; this is not needed for the currently working BLE read path. Do not inspect or publish certificate/private-key contents.
+4. Extend the same acknowledgement and readback approach for other ordinary controls only after their ranges and effects are understood; do not treat a setter acknowledgement as proof of physical airflow.
+
+Home-LAN Wi-Fi provisioning remains unconfirmed. BLE queries and an ordinary threshold write have succeeded on the nearby exact device, so a nearby proxy can communicate with it without requiring the Home Assistant host to join the fan AP. Wi-Fi control is still a separate, unimplemented transport path.

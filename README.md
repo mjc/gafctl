@@ -2,7 +2,7 @@
 
 Updraft is a Rust proxy for GAF Master Flow powered attic vents. The first target is the older **GAF Wi-Fi Vent** generation controlled by the `com.gaf.wifivent` app. The goal is to read fan state and control the fan from Home Assistant while keeping the GAF controller's stock firmware.
 
-This repository is an early scaffold. It does not yet connect to a fan or expose Home Assistant entities.
+The repository contains a BLE diagnostic probe for the legacy fan. It can discover a fan, query state, and optionally set automatic temperature/humidity thresholds. The service and Home Assistant API are still scaffolding.
 
 ## How it will work
 
@@ -10,7 +10,7 @@ This repository is an early scaffold. It does not yet connect to a fan or expose
 GAF attic fan <-- verified Wi-Fi or Bluetooth protocol --> Updraft <-- local API --> Home Assistant adapter
 ```
 
-The legacy app advertises direct Wi-Fi and Bluetooth control. Its exact transport, pairing method, message format, and behavior on the target fan still need to be measured. Updraft will implement only operations confirmed against the device.
+Static reverse engineering found the legacy app uses the same command family over BLE GATT and a Wi-Fi TCP connection. BLE uses service `00FF` and characteristic `FF01`; the app's Wi-Fi host is `192.168.4.1`. The installed app's setup guide joins the fan's `GAFVent_XXXX` access point. The probe has received identity, mode, sensor, threshold, and timer replies over BLE without joining that access point. An opt-in automatic-threshold write also received an acknowledgement and matching threshold readback. The capture and remaining uncertainties are documented in [protocol findings](docs/protocol-findings.md).
 
 The Cargo workspace has four crates:
 
@@ -50,11 +50,39 @@ Open ESP32 and ESPHome fan projects are useful design references. They are not a
 
 ## Development status
 
-The workspace has dependencies and development tooling in place, but no protocol or HTTP endpoint implementation. Work starts with redacted captures from the stock app and fan, followed by protocol fixtures and tests. Once the transport is known, the service API and Home Assistant adapter can be fixed to observed capabilities. Bluetooth and Wi-Fi may use different framing; their crates can keep transport-specific framing while sharing verified command and state types from `updraft-protocol`.
+`updraft-protocol` encodes five state queries and the automatic-threshold control, and incrementally parses complete response lines while retaining payload bytes unchanged. `updraft-bluetooth` scans for the GAF service, selects a peripheral, subscribes to the response characteristic, sends queries, and can send the explicit automatic-threshold write. Firmware update operations are not implemented. Identity output is redacted by default; `--show-identity` prints the raw response and may reveal a device identifier.
+
+Run a scan without connecting or sending protocol commands:
+
+```sh
+cargo run -- probe ble --scan-only
+```
+
+If exactly one GAF peripheral is found, the read-only probe can run directly:
+
+```sh
+cargo run -- probe ble
+```
+
+If multiple fans are nearby, pass one ID printed by scan-only mode:
+
+```sh
+cargo run -- probe ble --device-id <peripheral-id>
+```
+
+To exercise the automatic-mode setting write and immediately read it back, provide temperature in tenths of a degree Fahrenheit followed by humidity in tenths of a percent. The currently observed settings are 1050 and 300:
+
+```sh
+cargo run -- probe ble --set-auto-thresholds-tenths 1050 300
+```
+
+This sends the normal fan-control command `ams` and checks the subsequent threshold response. The acknowledgement and configuration readback do not prove physical airflow. Firmware update commands are not exposed.
+
+The Wi-Fi server port and TLS trust setup remain unknown, so the Wi-Fi client is not implemented yet. If Wi-Fi investigation is still needed, the target can run from one of the Linux boxes whose Wi-Fi is available for joining the fan AP; that is separate from the working BLE path.
 
 ## Development
 
-The repository uses devenv and pins Rust in `rust-toolchain.toml`. Review the environment files, then run from the repository root:
+The repository uses devenv and pins Rust in `rust-toolchain.toml`. From the repository root, run:
 
 ```sh
 devenv allow
@@ -62,7 +90,7 @@ devenv shell
 devenv tasks run check:all
 ```
 
-Inside the environment, Cargo commands run directly. The checks cover formatting, Clippy, nextest, and doctests. There are no tests yet; the test task reports the empty suite explicitly.
+Inside the environment, Cargo commands run directly. The checks cover formatting, Clippy, nextest, and doctests. Protocol framing and incremental response decoding have focused integration tests. The Bluetooth probe has passed a live read/write/readback cycle against the nearby vent; that device evidence is separate from automated tests.
 
 See [development tooling and dependencies](docs/development.md) for the crate choices, individual commands, platform requirements, and dependencies to consider when the device protocol is known.
 
