@@ -1,3 +1,4 @@
+use std::net::SocketAddr;
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
@@ -8,7 +9,7 @@ use updraft_protocol::{
 };
 
 #[derive(Debug, Parser)]
-#[command(name = "updraft", about = "GAF attic fan protocol probe")]
+#[command(name = "updraft", about = "GAF attic fan proxy")]
 struct Cli {
     #[command(subcommand)]
     command: Command,
@@ -18,6 +19,19 @@ struct Cli {
 enum Command {
     /// Inspect the GAF Wi-Fi Vent over a device transport.
     Probe(ProbeCommand),
+    /// Serve read-only device state to a same-host Home Assistant instance.
+    Serve(ServeOptions),
+}
+
+#[derive(Debug, Args)]
+struct ServeOptions {
+    /// Peripheral ID printed by a scan-only run. Never include it in logs or API responses.
+    #[arg(long)]
+    device_id: String,
+
+    /// Local listener address. Keep it on loopback unless a separate access boundary is configured.
+    #[arg(long, default_value = "127.0.0.1:8787")]
+    bind: SocketAddr,
 }
 
 #[derive(Debug, Args)]
@@ -115,6 +129,7 @@ impl BleOptions {
 pub(crate) async fn run() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
+        Command::Serve(options) => crate::api::serve(options.device_id, options.bind).await,
         Command::Probe(ProbeCommand {
             transport: ProbeTransport::Ble(options),
         }) => run_ble_probe(options).await,
