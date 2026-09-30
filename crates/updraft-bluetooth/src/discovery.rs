@@ -393,7 +393,7 @@ mod tests {
         #[cfg(target_os = "linux")]
         {
             let object_path = format!("/org/bluez/hci0/dev_{index:02X}");
-            let device_id =
+            let device_id: bluez_async::DeviceId =
                 serde_json::from_value(serde_json::json!({ "object_path": object_path }))
                     .expect("valid BlueZ device ID");
             PeripheralId::from(device_id)
