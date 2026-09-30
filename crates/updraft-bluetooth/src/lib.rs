@@ -6,11 +6,13 @@ use updraft_protocol::{ControlCommand, ControlOutcome, DeviceSnapshot};
 use uuid::Uuid;
 
 mod discovery;
+mod error;
 mod lifecycle;
 mod probe;
 mod session;
 
 pub use discovery::{Candidate, DiscoveredDevice, DiscoveryFailure};
+pub use error::{ProbeError, ProbeErrorKind};
 pub use probe::probe;
 
 /// GAF's observed primary BLE service UUID.
