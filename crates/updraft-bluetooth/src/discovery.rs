@@ -18,7 +18,7 @@ use crate::{
     lifecycle::{ScanCleanup, complete_before, fail_with_cleanup},
 };
 
-/// A nearby peripheral advertising GAF's service.
+/// A peripheral selected for a GAF query.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DiscoveredDevice {
     /// Platform-specific peripheral identifier, accepted by `--device-id`.
@@ -29,7 +29,7 @@ pub struct DiscoveredDevice {
     pub rssi: Option<i16>,
 }
 
-/// A discovered device and its private platform handle, when a query may use it.
+/// A query candidate and its private platform handle.
 #[derive(Debug)]
 pub struct Candidate {
     peripheral: Option<Peripheral>,
@@ -131,6 +131,7 @@ pub(super) fn incomplete_result(mut report: DiscoveryReport<Candidate>) -> Probe
 pub(super) async fn discover_candidates(
     scan_duration: Duration,
     operation_timeout: Duration,
+    requested_device_id: Option<&str>,
 ) -> Result<DiscoveryReport<Candidate>> {
     let manager = complete_before(operation_timeout, "create Bluetooth manager", async {
         Manager::new().await.context("create Bluetooth manager")
@@ -169,11 +170,9 @@ pub(super) async fn discover_candidates(
     let mut scan_cleanup = ScanCleanup::new(adapter.clone(), operation_timeout);
     let scan_start = complete_before(operation_timeout, "start BLE scan", async {
         adapter
-            .start_scan(ScanFilter {
-                services: vec![GAF_SERVICE_UUID],
-            })
+            .start_scan(scan_filter(requested_device_id))
             .await
-            .context("start BLE scan for GAF service 00FF")
+            .context("start BLE scan")
     })
     .await;
     if let Err(error) = scan_start {
@@ -193,12 +192,19 @@ pub(super) async fn discover_candidates(
     let fresh_devices = Some(&fresh_devices);
     #[cfg(not(target_os = "linux"))]
     let fresh_devices = None;
-    collect_advertised_candidates(&adapter, fresh_devices, operation_timeout).await
+    collect_advertised_candidates(
+        &adapter,
+        fresh_devices,
+        requested_device_id,
+        operation_timeout,
+    )
+    .await
 }
 
 async fn collect_advertised_candidates(
     adapter: &Adapter,
     fresh_devices: Option<&HashSet<btleplug::platform::PeripheralId>>,
+    requested_device_id: Option<&str>,
     operation_timeout: Duration,
 ) -> Result<DiscoveryReport<Candidate>> {
     let peripherals = complete_before(operation_timeout, "list BLE peripherals", async {
@@ -207,10 +213,16 @@ async fn collect_advertised_candidates(
     .await?;
     let devices = peripherals
         .into_iter()
-        .filter(|peripheral| fresh_devices.is_none_or(|devices| devices.contains(&peripheral.id())))
+        .filter(|peripheral| {
+            should_inspect_peripheral(
+                &peripheral.id(),
+                fresh_devices,
+                requested_device_id,
+            )
+        })
         .map(|peripheral| (peripheral.id(), peripheral));
     let mut report = inspect_peripherals(devices, |peripheral| {
-        read_gaf_advertisement(peripheral, operation_timeout)
+        read_gaf_advertisement(peripheral, operation_timeout, requested_device_id)
     })
     .await;
     report.candidates =
@@ -224,6 +236,36 @@ async fn collect_advertised_candidates(
                 candidates
             });
     Ok(report)
+}
+
+fn should_inspect_peripheral(
+    id: &PeripheralId,
+    fresh_devices: Option<&HashSet<PeripheralId>>,
+    requested_device_id: Option<&str>,
+) -> bool {
+    match requested_device_id {
+        Some(expected) => peripheral_id_matches(id, expected),
+        None => fresh_devices.is_none_or(|devices| devices.contains(id)),
+    }
+}
+
+fn scan_filter(requested_device_id: Option<&str>) -> ScanFilter {
+    if requested_device_id.is_some() {
+        ScanFilter::default()
+    } else {
+        ScanFilter {
+            services: vec![GAF_SERVICE_UUID],
+        }
+    }
+}
+
+fn should_keep_candidate(
+    id: &PeripheralId,
+    services: Option<&[uuid::Uuid]>,
+    requested_device_id: Option<&str>,
+) -> bool {
+    requested_device_id.is_some_and(|expected| peripheral_id_matches(id, expected))
+        || services.is_some_and(|services| services.contains(&GAF_SERVICE_UUID))
 }
 
 async fn inspect_peripherals<I, H, C, E, F, Fut>(
@@ -297,7 +339,11 @@ fn already_discovered(candidates: &[Candidate], candidate: &Candidate) -> bool {
 async fn read_gaf_advertisement(
     peripheral: Peripheral,
     operation_timeout: Duration,
+    requested_device_id: Option<&str>,
 ) -> Result<Option<Candidate>> {
+    let id = peripheral.id();
+    let configured_device = requested_device_id
+        .is_some_and(|expected| peripheral_id_matches(&id, expected));
     let properties = complete_before(
         operation_timeout,
         "read BLE advertisement properties",
@@ -308,14 +354,30 @@ async fn read_gaf_advertisement(
                 .context("read BLE advertisement properties")
         },
     )
-    .await?;
-    Ok(properties
-        .filter(|properties| properties.services.contains(&GAF_SERVICE_UUID))
-        .map(|properties| Candidate {
+    .await;
+    let properties = match properties {
+        Ok(properties) => properties,
+        Err(error) if configured_device => {
+            tracing::debug!(%error, "trying configured BLE peripheral after advertisement lookup failed");
+            None
+        }
+        Err(error) => return Err(error),
+    };
+    if !should_keep_candidate(
+        &id,
+        properties.as_ref().map(|properties| properties.services.as_slice()),
+        requested_device_id,
+    ) {
+        return Ok(None);
+    }
+    let (name, rssi) = properties
+        .map(|properties| (properties.local_name, properties.rssi))
+        .unwrap_or((None, None));
+    Ok(Some(Candidate {
             device: DiscoveredDevice {
-                id: peripheral.id(),
-                name: properties.local_name,
-                rssi: properties.rssi,
+                id,
+                name,
+                rssi,
             },
             peripheral: Some(peripheral),
         }))
@@ -485,6 +547,57 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(current_scan.len(), 1);
         assert_eq!(current_scan[0], fresh);
+    }
+
+    #[test]
+    fn configured_cached_peripheral_can_be_selected_without_a_fresh_event() {
+        let configured = test_peripheral_id(0);
+        let unrelated = test_peripheral_id(1);
+        let fresh = HashSet::new();
+        let configured_id = configured.to_string();
+
+        assert!(should_inspect_peripheral(
+            &configured,
+            Some(&fresh),
+            Some(&configured_id),
+        ));
+        assert!(!should_inspect_peripheral(
+            &unrelated,
+            Some(&fresh),
+            Some(&configured_id),
+        ));
+        let fresh_unrelated = HashSet::from([unrelated.clone()]);
+        assert!(!should_inspect_peripheral(
+            &unrelated,
+            Some(&fresh_unrelated),
+            Some(&configured_id),
+        ));
+        assert!(!should_inspect_peripheral(
+            &configured,
+            Some(&fresh),
+            None,
+        ));
+    }
+
+    #[test]
+    fn configured_device_is_queryable_when_services_are_not_advertised() {
+        let configured = test_peripheral_id(0);
+        let unrelated = test_peripheral_id(1);
+        let configured_id = configured.to_string();
+
+        assert!(should_keep_candidate(&configured, None, Some(&configured_id)));
+        assert!(!should_keep_candidate(&unrelated, None, Some(&configured_id)));
+        assert!(should_keep_candidate(
+            &unrelated,
+            Some(&[GAF_SERVICE_UUID]),
+            Some(&configured_id),
+        ));
+    }
+
+    #[test]
+    fn configured_queries_scan_without_a_service_advertisement_filter() {
+        assert!(scan_filter(Some("configured")).services.is_empty());
+        assert_eq!(scan_filter(None).services, [GAF_SERVICE_UUID]);
     }
 
     #[test]
