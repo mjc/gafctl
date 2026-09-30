@@ -26,7 +26,8 @@ pub struct Identity {
 }
 
 impl Identity {
-    fn parse(payload: &[u8]) -> Result<Self, PayloadError> {
+    /// Decode the six decimal version digits at the start of an identity reply.
+    pub fn from_payload(payload: &[u8]) -> Result<Self, PayloadError> {
         match payload {
             [a, b, c, d, e, f, ..] if [a, b, c, d, e, f].into_iter().all(u8::is_ascii_digit) => {
                 let pair = |tens: u8, units: u8| (tens - b'0') * 10 + units - b'0';
@@ -214,7 +215,7 @@ impl DeviceSnapshot {
         .try_for_each(|(request, frame)| validate_response(frame, request.response_id()))?;
 
         Ok(Self {
-            identity: Observation::new(identity, Identity::parse),
+            identity: Observation::new(identity, Identity::from_payload),
             mode: Observation::new(mode, DeviceMode::parse),
             sensors: Observation::new(sensors, SensorReadings::parse),
             thresholds: Observation::new(thresholds, |payload| {

@@ -24,6 +24,8 @@ pub struct Readback<T> {
 pub enum ControlReadback {
     Thresholds(Result<Readback<AutomaticThresholds>, PayloadError>),
     Timer(Result<Readback<TimerState>, PayloadError>),
+    /// The state request needed for verification failed after the command reply.
+    Unavailable,
 }
 
 /// An exact `0` acknowledgement or an unrecognized response payload.
@@ -47,29 +49,32 @@ impl ControlOutcome {
     pub fn from_response(
         command: ControlCommand,
         frame: Frame<'static>,
-        snapshot: &DeviceSnapshot,
+        snapshot: Option<&DeviceSnapshot>,
     ) -> Result<Self, UnexpectedResponse> {
         validate_response(&frame, command.response_id())?;
         let acknowledgement = match frame.payload() {
             b"0" => Acknowledgement::Accepted,
             _ => Acknowledgement::Unrecognized,
         };
-        let readback = match command {
-            ControlCommand::SetAutomaticThresholds(requested) => ControlReadback::Thresholds(
-                snapshot
-                    .thresholds
-                    .decoded()
-                    .map(|actual| Readback {
-                        actual: *actual,
-                        comparison: if *actual == requested {
-                            ReadbackMatch::Matches
-                        } else {
-                            ReadbackMatch::Differs
-                        },
-                    })
-                    .map_err(|error| *error),
-            ),
-            ControlCommand::SetTimer(requested) => ControlReadback::Timer(
+        let readback = match (command, snapshot) {
+            (_, None) => ControlReadback::Unavailable,
+            (ControlCommand::SetAutomaticThresholds(requested), Some(snapshot)) => {
+                ControlReadback::Thresholds(
+                    snapshot
+                        .thresholds
+                        .decoded()
+                        .map(|actual| Readback {
+                            actual: *actual,
+                            comparison: if *actual == requested {
+                                ReadbackMatch::Matches
+                            } else {
+                                ReadbackMatch::Differs
+                            },
+                        })
+                        .map_err(|error| *error),
+                )
+            }
+            (ControlCommand::SetTimer(requested), Some(snapshot)) => ControlReadback::Timer(
                 snapshot
                     .timer
                     .decoded()
@@ -114,5 +119,22 @@ impl ControlOutcome {
     #[must_use]
     pub const fn readback(&self) -> &ControlReadback {
         &self.readback
+    }
+
+    /// Whether the command was acknowledged and its setting matches the request.
+    #[must_use]
+    pub fn is_confirmed(&self) -> bool {
+        if self.acknowledgement != Acknowledgement::Accepted {
+            return false;
+        }
+        match &self.readback {
+            ControlReadback::Thresholds(Ok(readback)) => {
+                readback.comparison == ReadbackMatch::Matches
+            }
+            ControlReadback::Timer(Ok(readback)) => readback.comparison == ReadbackMatch::Matches,
+            ControlReadback::Thresholds(Err(_))
+            | ControlReadback::Timer(Err(_))
+            | ControlReadback::Unavailable => false,
+        }
     }
 }

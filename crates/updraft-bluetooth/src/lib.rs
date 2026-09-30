@@ -59,8 +59,10 @@ impl Default for ProbeOptions {
 /// Validated state and optional ordinary-control outcome from one device query.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct QueryResult {
-    /// All five mandatory device-state observations.
-    pub snapshot: DeviceSnapshot,
+    /// All five state observations when every request completed.
+    pub snapshot: Option<DeviceSnapshot>,
+    /// Failure to collect state after an acknowledged command.
+    pub state_error: Option<String>,
     /// Outcome of the optional ordinary control request, interpreted with readback.
     pub control: Option<ControlOutcome>,
     /// Whether the BLE connection closed cleanly after the query.

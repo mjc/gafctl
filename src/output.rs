@@ -25,9 +25,14 @@ pub(crate) fn print_probe_result(result: ProbeResult, show_identity: bool) {
             if let Some(control) = &result.control {
                 print_control_acknowledgement(control);
             }
-            print_snapshot(&result.snapshot, show_identity);
+            if let Some(snapshot) = &result.snapshot {
+                print_snapshot(snapshot, show_identity);
+            }
             if let Some(control) = &result.control {
                 println!("{}", ControlReadbackDisplay(control.readback()));
+            }
+            if let Some(error) = &result.state_error {
+                eprintln!("state readback unavailable after control acknowledgement: {error}");
             }
             if let updraft_bluetooth::DisconnectOutcome::Failed(error) = &result.disconnect {
                 eprintln!("BLE query succeeded, but disconnect failed: {error}");
@@ -125,6 +130,7 @@ struct ControlReadbackDisplay<'a>(&'a ControlReadback);
 impl fmt::Display for ControlReadbackDisplay<'_> {
     fn fmt(&self, output: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self.0 {
+            ControlReadback::Unavailable => output.write_str("control readback: unavailable"),
             ControlReadback::Thresholds(Ok(readback)) => write!(
                 output,
                 "automatic threshold readback: {}",

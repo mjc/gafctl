@@ -6,6 +6,9 @@ description = "A Rust proxy for GAF Master Flow attic fans"
 readme = "README.md"
 keywords = ["attic-fan", "gaf", "home-assistant", "ventilation"]
 
+[lints]
+workspace = true
+
 [workspace]
 members = [
     "crates/updraft-protocol",
@@ -19,6 +22,10 @@ default-members = [
     "crates/updraft-wifi",
 ]
 resolver = "3"
+
+[workspace.lints.clippy]
+disallowed_macros = "deny"
+panic = "deny"
 
 [workspace.dependencies]
 anyhow = "1.0.104"

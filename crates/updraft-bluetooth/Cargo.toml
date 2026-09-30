@@ -4,6 +4,9 @@ version = "0.1.0"
 edition = "2024"
 description = "Bluetooth transport for GAF Master Flow attic fans"
 
+[lints]
+workspace = true
+
 [dependencies]
 anyhow.workspace = true
 btleplug.workspace = true
@@ -14,6 +17,9 @@ tokio = { workspace = true, features = ["sync", "time"] }
 tracing.workspace = true
 uuid.workspace = true
 updraft-protocol = { path = "../updraft-protocol" }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 bluez-async = "0.8.2"

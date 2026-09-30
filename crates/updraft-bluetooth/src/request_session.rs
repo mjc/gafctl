@@ -39,29 +39,45 @@ impl<T: GattTransport> RequestSession<T> {
         mut self,
         control_command: Option<ControlCommand>,
     ) -> Result<QueryResult> {
-        let control_response = match control_command {
-            Some(command) => Some((
-                command,
-                self.exchange(command.into())
-                    .await
-                    .context("wait for ordinary control acknowledgement")?,
-            )),
-            None => None,
-        };
-        let snapshot = self.read_state().await?;
-        let control = control_response
-            .map(|(command, response)| ControlOutcome::from_response(command, response, &snapshot))
-            .transpose()
-            .context("validate ordinary control outcome")?;
+        let identity = self.exchange(ReadCommand::Identity.into()).await?;
+        if let Some(command) = control_command {
+            validate_gaf_identity(&identity)?;
+            let response = self
+                .exchange(command.into())
+                .await
+                .context("wait for ordinary control acknowledgement")?;
+            return match self.read_state(identity).await {
+                Ok(snapshot) => Ok(QueryResult {
+                    control: Some(
+                        ControlOutcome::from_response(command, response, Some(&snapshot))
+                            .context("validate ordinary control outcome")?,
+                    ),
+                    snapshot: Some(snapshot),
+                    state_error: None,
+                    disconnect: DisconnectOutcome::Disconnected,
+                }),
+                Err(error) => Ok(QueryResult {
+                    control: Some(
+                        ControlOutcome::from_response(command, response, None)
+                            .context("retain ordinary control acknowledgement")?,
+                    ),
+                    snapshot: None,
+                    state_error: Some(format!("{error:#}")),
+                    disconnect: DisconnectOutcome::Disconnected,
+                }),
+            };
+        }
+
+        let snapshot = self.read_state(identity).await?;
         Ok(QueryResult {
-            snapshot,
-            control,
+            snapshot: Some(snapshot),
+            state_error: None,
+            control: None,
             disconnect: DisconnectOutcome::Disconnected,
         })
     }
 
-    async fn read_state(&mut self) -> Result<DeviceSnapshot> {
-        let identity = self.exchange(ReadCommand::Identity.into()).await?;
+    async fn read_state(&mut self, identity: Frame<'static>) -> Result<DeviceSnapshot> {
         let mode = self.exchange(ReadCommand::Mode.into()).await?;
         let sensors = self.exchange(ReadCommand::Sensors.into()).await?;
         let thresholds = self.exchange(ReadCommand::AutoThresholds.into()).await?;
@@ -112,6 +128,18 @@ impl<T: GattTransport> RequestSession<T> {
     }
 }
 
+fn validate_gaf_identity(identity: &Frame<'_>) -> Result<()> {
+    anyhow::ensure!(
+        identity.command() == ReadCommand::Identity.response_id(),
+        "device did not return a GAF identity response"
+    );
+    anyhow::ensure!(
+        updraft_protocol::Identity::from_payload(identity.payload()).is_ok(),
+        "device returned an invalid GAF identity response"
+    );
+    Ok(())
+}
+
 fn decode_matching_response(
     decoder: &mut FrameDecoder,
     bytes: Bytes,
@@ -129,6 +157,82 @@ fn decode_matching_response(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Arc, Mutex};
+
+    use futures_util::stream;
+    use updraft_protocol::{ControlCommand, Minutes};
+
+    #[derive(Clone, Default)]
+    struct RecordingTransport(Arc<Mutex<Vec<Vec<u8>>>>);
+
+    impl GattTransport for RecordingTransport {
+        async fn write(&mut self, bytes: &[u8]) -> Result<()> {
+            self.0.lock().unwrap().push(bytes.to_vec());
+            Ok(())
+        }
+    }
+
+    fn session(
+        responses: &'static [&'static [u8]],
+    ) -> (RequestSession<RecordingTransport>, RecordingTransport) {
+        let transport = RecordingTransport::default();
+        let session = RequestSession::new(
+            transport.clone(),
+            Box::pin(stream::iter(responses.iter().map(|bytes| bytes.to_vec()))),
+            Duration::from_secs(1),
+        );
+        (session, transport)
+    }
+
+    #[tokio::test]
+    async fn acknowledged_timer_is_retained_when_later_state_read_fails() {
+        let (session, transport) = session(&[b"#idr030000x\n", b"#tmr0\n"]);
+        let result = session
+            .query(Some(ControlCommand::SetTimer(Minutes::new(1))))
+            .await
+            .unwrap();
+
+        let control = result.control.unwrap();
+        assert_eq!(control.frame().as_bytes(), b"#tmr0\n");
+        assert_eq!(
+            control.acknowledgement(),
+            updraft_protocol::Acknowledgement::Accepted
+        );
+        assert_eq!(
+            control.readback(),
+            &updraft_protocol::ControlReadback::Unavailable
+        );
+        assert!(result.snapshot.is_none());
+        assert!(
+            result
+                .state_error
+                .as_deref()
+                .is_some_and(|error| error.contains("BLE notification stream ended"))
+        );
+        assert_eq!(
+            transport.0.lock().unwrap().as_slice(),
+            &[
+                b"#idg\n".to_vec(),
+                b"#tms0001\n".to_vec(),
+                b"#dmg\n".to_vec()
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn invalid_identity_prevents_control_write() {
+        let (session, transport) = session(&[b"#idrnot-gaf\n"]);
+        assert!(
+            session
+                .query(Some(ControlCommand::SetTimer(Minutes::new(1))))
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            transport.0.lock().unwrap().as_slice(),
+            &[b"#idg\n".to_vec()]
+        );
+    }
 
     #[test]
     fn first_matching_response_survives_later_notifications() {

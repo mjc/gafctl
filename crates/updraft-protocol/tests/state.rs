@@ -41,10 +41,10 @@ fn request_carries_frame_response_and_operation_together() {
     .into_iter()
     .for_each(|(command, wire, response)| {
         let request = Request::from(command);
-        assert!(matches!(
-            request.frame(),
-            updraft_protocol::RequestFrame::Read(_)
-        ));
+        assert!(match request.frame() {
+            updraft_protocol::RequestFrame::Read(_) => true,
+            updraft_protocol::RequestFrame::Control(_) => false,
+        });
         assert_eq!(request.frame().as_ref(), wire);
         assert_eq!(request.response_id(), response);
         assert_eq!(request.operation(), "state query");
@@ -52,10 +52,10 @@ fn request_carries_frame_response_and_operation_together() {
 
     let command = ControlCommand::SetTimer(Minutes::new(1));
     let request = Request::from(command);
-    assert!(matches!(
-        request.frame(),
-        updraft_protocol::RequestFrame::Control(_)
-    ));
+    assert!(match request.frame() {
+        updraft_protocol::RequestFrame::Read(_) => false,
+        updraft_protocol::RequestFrame::Control(_) => true,
+    });
     assert_eq!(request.frame().as_ref(), b"#tms0001\n");
     assert_eq!(request.response_id(), *b"tmr");
     assert_eq!(request.operation(), "ordinary control command");
@@ -66,10 +66,10 @@ fn request_carries_frame_response_and_operation_together() {
             humidity: HumidityTenthsPercent::new(300),
         },
     ));
-    assert!(matches!(
-        automatic.frame(),
-        updraft_protocol::RequestFrame::Control(_)
-    ));
+    assert!(match automatic.frame() {
+        updraft_protocol::RequestFrame::Read(_) => false,
+        updraft_protocol::RequestFrame::Control(_) => true,
+    });
     assert_eq!(automatic.frame().as_ref(), b"#ams041A012C\n");
     assert_eq!(automatic.response_id(), *b"amr");
     assert_eq!(automatic.operation(), "ordinary control command");
@@ -213,11 +213,13 @@ fn threshold_outcome_uses_exact_ack_and_compares_typed_readback() {
     };
     let command = ControlCommand::SetAutomaticThresholds(requested);
     let matching = snapshot(b"#atr041a012c\n", b"#ttr00000000\n");
-    let accepted = ControlOutcome::from_response(command, frame(b"#amr0\n"), &matching).unwrap();
+    let accepted =
+        ControlOutcome::from_response(command, frame(b"#amr0\n"), Some(&matching)).unwrap();
 
     assert_eq!(accepted.command(), command);
     assert_eq!(accepted.frame().as_bytes(), b"#amr0\n");
     assert_eq!(accepted.acknowledgement(), Acknowledgement::Accepted);
+    assert!(accepted.is_confirmed());
     assert_eq!(
         accepted.readback(),
         &ControlReadback::Thresholds(Ok(Readback {
@@ -228,11 +230,12 @@ fn threshold_outcome_uses_exact_ack_and_compares_typed_readback() {
 
     let differing = snapshot(b"#atr041b012c\n", b"#ttr00000000\n");
     let unrecognized =
-        ControlOutcome::from_response(command, frame(b"#amr1\n"), &differing).unwrap();
+        ControlOutcome::from_response(command, frame(b"#amr1\n"), Some(&differing)).unwrap();
     assert_eq!(
         unrecognized.acknowledgement(),
         Acknowledgement::Unrecognized
     );
+    assert!(!unrecognized.is_confirmed());
     assert_eq!(
         unrecognized.readback(),
         &ControlReadback::Thresholds(Ok(Readback {
@@ -248,25 +251,29 @@ fn threshold_outcome_uses_exact_ack_and_compares_typed_readback() {
         .into_iter()
         .for_each(|payload| {
             let outcome =
-                ControlOutcome::from_response(command, frame(payload), &matching).unwrap();
+                ControlOutcome::from_response(command, frame(payload), Some(&matching)).unwrap();
             assert_eq!(outcome.acknowledgement(), Acknowledgement::Unrecognized);
             assert_eq!(outcome.frame().as_bytes(), payload);
         });
 
     let malformed = snapshot(b"#atrbad\n", b"#ttr00000000\n");
-    let outcome = ControlOutcome::from_response(command, frame(b"#amr0\n"), &malformed).unwrap();
+    let outcome =
+        ControlOutcome::from_response(command, frame(b"#amr0\n"), Some(&malformed)).unwrap();
     assert_eq!(
         outcome.readback(),
         &ControlReadback::Thresholds(Err(PayloadError::from(ReadbackError::InvalidLength)))
     );
+    assert!(!outcome.is_confirmed());
 }
 
 #[test]
 fn timer_outcome_allows_elapsed_time_and_keeps_readback_errors() {
     let command = ControlCommand::SetTimer(Minutes::new(2));
     let matching = snapshot(b"#atr041a012c\n", b"#ttr00010002\n");
-    let outcome = ControlOutcome::from_response(command, frame(b"#tmr0\n"), &matching).unwrap();
+    let outcome =
+        ControlOutcome::from_response(command, frame(b"#tmr0\n"), Some(&matching)).unwrap();
     assert_eq!(outcome.acknowledgement(), Acknowledgement::Accepted);
+    assert!(outcome.is_confirmed());
     assert_eq!(
         outcome.readback(),
         &ControlReadback::Timer(Ok(Readback {
@@ -277,37 +284,48 @@ fn timer_outcome_allows_elapsed_time_and_keeps_readback_errors() {
             comparison: ReadbackMatch::Matches,
         }))
     );
+    let unrecognized =
+        ControlOutcome::from_response(command, frame(b"#tmr1\n"), Some(&matching)).unwrap();
+    assert_eq!(
+        unrecognized.acknowledgement(),
+        Acknowledgement::Unrecognized
+    );
+    assert!(!unrecognized.is_confirmed());
 
     let differing = snapshot(b"#atr041a012c\n", b"#ttr00010003\n");
-    let outcome = ControlOutcome::from_response(command, frame(b"#tmr0\n"), &differing).unwrap();
-    assert!(matches!(
-        outcome.readback(),
-        ControlReadback::Timer(Ok(Readback {
-            comparison: ReadbackMatch::Differs,
-            ..
-        }))
-    ));
+    let outcome =
+        ControlOutcome::from_response(command, frame(b"#tmr0\n"), Some(&differing)).unwrap();
+    let readback_comparison = match outcome.readback() {
+        ControlReadback::Timer(Ok(readback)) => Some(readback.comparison),
+        _ => None,
+    };
+    assert_eq!(readback_comparison, Some(ReadbackMatch::Differs));
+    assert!(!outcome.is_confirmed());
 
     let excessive_remaining = snapshot(b"#atr041a012c\n", b"#ttr00030002\n");
     let outcome =
-        ControlOutcome::from_response(command, frame(b"#tmr0\n"), &excessive_remaining).unwrap();
-    assert!(matches!(
-        outcome.readback(),
-        ControlReadback::Timer(Ok(Readback {
-            comparison: ReadbackMatch::Differs,
-            ..
-        }))
-    ));
+        ControlOutcome::from_response(command, frame(b"#tmr0\n"), Some(&excessive_remaining))
+            .unwrap();
+    let readback_comparison = match outcome.readback() {
+        ControlReadback::Timer(Ok(readback)) => Some(readback.comparison),
+        _ => None,
+    };
+    assert_eq!(readback_comparison, Some(ReadbackMatch::Differs));
 
     let malformed = snapshot(b"#atr041a012c\n", b"#ttrbad\n");
-    let outcome = ControlOutcome::from_response(command, frame(b"#tmr0\n"), &malformed).unwrap();
+    let outcome =
+        ControlOutcome::from_response(command, frame(b"#tmr0\n"), Some(&malformed)).unwrap();
     assert_eq!(
         outcome.readback(),
         &ControlReadback::Timer(Err(PayloadError::from(ReadbackError::InvalidLength)))
     );
+    assert!(!outcome.is_confirmed());
+    let unavailable = ControlOutcome::from_response(command, frame(b"#tmr0\n"), None).unwrap();
+    assert_eq!(unavailable.readback(), &ControlReadback::Unavailable);
+    assert!(!unavailable.is_confirmed());
     assert_eq!(malformed.timer.frame().payload(), b"bad");
     assert_eq!(
-        ControlOutcome::from_response(command, frame(b"#amr0\n"), &matching).err(),
+        ControlOutcome::from_response(command, frame(b"#amr0\n"), Some(&matching)).err(),
         Some(UnexpectedResponse {
             expected: *b"tmr",
             actual: *b"amr",

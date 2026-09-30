@@ -1,4 +1,4 @@
-use std::{future, time::Duration};
+use std::{future, sync::OnceLock, time::Duration};
 
 use anyhow::{Context, Result, bail};
 use bluez_async::{
@@ -10,6 +10,7 @@ use futures_util::StreamExt;
 use tokio::runtime::Handle;
 use updraft_protocol::ControlCommand;
 
+use super::RuntimeSessionCache;
 use super::request_session::{GattTransport, RequestSession};
 use crate::{
     GAF_CHARACTERISTIC_UUID, GAF_SERVICE_UUID, QueryResult,
@@ -23,6 +24,8 @@ struct ConnectedDevice {
     runtime: Handle,
     cleanup_armed: bool,
 }
+
+static BLUEZ_SESSIONS: OnceLock<RuntimeSessionCache<BluetoothSession>> = OnceLock::new();
 
 struct BluezTransport<'a> {
     connected: &'a ConnectedDevice,
@@ -51,20 +54,27 @@ impl ConnectedDevice {
         let path = format!("/org/bluez/{}", peripheral.id());
         let device = serde_json::from_value(serde_json::json!({ "object_path": path }))
             .context("parse BlueZ device path")?;
-        let (dbus_task, session) = BluetoothSession::new()
-            .await
-            .context("create BlueZ D-Bus session")?;
-        tokio::spawn(async move {
-            if let Err(error) = dbus_task.await {
-                tracing::warn!(%error, "BlueZ D-Bus connection ended");
-            }
-        });
+        let runtime = Handle::current();
+        let session = BLUEZ_SESSIONS
+            .get_or_init(RuntimeSessionCache::default)
+            .get_or_init(runtime.id(), || async {
+                let (dbus_task, session) = BluetoothSession::new()
+                    .await
+                    .context("create BlueZ D-Bus session")?;
+                let driver = tokio::spawn(async move {
+                    if let Err(error) = dbus_task.await {
+                        tracing::warn!(%error, "BlueZ D-Bus connection ended");
+                    }
+                });
+                Ok((session, driver))
+            })
+            .await?;
 
         let mut connected = Self {
             session,
             device,
             operation_timeout,
-            runtime: Handle::current(),
+            runtime,
             cleanup_armed: true,
         };
         let result = complete_before(operation_timeout, "connect to GAF BLE peripheral", async {

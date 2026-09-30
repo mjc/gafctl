@@ -1,4 +1,5 @@
 use std::{
+    collections::HashSet,
     fmt::{self, Write as _},
     time::Duration,
 };
@@ -84,6 +85,28 @@ pub(super) async fn discover_candidates(
     .next()
     .context("no Bluetooth adapter is available")?;
 
+    #[cfg(target_os = "linux")]
+    let existing_devices =
+        complete_before(operation_timeout, "list cached BLE peripherals", async {
+            adapter
+                .peripherals()
+                .await
+                .context("list cached BLE peripherals")
+        })
+        .await?
+        .into_iter()
+        .map(|peripheral| peripheral.id())
+        .collect::<HashSet<_>>();
+
+    #[cfg(target_os = "linux")]
+    let events = complete_before(operation_timeout, "subscribe to BLE scan events", async {
+        adapter
+            .events()
+            .await
+            .context("subscribe to BLE scan events")
+    })
+    .await?;
+
     let mut scan_cleanup = ScanCleanup::new(adapter.clone(), operation_timeout);
     let scan_start = complete_before(operation_timeout, "start BLE scan", async {
         adapter
@@ -97,14 +120,26 @@ pub(super) async fn discover_candidates(
     if let Err(error) = scan_start {
         return fail_with_cleanup(error, scan_cleanup.run().await);
     }
+    #[cfg(target_os = "linux")]
+    let fresh_devices = events
+        .take_until(sleep(scan_duration))
+        .filter_map(|event| future::ready(fresh_advertisement_id(event, &existing_devices)))
+        .collect::<HashSet<_>>()
+        .await;
+    #[cfg(not(target_os = "linux"))]
     sleep(scan_duration).await;
     scan_cleanup.run().await?;
 
-    collect_advertised_candidates(&adapter, operation_timeout).await
+    #[cfg(target_os = "linux")]
+    let fresh_devices = Some(&fresh_devices);
+    #[cfg(not(target_os = "linux"))]
+    let fresh_devices = None;
+    collect_advertised_candidates(&adapter, fresh_devices, operation_timeout).await
 }
 
 async fn collect_advertised_candidates(
     adapter: &Adapter,
+    fresh_devices: Option<&HashSet<btleplug::platform::PeripheralId>>,
     operation_timeout: Duration,
 ) -> Result<Vec<Candidate>> {
     let peripherals = complete_before(operation_timeout, "list BLE peripherals", async {
@@ -112,7 +147,13 @@ async fn collect_advertised_candidates(
     })
     .await?;
     stream::iter(peripherals)
-        .then(|peripheral| read_gaf_advertisement(peripheral, operation_timeout))
+        .then(|peripheral| async move {
+            if fresh_devices.is_none_or(|devices| devices.contains(&peripheral.id())) {
+                read_gaf_advertisement(peripheral, operation_timeout).await
+            } else {
+                Ok(None)
+            }
+        })
         .try_fold(Vec::new(), |mut candidates, candidate| {
             if let Some(candidate) = candidate
                 && !already_discovered(&candidates, &candidate)
@@ -122,6 +163,32 @@ async fn collect_advertised_candidates(
             future::ready(Ok(candidates))
         })
         .await
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn fresh_advertisement_id(
+    event: btleplug::api::CentralEvent,
+    existing_devices: &HashSet<btleplug::platform::PeripheralId>,
+) -> Option<btleplug::platform::PeripheralId> {
+    use btleplug::api::CentralEvent;
+
+    match event {
+        CentralEvent::RssiUpdate { id, .. }
+        | CentralEvent::ManufacturerDataAdvertisement { id, .. }
+        | CentralEvent::ServiceDataAdvertisement { id, .. } => Some(id),
+        CentralEvent::DeviceDiscovered(id) | CentralEvent::ServicesAdvertisement { id, .. }
+            if !existing_devices.contains(&id) =>
+        {
+            Some(id)
+        }
+        CentralEvent::DeviceDiscovered(_)
+        | CentralEvent::DeviceUpdated(_)
+        | CentralEvent::DeviceConnected(_)
+        | CentralEvent::DeviceDisconnected(_)
+        | CentralEvent::DeviceServicesModified(_)
+        | CentralEvent::ServicesAdvertisement { .. }
+        | CentralEvent::StateUpdate(_) => None,
+    }
 }
 
 fn already_discovered(candidates: &[Candidate], candidate: &Candidate) -> bool {
@@ -223,6 +290,39 @@ impl Candidate {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use btleplug::api::CentralEvent;
+
+    #[test]
+    fn bluez_cached_initial_events_do_not_count_as_fresh_advertisements() {
+        let stale = btleplug::platform::PeripheralId::from(uuid::Uuid::nil());
+        let fresh = btleplug::platform::PeripheralId::from(uuid::Uuid::from_u128(1));
+        let initial = CentralEvent::ServicesAdvertisement {
+            id: stale.clone(),
+            services: vec![GAF_SERVICE_UUID],
+        };
+        let existing = HashSet::from([stale.clone()]);
+        assert!(fresh_advertisement_id(initial, &existing).is_none());
+
+        let advertisement = CentralEvent::RssiUpdate {
+            id: fresh.clone(),
+            rssi: -50,
+        };
+        let newly_discovered = CentralEvent::DeviceDiscovered(fresh.clone());
+        let observed = [
+            fresh_advertisement_id(advertisement, &existing),
+            fresh_advertisement_id(newly_discovered, &existing),
+        ]
+        .into_iter()
+        .flatten()
+        .collect::<HashSet<_>>();
+        let current_scan = [stale, fresh.clone()]
+            .into_iter()
+            .filter(|id| observed.contains(id))
+            .collect::<Vec<_>>();
+        assert_eq!(current_scan.len(), 1);
+        assert_eq!(current_scan[0], fresh);
+    }
+
     #[test]
     fn string_match_compares_display_chunks_without_building_a_string() {
         let mut output = StringMatch {
