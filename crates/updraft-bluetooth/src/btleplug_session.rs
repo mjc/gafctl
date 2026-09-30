@@ -9,7 +9,10 @@ use updraft_protocol::ControlCommand;
 use super::request_session::{GattTransport, RequestSession};
 use crate::{
     GAF_CHARACTERISTIC_UUID, GAF_SERVICE_UUID, QueryResult,
-    lifecycle::{DisconnectCleanup, complete_before, fail_with_cleanup, finish_with_cleanup},
+    lifecycle::{
+        DisconnectCleanup, complete_before, fail_with_cleanup, finish_with_cleanup,
+        retry_connection,
+    },
 };
 
 struct ConnectedPeripheral<'a> {
@@ -28,7 +31,8 @@ pub async fn query_peripheral(
     response_timeout: Duration,
     control_command: Option<ControlCommand>,
 ) -> Result<QueryResult> {
-    let mut connected = ConnectedPeripheral::connect(peripheral, response_timeout).await?;
+    let mut connected =
+        retry_connection(|| ConnectedPeripheral::connect(peripheral, response_timeout)).await?;
     let query = async {
         request_session(&connected, response_timeout)
             .await?

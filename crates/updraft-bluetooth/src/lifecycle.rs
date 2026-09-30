@@ -4,9 +4,44 @@ use anyhow::{Context, Result};
 use btleplug::{api::Central as _, platform::Adapter};
 #[cfg(not(target_os = "linux"))]
 use btleplug::{api::Peripheral as _, platform::Peripheral};
-use tokio::{runtime::Handle, time::timeout};
+use tokio::{
+    runtime::Handle,
+    time::{sleep, timeout},
+};
 
-use crate::DisconnectOutcome;
+use crate::{DisconnectOutcome, ProbeError, error::CleanupFailed};
+
+const CONNECTION_RETRY_DELAYS: [Duration; 2] =
+    [Duration::from_millis(100), Duration::from_millis(300)];
+
+pub(super) const fn connection_retry_delay(retry_index: usize) -> Option<Duration> {
+    if retry_index < CONNECTION_RETRY_DELAYS.len() {
+        Some(CONNECTION_RETRY_DELAYS[retry_index])
+    } else {
+        None
+    }
+}
+
+pub(super) async fn retry_connection<T, F, Fut>(mut connect: F) -> Result<T>
+where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = Result<T>>,
+{
+    let mut retry_index = 0;
+    loop {
+        match connect().await {
+            Ok(value) => return Ok(value),
+            Err(error)
+                if ProbeError::is_transient_connect_failure(&error)
+                    && let Some(delay) = connection_retry_delay(retry_index) =>
+            {
+                sleep(delay).await;
+                retry_index += 1;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+}
 
 pub(super) struct ScanCleanup {
     adapter: Adapter,
@@ -138,29 +173,27 @@ pub(super) fn finish_with_cleanup<T>(
         (Ok(value), Ok(())) => Ok((value, DisconnectOutcome::Disconnected)),
         (Ok(value), Err(error)) => Ok((value, DisconnectOutcome::Failed(format!("{error:#}")))),
         (Err(error), Ok(())) => Err(error),
-        (Err(error), Err(cleanup_error)) => {
-            let operation = format!("{error:#}");
-            Err(error.context(format!(
-                "operation failed ({operation}); disconnect also failed ({cleanup_error:#})"
-            )))
-        }
+        (Err(error), Err(cleanup_error)) => Err(anyhow::Error::new(CleanupFailed {
+            operation: error,
+            cleanup: cleanup_error,
+        })),
     }
 }
 
 pub(super) fn fail_with_cleanup<T>(operation: anyhow::Error, cleanup: Result<()>) -> Result<T> {
     match cleanup {
         Ok(()) => Err(operation),
-        Err(cleanup_error) => {
-            let operation_message = format!("{operation:#}");
-            Err(operation.context(format!(
-                "operation failed ({operation_message}); cleanup also failed ({cleanup_error:#})"
-            )))
-        }
+        Err(cleanup_error) => Err(anyhow::Error::new(CleanupFailed {
+            operation,
+            cleanup: cleanup_error,
+        })),
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::cell::Cell;
+
     use super::*;
     use futures_util::future;
 
@@ -199,5 +232,72 @@ mod tests {
 
         assert!(error.to_string().contains("query failed"));
         assert!(error.to_string().contains("disconnect failed"));
+    }
+
+    #[test]
+    fn connection_retry_delays_are_increasing_and_finite() {
+        assert_eq!(connection_retry_delay(0), Some(Duration::from_millis(100)));
+        assert_eq!(connection_retry_delay(1), Some(Duration::from_millis(300)));
+        assert_eq!(connection_retry_delay(2), None);
+    }
+
+    #[tokio::test]
+    async fn connection_retry_recovers_after_transient_failures() {
+        let attempts = Cell::new(0);
+        let connected = retry_connection(|| {
+            let attempt = attempts.get() + 1;
+            attempts.set(attempt);
+            async move {
+                if attempt < 3 {
+                    Err(anyhow::Error::new(btleplug::Error::TimedOut(
+                        Duration::from_secs(3),
+                    )))
+                } else {
+                    Ok(attempt)
+                }
+            }
+        })
+        .await
+        .expect("connection eventually succeeds");
+
+        assert_eq!(connected, 3);
+        assert_eq!(attempts.get(), 3);
+    }
+
+    #[tokio::test]
+    async fn connection_retry_stops_after_the_finite_attempt_budget() {
+        let attempts = Cell::new(0);
+        let error = retry_connection(|| {
+            attempts.set(attempts.get() + 1);
+            async {
+                Err::<usize, anyhow::Error>(anyhow::Error::new(btleplug::Error::TimedOut(
+                    Duration::from_secs(3),
+                )))
+            }
+        })
+        .await
+        .expect_err("transient failure remains an error after retries");
+
+        assert!(ProbeError::is_transient_connect_failure(&error));
+        assert_eq!(attempts.get(), 3);
+    }
+
+    #[tokio::test]
+    async fn connection_retry_stops_when_cleanup_fails() {
+        let attempts = Cell::new(0);
+        let error = retry_connection(|| {
+            attempts.set(attempts.get() + 1);
+            async {
+                fail_with_cleanup::<()>(
+                    anyhow::Error::new(btleplug::Error::TimedOut(Duration::from_secs(3))),
+                    Err(anyhow::anyhow!("disconnect failed")),
+                )
+            }
+        })
+        .await
+        .expect_err("cleanup failure prevents reconnecting");
+
+        assert!(format!("{error:#}").contains("disconnect failed"));
+        assert_eq!(attempts.get(), 1);
     }
 }

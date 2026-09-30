@@ -8,7 +8,9 @@ use updraft_protocol::{
     Request,
 };
 
-use crate::{DisconnectOutcome, QueryResult, lifecycle::complete_before};
+use crate::{
+    DisconnectOutcome, QueryResult, error::InvalidIdentityResponse, lifecycle::complete_before,
+};
 
 pub(super) trait GattTransport {
     async fn write(&mut self, bytes: &[u8]) -> Result<()>;
@@ -132,15 +134,13 @@ impl<T: GattTransport> RequestSession<T> {
 }
 
 fn validate_gaf_identity(identity: &Frame<'_>) -> Result<()> {
-    anyhow::ensure!(
-        identity.command() == ReadCommand::Identity.response_id(),
-        "device did not return a GAF identity response"
-    );
-    anyhow::ensure!(
-        updraft_protocol::Identity::from_payload(identity.payload()).is_ok(),
-        "device returned an invalid GAF identity response"
-    );
-    Ok(())
+    if identity.command() != ReadCommand::Identity.response_id() {
+        anyhow::bail!(InvalidIdentityResponse);
+    }
+    updraft_protocol::Identity::from_payload(identity.payload())
+        .map(|_| ())
+        .map_err(anyhow::Error::new)
+        .context("invalid GAF identity payload")
 }
 
 fn decode_matching_response(
