@@ -35,8 +35,8 @@ struct ApiState {
     ble_lock: Arc<Mutex<()>>,
     ble_client: Arc<ProbeClient>,
     freshness_limit: Duration,
-    device_id: Option<String>,
-    mqtt_updates: Option<watch::Sender<String>>,
+    device_id: Option<Arc<str>>,
+    mqtt_updates: Option<watch::Sender<Arc<String>>>,
 }
 
 impl ApiState {
@@ -53,7 +53,7 @@ impl ApiState {
 
     fn for_device(freshness_limit: Duration, device_id: String) -> Self {
         Self {
-            device_id: Some(device_id),
+            device_id: Some(Arc::from(device_id)),
             ..Self::new(freshness_limit)
         }
     }
@@ -102,7 +102,7 @@ impl ApiState {
                 scan_duration: Duration::from_secs(6),
                 response_timeout: Duration::from_secs(3),
                 mode: ProbeMode::Query {
-                    device_id: self.device_id.clone(),
+                    device_id: self.device_id.as_deref().map(str::to_owned),
                     control_command: Some(preset.command()),
                 },
             })
@@ -140,7 +140,7 @@ impl ApiState {
         };
         match serde_json::to_string(&device_state_response(self).await) {
             Ok(payload) => {
-                updates.send_replace(payload);
+                updates.send_replace(Arc::new(payload));
             }
             Err(error) => tracing::error!(%error, "could not serialize device state for MQTT"),
         }
@@ -199,7 +199,7 @@ pub(crate) async fn serve(
 ) -> Result<()> {
     validate_bind_address(address, allow_remote)?;
     let listener = TcpListener::bind(address).await?;
-    let mut state = ApiState::for_device(DEFAULT_FRESHNESS_LIMIT, device_id.clone());
+    let mut state = ApiState::for_device(DEFAULT_FRESHNESS_LIMIT, device_id);
     if let Some(config) = mqtt_config {
         let initial_state = serde_json::to_string(&device_state_response(&state).await)?;
         let bridge = crate::mqtt::start(config, initial_state);
@@ -210,7 +210,7 @@ pub(crate) async fn serve(
         ));
     }
     let app = router(state.clone());
-    tokio::spawn(poll_device(state, device_id, DEFAULT_POLL_INTERVAL));
+    tokio::spawn(poll_device(state, DEFAULT_POLL_INTERVAL));
 
     tracing::info!(%address, "Updraft API listening");
     axum::serve(listener, app).await?;
@@ -290,10 +290,10 @@ async fn control_device(
 const CONTROL_REPLAY_CAPACITY: usize = 64;
 
 #[derive(Default)]
-struct RecentControlResults(VecDeque<(CommandId, ControlPreset, ControlResponse)>);
+struct RecentControlResults(VecDeque<(CommandId, ControlPreset, Arc<ControlResponse>)>);
 
 impl RecentControlResults {
-    fn get(&self, request_id: &CommandId, preset: ControlPreset) -> Option<ControlResponse> {
+    fn get(&self, request_id: &CommandId, preset: ControlPreset) -> Option<Arc<ControlResponse>> {
         self.0
             .iter()
             .find(|(seen_id, _, _)| seen_id == request_id)
@@ -301,12 +301,20 @@ impl RecentControlResults {
                 if *seen_preset == preset {
                     response.clone()
                 } else {
-                    ControlResponse::rejected(preset, "request_id was reused for another preset")
+                    Arc::new(ControlResponse::rejected(
+                        preset,
+                        "request_id was reused for another preset",
+                    ))
                 }
             })
     }
 
-    fn insert(&mut self, request_id: CommandId, preset: ControlPreset, response: ControlResponse) {
+    fn insert(
+        &mut self,
+        request_id: CommandId,
+        preset: ControlPreset,
+        response: Arc<ControlResponse>,
+    ) {
         self.0.retain(|(seen_id, _, _)| seen_id != &request_id);
         self.0.push_back((request_id, preset, response));
         if self.0.len() > CONTROL_REPLAY_CAPACITY {
@@ -324,19 +332,19 @@ async fn process_mqtt_controls(
         let fresh = unix_millis(SystemTime::now())
             .is_some_and(|now_unix_ms| work.request.is_fresh_at(now_unix_ms));
         let response = if !fresh {
-            ControlResponse::rejected(
+            Arc::new(ControlResponse::rejected(
                 work.request.preset(),
                 "stale or future-dated control request",
-            )
+            ))
         } else {
             match recent.get(work.request.request_id(), work.request.preset()) {
                 Some(response) => response,
                 None => {
-                    let response = state.execute_mqtt_control(&work.request).await;
+                    let response = Arc::new(state.execute_mqtt_control(&work.request).await);
                     recent.insert(
                         work.request.request_id().clone(),
                         work.request.preset(),
-                        response.clone(),
+                        Arc::clone(&response),
                     );
                     response
                 }
@@ -440,7 +448,7 @@ impl StateValues {
     }
 }
 
-async fn poll_device(state: ApiState, device_id: String, poll_interval: Duration) {
+async fn poll_device(state: ApiState, poll_interval: Duration) {
     let mut ticker = interval(poll_interval);
     ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
     loop {
@@ -453,7 +461,7 @@ async fn poll_device(state: ApiState, device_id: String, poll_interval: Duration
                 scan_duration: Duration::from_secs(6),
                 response_timeout: Duration::from_secs(3),
                 mode: ProbeMode::Query {
-                    device_id: Some(device_id.clone()),
+                    device_id: state.device_id.as_deref().map(str::to_owned),
                     control_command: None,
                 },
             })
@@ -697,7 +705,11 @@ mod tests {
             message: "command acknowledged and readback matched",
             state: None,
         };
-        recent.insert(id.clone(), ControlPreset::TimerOneMinute, response.clone());
+        recent.insert(
+            id.clone(),
+            ControlPreset::TimerOneMinute,
+            Arc::new(response),
+        );
 
         assert!(
             recent
@@ -715,7 +727,10 @@ mod tests {
             recent.insert(
                 CommandId::parse(format!("command-{index}")).unwrap(),
                 ControlPreset::TimerClear,
-                ControlResponse::rejected(ControlPreset::TimerClear, "not confirmed"),
+                Arc::new(ControlResponse::rejected(
+                    ControlPreset::TimerClear,
+                    "not confirmed",
+                )),
             );
         }
         assert!(recent.0.len() <= CONTROL_REPLAY_CAPACITY);

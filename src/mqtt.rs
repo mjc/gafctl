@@ -1,4 +1,7 @@
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::{
+    sync::Arc,
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
 
 use crate::{
     api::ControlResponse,
@@ -22,14 +25,29 @@ const DEVICE_IDENTIFIER: &str = "updraft_gaf_vent";
 const CONTROL_QUEUE_CAPACITY: usize = 8;
 const CONTROL_RESPONSE_TIMEOUT: Duration = Duration::from_secs(120);
 const MAX_CONTROL_REQUEST_BYTES: usize = 1024;
+const DISCOVERY_TOPICS: [&str; 13] = [
+    "homeassistant/sensor/updraft/temperature/config",
+    "homeassistant/sensor/updraft/humidity/config",
+    "homeassistant/sensor/updraft/mode/config",
+    "homeassistant/sensor/updraft/controller_fan_flag/config",
+    "homeassistant/sensor/updraft/firmware_version/config",
+    "homeassistant/sensor/updraft/automatic_temperature_threshold/config",
+    "homeassistant/sensor/updraft/automatic_humidity_threshold/config",
+    "homeassistant/sensor/updraft/timer_remaining/config",
+    "homeassistant/sensor/updraft/timer_original/config",
+    "homeassistant/sensor/updraft/freshness/config",
+    "homeassistant/sensor/updraft/last_error/config",
+    "homeassistant/select/updraft/control/config",
+    "homeassistant/sensor/updraft/control_result/config",
+];
 
 pub(crate) struct MqttControlWork {
     pub request: FreshControlRequest,
-    pub reply: oneshot::Sender<ControlResponse>,
+    pub reply: oneshot::Sender<Arc<ControlResponse>>,
 }
 
 pub(crate) struct MqttBridge {
-    pub state_updates: watch::Sender<String>,
+    pub state_updates: watch::Sender<Arc<String>>,
     pub control_requests: mpsc::Receiver<MqttControlWork>,
 }
 
@@ -39,8 +57,6 @@ enum MqttControlParseError {
     InvalidJson(#[from] serde_json::Error),
     #[error("MQTT control request exceeds the size limit")]
     PayloadTooLarge,
-    #[error("request_id must be 1-64 ASCII letters, numbers, underscores, or hyphens")]
-    InvalidRequestId,
 }
 
 fn parse_control_request(payload: &[u8]) -> Result<ControlRequest, MqttControlParseError> {
@@ -51,18 +67,17 @@ fn parse_control_request(payload: &[u8]) -> Result<ControlRequest, MqttControlPa
     #[derive(Deserialize)]
     #[serde(deny_unknown_fields)]
     struct WireRequest {
-        request_id: String,
+        request_id: CommandId,
         issued_at_unix_ms: u64,
         preset: ControlPreset,
     }
 
     let request: WireRequest = serde_json::from_slice(payload)?;
-    ControlRequest::new(
+    Ok(ControlRequest::new(
         request.request_id,
         request.preset,
         request.issued_at_unix_ms,
-    )
-    .ok_or(MqttControlParseError::InvalidRequestId)
+    ))
 }
 
 pub(crate) struct MqttConfig {
@@ -85,7 +100,7 @@ pub(crate) fn start(config: MqttConfig, initial_state: String) -> MqttBridge {
     ));
     let discovery_enabled = config.discovery_enabled;
     let (client, mut eventloop) = AsyncClient::new(options, 32);
-    let (state_tx, mut state_rx) = watch::channel(initial_state);
+    let (state_tx, mut state_rx) = watch::channel(Arc::new(initial_state));
     let (connected_tx, connected_rx) = watch::channel(false);
     let (control_tx, control_rx) = mpsc::channel(CONTROL_QUEUE_CAPACITY);
     let event_client = client.clone();
@@ -144,7 +159,7 @@ pub(crate) fn start(config: MqttConfig, initial_state: String) -> MqttBridge {
                         return;
                     }
                     if *connected_rx.borrow() {
-                        let payload = state_rx.borrow().clone();
+                        let payload = Arc::clone(&*state_rx.borrow());
                         publish(&client, STATE_TOPIC, &payload).await;
                     }
                 }
@@ -153,7 +168,7 @@ pub(crate) fn start(config: MqttConfig, initial_state: String) -> MqttBridge {
                         return;
                     }
                     if *connected_rx.borrow() {
-                        let payload = state_rx.borrow().clone();
+                        let payload = Arc::clone(&*state_rx.borrow());
                         publish(&client, STATE_TOPIC, &payload).await;
                     }
                 }
@@ -253,7 +268,7 @@ fn unix_millis_now() -> Option<u64> {
         .and_then(|elapsed| elapsed.as_millis().try_into().ok())
 }
 
-async fn publish_ack(client: &AsyncClient, request_id: &CommandId, result: ControlResponse) {
+async fn publish_ack(client: &AsyncClient, request_id: &CommandId, result: Arc<ControlResponse>) {
     match control_acknowledgement_payload(request_id, &result) {
         Ok(payload) => {
             if let Err(error) = client
@@ -298,8 +313,10 @@ fn control_acknowledgement_payload(
 }
 
 async fn publish_discovery(client: &AsyncClient) {
-    for (topic, payload) in discovery_configs() {
-        match serde_json::to_vec(&payload) {
+    for (topic, config) in discovery_configs() {
+        let payload = serde_json::to_vec(&config);
+        drop(config);
+        match payload {
             Ok(payload) => {
                 if let Err(error) = client.publish(topic, QoS::AtLeastOnce, true, payload).await {
                     tracing::warn!(%error, "could not queue MQTT discovery config");
@@ -311,18 +328,18 @@ async fn publish_discovery(client: &AsyncClient) {
 }
 
 async fn clear_discovery(client: &AsyncClient) {
-    for (topic, payload) in discovery_tombstones() {
-        if let Err(error) = client.publish(topic, QoS::AtLeastOnce, true, payload).await {
+    for topic in discovery_tombstones() {
+        if let Err(error) = client
+            .publish(topic, QoS::AtLeastOnce, true, Vec::new())
+            .await
+        {
             tracing::warn!(%error, "could not clear retained MQTT discovery config");
         }
     }
 }
 
-fn discovery_tombstones() -> Vec<(String, Vec<u8>)> {
-    discovery_configs()
-        .into_iter()
-        .map(|(topic, _)| (topic, Vec::new()))
-        .collect()
+fn discovery_tombstones() -> impl Iterator<Item = &'static str> {
+    DISCOVERY_TOPICS.into_iter()
 }
 
 async fn publish(client: &AsyncClient, topic: &str, payload: &str) {
@@ -331,7 +348,7 @@ async fn publish(client: &AsyncClient, topic: &str, payload: &str) {
     }
 }
 
-fn discovery_configs() -> Vec<(String, Value)> {
+fn discovery_configs() -> impl Iterator<Item = (String, Value)> {
     let sensors = [
         (
             "temperature",
@@ -434,7 +451,7 @@ fn discovery_configs() -> Vec<(String, Value)> {
         ),
     ];
 
-    let mut configs = sensors
+    let sensor_configs = sensors
         .into_iter()
         .map(
             |(key, name, field, unit, device_class, state_class, entity_category)| {
@@ -487,9 +504,9 @@ fn discovery_configs() -> Vec<(String, Value)> {
                 )
             },
         )
-        .collect::<Vec<_>>();
+        ;
 
-    configs.push((
+    let control_config = (
         "homeassistant/select/updraft/control/config".to_owned(),
         json!({
             "name": "Controller preset",
@@ -523,8 +540,8 @@ fn discovery_configs() -> Vec<(String, Value)> {
             },
             "entity_category": "config"
         }),
-    ));
-    configs.push((
+    );
+    let result_config = (
         "homeassistant/sensor/updraft/control_result/config".to_owned(),
         json!({
             "name": "Last control result",
@@ -542,9 +559,9 @@ fn discovery_configs() -> Vec<(String, Value)> {
             },
             "entity_category": "diagnostic"
         }),
-    ));
+    );
 
-    configs
+    sensor_configs.chain([control_config, result_config])
 }
 
 #[cfg(test)]
@@ -553,7 +570,7 @@ mod tests {
 
     #[test]
     fn discovery_configs_use_stable_topics_and_the_shared_device() {
-        let configs = discovery_configs();
+        let configs = discovery_configs().collect::<Vec<_>>();
 
         assert_eq!(configs.len(), 13);
         assert!(configs.iter().all(|(topic, payload)| {
@@ -576,7 +593,7 @@ mod tests {
 
     #[test]
     fn discovery_payloads_do_not_include_the_ble_device_identifier() {
-        let encoded = serde_json::to_string(&discovery_configs()).unwrap();
+        let encoded = serde_json::to_string(&discovery_configs().collect::<Vec<_>>()).unwrap();
 
         assert!(!encoded.contains("private-peripheral-id"));
     }
@@ -616,7 +633,7 @@ mod tests {
 
     #[test]
     fn discovery_exposes_one_correlated_control_select_on_the_updraft_device() {
-        let configs = discovery_configs();
+        let configs = discovery_configs().collect::<Vec<_>>();
         let (topic, control) = configs
             .iter()
             .find(|(topic, _)| topic == "homeassistant/select/updraft/control/config")
@@ -686,19 +703,19 @@ mod tests {
 
     #[test]
     fn disabling_discovery_clears_only_updraft_retained_config_topics() {
-        let topics = discovery_tombstones();
-        let configs = discovery_configs();
+        let topics = discovery_tombstones().collect::<Vec<_>>();
+        let configs = discovery_configs().collect::<Vec<_>>();
 
         assert_eq!(topics.len(), configs.len());
         assert!(
-            topics.iter().all(|(topic, payload)| {
-                topic.starts_with("homeassistant/") && payload.is_empty()
-            })
+            topics
+                .iter()
+                .all(|topic| topic.starts_with("homeassistant/"))
         );
         assert!(
             topics
                 .iter()
-                .any(|(topic, _)| { topic == "homeassistant/select/updraft/control/config" })
+                .any(|topic| { *topic == "homeassistant/select/updraft/control/config" })
         );
     }
 }

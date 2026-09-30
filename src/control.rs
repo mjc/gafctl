@@ -1,26 +1,82 @@
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, de};
 use updraft_protocol::{
     AutomaticThresholds, ControlCommand, HumidityTenthsPercent, Minutes, OperatingMode,
     TemperatureTenthsF, TimerState,
 };
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
-pub(crate) struct CommandId(String);
+pub(crate) struct CommandId(Arc<str>);
 
 impl CommandId {
-    pub(crate) fn parse(value: String) -> Option<Self> {
-        let valid = !value.is_empty()
-            && value.len() <= 64
-            && value
-                .bytes()
-                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-');
-        valid.then_some(Self(value))
+    #[cfg(test)]
+    pub(crate) fn parse(value: impl Into<Arc<str>>) -> Option<Self> {
+        let value = value.into();
+        Self::is_valid(&value).then_some(Self(value))
     }
 
     pub(crate) fn as_str(&self) -> &str {
         &self.0
+    }
+
+    fn is_valid(value: &str) -> bool {
+        !value.is_empty()
+            && value.len() <= 64
+            && value
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
+    }
+
+    fn from_str(value: &str) -> Option<Self> {
+        Self::is_valid(value).then(|| Self(Arc::from(value)))
+    }
+
+    fn from_string(value: String) -> Option<Self> {
+        Self::is_valid(&value).then(|| Self(Arc::from(value)))
+    }
+}
+
+impl<'de> Deserialize<'de> for CommandId {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        struct CommandIdVisitor;
+
+        impl<'de> de::Visitor<'de> for CommandIdVisitor {
+            type Value = CommandId;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("a 1-64 character ASCII request ID")
+            }
+
+            fn visit_borrowed_str<E>(self, value: &'de str) -> Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
+                CommandId::from_str(value)
+                    .ok_or_else(|| E::custom("invalid MQTT control request ID"))
+            }
+
+            fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
+                CommandId::from_str(value)
+                    .ok_or_else(|| E::custom("invalid MQTT control request ID"))
+            }
+
+            fn visit_string<E>(self, value: String) -> Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
+                CommandId::from_string(value)
+                    .ok_or_else(|| E::custom("invalid MQTT control request ID"))
+            }
+        }
+
+        deserializer.deserialize_str(CommandIdVisitor)
     }
 }
 
@@ -39,15 +95,15 @@ pub(crate) struct FreshControlRequest(ControlRequest);
 
 impl ControlRequest {
     pub(crate) fn new(
-        request_id: String,
+        request_id: CommandId,
         preset: ControlPreset,
         issued_at_unix_ms: u64,
-    ) -> Option<Self> {
-        Some(Self {
-            request_id: CommandId::parse(request_id)?,
+    ) -> Self {
+        Self {
+            request_id,
             preset,
             issued_at_unix_ms,
-        })
+        }
     }
 
     pub(crate) fn request_id(&self) -> &CommandId {
