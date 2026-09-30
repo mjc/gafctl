@@ -60,6 +60,7 @@ tower-http.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 rumqttc.workspace = true
+thiserror.workspace = true
 updraft-bluetooth = { path = "crates/updraft-bluetooth" }
 updraft-protocol = { path = "crates/updraft-protocol" }
 updraft-wifi = { path = "crates/updraft-wifi" }

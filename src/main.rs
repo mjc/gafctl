@@ -1,5 +1,6 @@
 mod api;
 mod cli;
+mod control;
 mod logging;
 mod mqtt;
 mod output;

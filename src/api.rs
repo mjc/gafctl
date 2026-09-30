@@ -1,9 +1,11 @@
 use std::{
+    collections::VecDeque,
     net::SocketAddr,
     sync::Arc,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
+use crate::control::{CommandId, ControlPreset, FreshControlRequest};
 use anyhow::Result;
 use axum::{
     Json, Router,
@@ -14,16 +16,13 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use tokio::{
     net::TcpListener,
-    sync::{Mutex, RwLock, watch},
+    sync::{Mutex, RwLock, mpsc, watch},
     time::{MissedTickBehavior, interval},
 };
 use updraft_bluetooth::{
     DisconnectOutcome, ProbeClient, ProbeErrorKind, ProbeMode, ProbeOptions, ProbeResult,
 };
-use updraft_protocol::{
-    AutomaticThresholds, ControlCommand, DeviceSnapshot, HumidityTenthsPercent, Minutes,
-    StateFreshness, StateReconciler, TemperatureTenthsF,
-};
+use updraft_protocol::{DeviceSnapshot, StateFreshness, StateReconciler};
 
 const DEVICE_ID: &str = "configured";
 const DEFAULT_POLL_INTERVAL: Duration = Duration::from_secs(30);
@@ -36,6 +35,7 @@ struct ApiState {
     ble_client: Arc<ProbeClient>,
     freshness_limit: Duration,
     device_id: Option<String>,
+    mqtt_updates: Option<watch::Sender<String>>,
 }
 
 impl ApiState {
@@ -46,6 +46,7 @@ impl ApiState {
             ble_client: Arc::new(ProbeClient::new()),
             freshness_limit,
             device_id: None,
+            mqtt_updates: None,
         }
     }
 
@@ -53,6 +54,107 @@ impl ApiState {
         Self {
             device_id: Some(device_id),
             ..Self::new(freshness_limit)
+        }
+    }
+
+    async fn execute_control(&self, preset: ControlPreset) -> ControlResponse {
+        let _ble_guard = self.ble_lock.lock().await;
+        self.execute_control_locked(preset).await
+    }
+
+    async fn execute_mqtt_control(&self, request: &FreshControlRequest) -> ControlResponse {
+        let _ble_guard = self.ble_lock.lock().await;
+        let fresh = unix_millis(SystemTime::now())
+            .is_some_and(|now_unix_ms| request.is_fresh_at(now_unix_ms));
+        if !fresh {
+            return ControlResponse::rejected(
+                request.preset(),
+                "stale or future-dated control request",
+            );
+        }
+        self.execute_control_locked(request.preset()).await
+    }
+
+    async fn execute_control_locked(&self, preset: ControlPreset) -> ControlResponse {
+        let poll_id = self.reconciler.write().await.begin_poll();
+        let result = self
+            .ble_client
+            .probe(ProbeOptions {
+                scan_duration: Duration::from_secs(6),
+                response_timeout: Duration::from_secs(3),
+                mode: ProbeMode::Query {
+                    device_id: self.device_id.clone(),
+                    control_command: Some(preset.command()),
+                },
+            })
+            .await;
+
+        let (confirmed, message, snapshot) = match result {
+            Ok(ProbeResult::Queried { result, .. }) => {
+                if let DisconnectOutcome::Failed(error) = &result.disconnect {
+                    tracing::warn!(%error, "BLE disconnect failed after control request");
+                }
+                let confirmed = result
+                    .control
+                    .as_ref()
+                    .is_some_and(|control| control.is_confirmed());
+                let message = if confirmed {
+                    "command acknowledged and readback matched"
+                } else if let Some(error) = result.state_error.as_deref() {
+                    tracing::warn!(%error, "control readback failed");
+                    "command was not confirmed; readback failed"
+                } else {
+                    "command was not confirmed; acknowledgement or readback differed"
+                };
+                (confirmed, message, result.snapshot)
+            }
+            Ok(_) => (
+                false,
+                "command was not confirmed; device selection failed",
+                None,
+            ),
+            Err(error) => {
+                tracing::warn!(error = %error, "control request failed");
+                (false, "command was not confirmed; BLE request failed", None)
+            }
+        };
+
+        let response = if let Some(snapshot) = snapshot {
+            self.reconciler
+                .write()
+                .await
+                .apply_success(poll_id, snapshot.clone());
+            ControlResponse {
+                success: confirmed,
+                preset,
+                message,
+                state: StateValues::from_snapshot(&snapshot),
+            }
+        } else {
+            self.reconciler
+                .write()
+                .await
+                .apply_failure(poll_id, message);
+            ControlResponse {
+                success: false,
+                preset,
+                message,
+                state: None,
+            }
+        };
+        self.publish_state().await;
+        response
+    }
+
+    async fn publish_state(&self) {
+        let Some(updates) = &self.mqtt_updates else {
+            return;
+        };
+        match serde_json::to_string(&device_state_response(self).await) {
+            Ok(payload) => {
+                updates.send_replace(payload);
+            }
+            Err(error) => tracing::error!(%error, "could not serialize device state for MQTT"),
         }
     }
 }
@@ -65,21 +167,18 @@ pub(crate) async fn serve(
 ) -> Result<()> {
     validate_bind_address(address, allow_remote)?;
     let listener = TcpListener::bind(address).await?;
-    let state = ApiState::for_device(DEFAULT_FRESHNESS_LIMIT, device_id.clone());
+    let mut state = ApiState::for_device(DEFAULT_FRESHNESS_LIMIT, device_id.clone());
+    if let Some(config) = mqtt_config {
+        let initial_state = serde_json::to_string(&device_state_response(&state).await)?;
+        let bridge = crate::mqtt::start(config, initial_state);
+        state.mqtt_updates = Some(bridge.state_updates);
+        tokio::spawn(process_mqtt_controls(
+            state.clone(),
+            bridge.control_requests,
+        ));
+    }
     let app = router(state.clone());
-    let mqtt_updates = match mqtt_config {
-        Some(config) => {
-            let initial_state = serde_json::to_string(&device_state_response(&state).await)?;
-            Some(crate::mqtt::start(config, initial_state))
-        }
-        None => None,
-    };
-    tokio::spawn(poll_device(
-        state,
-        device_id,
-        DEFAULT_POLL_INTERVAL,
-        mqtt_updates,
-    ));
+    tokio::spawn(poll_device(state, device_id, DEFAULT_POLL_INTERVAL));
 
     tracing::info!(%address, "Updraft API listening");
     axum::serve(listener, app).await?;
@@ -118,134 +217,100 @@ async fn devices() -> Json<DeviceListResponse> {
     })
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-enum ControlPreset {
-    #[serde(rename = "automatic105_f30_percent")]
-    Automatic105F30Percent,
-    #[serde(rename = "automatic105_1_f30_1_percent")]
-    Automatic105_1F30_1Percent,
-    #[serde(rename = "timer_clear")]
-    TimerClear,
-    #[serde(rename = "timer_one_minute")]
-    TimerOneMinute,
-}
-
-impl ControlPreset {
-    fn command(self) -> ControlCommand {
-        match self {
-            Self::Automatic105F30Percent => {
-                ControlCommand::SetAutomaticThresholds(AutomaticThresholds {
-                    temperature: TemperatureTenthsF::new(1050),
-                    humidity: HumidityTenthsPercent::new(300),
-                })
-            }
-            Self::Automatic105_1F30_1Percent => {
-                ControlCommand::SetAutomaticThresholds(AutomaticThresholds {
-                    temperature: TemperatureTenthsF::new(1051),
-                    humidity: HumidityTenthsPercent::new(301),
-                })
-            }
-            Self::TimerClear => ControlCommand::SetTimer(Minutes::new(0)),
-            Self::TimerOneMinute => ControlCommand::SetTimer(Minutes::new(1)),
-        }
-    }
-}
-
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ControlRequest {
     preset: ControlPreset,
 }
 
-#[derive(Serialize)]
-struct ControlResponse {
+#[derive(Clone, Serialize)]
+pub(crate) struct ControlResponse {
     success: bool,
     preset: ControlPreset,
     message: &'static str,
     state: Option<StateValues>,
 }
 
+impl ControlResponse {
+    pub(crate) fn rejected(preset: ControlPreset, message: &'static str) -> Self {
+        Self {
+            success: false,
+            preset,
+            message,
+            state: None,
+        }
+    }
+}
+
 async fn control_device(
     State(state): State<ApiState>,
     Json(request): Json<ControlRequest>,
 ) -> (StatusCode, Json<ControlResponse>) {
-    let _ble_guard = state.ble_lock.lock().await;
-    let poll_id = state.reconciler.write().await.begin_poll();
-    let result = state
-        .ble_client
-        .probe(ProbeOptions {
-            scan_duration: Duration::from_secs(6),
-            response_timeout: Duration::from_secs(3),
-            mode: ProbeMode::Query {
-                device_id: state.device_id.clone(),
-                control_command: Some(request.preset.command()),
-            },
-        })
-        .await;
-
-    let (confirmed, message, snapshot) = match result {
-        Ok(ProbeResult::Queried { result, .. }) => {
-            if let DisconnectOutcome::Failed(error) = &result.disconnect {
-                tracing::warn!(%error, "BLE disconnect failed after control request");
-            }
-            let confirmed = result
-                .control
-                .as_ref()
-                .is_some_and(|control| control.is_confirmed());
-            let message = if confirmed {
-                "command acknowledged and readback matched"
-            } else if let Some(error) = result.state_error.as_deref() {
-                tracing::warn!(%error, "control readback failed");
-                "command was not confirmed; readback failed"
-            } else {
-                "command was not confirmed; acknowledgement or readback differed"
-            };
-            (confirmed, message, result.snapshot)
-        }
-        Ok(_) => (
-            false,
-            "command was not confirmed; device selection failed",
-            None,
-        ),
-        Err(error) => {
-            tracing::warn!(error = %error, "control request failed");
-            (false, "command was not confirmed; BLE request failed", None)
-        }
-    };
-
-    if let Some(snapshot) = snapshot {
-        state
-            .reconciler
-            .write()
-            .await
-            .apply_success(poll_id, snapshot.clone());
-        let body = ControlResponse {
-            success: confirmed,
-            preset: request.preset,
-            message,
-            state: StateValues::from_snapshot(&snapshot),
-        };
-        let status = if confirmed {
-            StatusCode::OK
-        } else {
-            StatusCode::BAD_GATEWAY
-        };
-        (status, Json(body))
+    let response = state.execute_control(request.preset).await;
+    let status = if response.success {
+        StatusCode::OK
     } else {
-        state
-            .reconciler
-            .write()
-            .await
-            .apply_failure(poll_id, message);
-        (
-            StatusCode::BAD_GATEWAY,
-            Json(ControlResponse {
-                success: false,
-                preset: request.preset,
-                message,
-                state: None,
-            }),
-        )
+        StatusCode::BAD_GATEWAY
+    };
+    (status, Json(response))
+}
+
+const CONTROL_REPLAY_CAPACITY: usize = 64;
+
+#[derive(Default)]
+struct RecentControlResults(VecDeque<(CommandId, ControlPreset, ControlResponse)>);
+
+impl RecentControlResults {
+    fn get(&self, request_id: &CommandId, preset: ControlPreset) -> Option<ControlResponse> {
+        self.0
+            .iter()
+            .find(|(seen_id, _, _)| seen_id == request_id)
+            .map(|(_, seen_preset, response)| {
+                if *seen_preset == preset {
+                    response.clone()
+                } else {
+                    ControlResponse::rejected(preset, "request_id was reused for another preset")
+                }
+            })
+    }
+
+    fn insert(&mut self, request_id: CommandId, preset: ControlPreset, response: ControlResponse) {
+        self.0.retain(|(seen_id, _, _)| seen_id != &request_id);
+        self.0.push_back((request_id, preset, response));
+        if self.0.len() > CONTROL_REPLAY_CAPACITY {
+            self.0.pop_front();
+        }
+    }
+}
+
+async fn process_mqtt_controls(
+    state: ApiState,
+    mut controls: mpsc::Receiver<crate::mqtt::MqttControlWork>,
+) {
+    let mut recent = RecentControlResults::default();
+    while let Some(work) = controls.recv().await {
+        let fresh = unix_millis(SystemTime::now())
+            .is_some_and(|now_unix_ms| work.request.is_fresh_at(now_unix_ms));
+        let response = if !fresh {
+            ControlResponse::rejected(
+                work.request.preset(),
+                "stale or future-dated control request",
+            )
+        } else {
+            match recent.get(work.request.request_id(), work.request.preset()) {
+                Some(response) => response,
+                None => {
+                    let response = state.execute_mqtt_control(&work.request).await;
+                    recent.insert(
+                        work.request.request_id().clone(),
+                        work.request.preset(),
+                        response.clone(),
+                    );
+                    response
+                }
+            }
+        };
+        let _ = work.reply.send(response);
     }
 }
 
@@ -307,6 +372,7 @@ struct StateValues {
     humidity_percent: f64,
     automatic_temperature_threshold_f: f64,
     automatic_humidity_threshold_percent: f64,
+    control_preset: Option<&'static str>,
     timer_remaining_minutes: u16,
     timer_original_minutes: u16,
 }
@@ -334,18 +400,15 @@ impl StateValues {
             humidity_percent: f64::from(sensors.humidity.value()) / 10.0,
             automatic_temperature_threshold_f: f64::from(thresholds.temperature.value()) / 10.0,
             automatic_humidity_threshold_percent: f64::from(thresholds.humidity.value()) / 10.0,
+            control_preset: ControlPreset::from_readback(mode.mode, *thresholds, *timer)
+                .map(ControlPreset::as_str),
             timer_remaining_minutes: timer.remaining.value(),
             timer_original_minutes: timer.original.value(),
         })
     }
 }
 
-async fn poll_device(
-    state: ApiState,
-    device_id: String,
-    poll_interval: Duration,
-    mqtt_updates: Option<watch::Sender<String>>,
-) {
+async fn poll_device(state: ApiState, device_id: String, poll_interval: Duration) {
     let mut ticker = interval(poll_interval);
     ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
     loop {
@@ -428,14 +491,7 @@ async fn poll_device(
             }
         }
 
-        if let Some(updates) = &mqtt_updates {
-            match serde_json::to_string(&device_state_response(&state).await) {
-                Ok(payload) => {
-                    updates.send_replace(payload);
-                }
-                Err(error) => tracing::error!(%error, "could not serialize device state for MQTT"),
-            }
-        }
+        state.publish_state().await;
     }
 }
 
@@ -589,6 +645,50 @@ mod tests {
         assert!(serde_json::from_str::<ControlPreset>("\"arbitrary\"").is_err());
     }
 
+    #[test]
+    fn http_control_requests_reject_unknown_fields() {
+        assert!(
+            serde_json::from_str::<ControlRequest>(
+                r#"{"preset":"timer_clear","duration_minutes":999}"#
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn mqtt_control_request_ids_replay_once_and_reject_preset_changes() {
+        let id = CommandId::parse("ha-command-1".to_owned()).unwrap();
+        let mut recent = RecentControlResults::default();
+        let response = ControlResponse {
+            success: true,
+            preset: ControlPreset::TimerOneMinute,
+            message: "command acknowledged and readback matched",
+            state: None,
+        };
+        recent.insert(id.clone(), ControlPreset::TimerOneMinute, response.clone());
+
+        assert!(
+            recent
+                .get(&id, ControlPreset::TimerOneMinute)
+                .unwrap()
+                .success
+        );
+        let changed = recent
+            .get(&id, ControlPreset::TimerClear)
+            .expect("a reused request ID is rejected");
+        assert!(!changed.success);
+        assert_eq!(changed.message, "request_id was reused for another preset");
+
+        for index in 0..=CONTROL_REPLAY_CAPACITY {
+            recent.insert(
+                CommandId::parse(format!("command-{index}")).unwrap(),
+                ControlPreset::TimerClear,
+                ControlResponse::rejected(ControlPreset::TimerClear, "not confirmed"),
+            );
+        }
+        assert!(recent.0.len() <= CONTROL_REPLAY_CAPACITY);
+    }
+
     #[tokio::test]
     async fn state_route_reports_fresh_stale_failed_and_rejected_malformed_snapshots() {
         let state = ApiState::new(Duration::from_secs(60));
@@ -602,6 +702,7 @@ mod tests {
         assert_eq!(fresh["freshness"], "fresh");
         assert_eq!(fresh["available"], true);
         assert_eq!(fresh["state"]["temperature_f"], 97.0);
+        assert_eq!(fresh["state"]["control_preset"], "automatic105_f30_percent");
 
         let mut reconciler = state.reconciler.write().await;
         let failed_poll = reconciler.begin_poll();
