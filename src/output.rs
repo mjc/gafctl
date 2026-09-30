@@ -2,8 +2,8 @@ use std::fmt;
 
 use updraft_bluetooth::{DiscoveredDevice, ProbeResult};
 use updraft_protocol::{
-    Acknowledgement, ControlOutcome, ControlReadback, DeviceSnapshot, ModeReadback, OperatingMode,
-    ReadCommand, ReadbackMatch,
+    Acknowledgement, ControlOutcome, ControlReadback, DeviceSnapshot, FanState, ModeReadback,
+    OperatingMode, ReadCommand, ReadbackMatch,
 };
 
 pub(crate) fn print_probe_result(result: ProbeResult, show_identity: bool) {
@@ -185,9 +185,15 @@ impl fmt::Display for ModeReadbackDisplay {
                 "mode readback: {}; differs from request",
                 mode_name(mode)
             ),
-            ModeReadback::TimerExpired(mode) => write!(
+            ModeReadback::FanFlagDiffers { mode, actual } => write!(
                 output,
-                "mode readback: {}; timer expired during verification",
+                "mode readback: {}; controller fan flag is {}, but timer clear expects off",
+                mode_name(mode),
+                fan_state_name(actual),
+            ),
+            ModeReadback::UnverifiedTimerExpiry(mode) => write!(
+                output,
+                "mode readback: {}; timer-expiry pattern is unverified; control is not confirmed",
                 mode_name(mode)
             ),
             ModeReadback::Unrecognized(error) => {
@@ -203,6 +209,13 @@ fn mode_name(mode: OperatingMode) -> &'static str {
         OperatingMode::Automatic => "automatic",
         OperatingMode::Timer => "timer",
         OperatingMode::Ota => "OTA",
+    }
+}
+
+fn fan_state_name(fan: FanState) -> &'static str {
+    match fan {
+        FanState::Off => "off",
+        FanState::On => "on",
     }
 }
 

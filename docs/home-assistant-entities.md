@@ -61,7 +61,7 @@ leave the exact model/controller revision unknown.
 | Automatic temperature threshold | Number control, °F | Read from `atg`. In a serialized per-device transaction, read both thresholds fresh, preserve humidity, then issue `ams`. It writes both values and selects automatic mode; confirm with accepted ACK, matching paired `atg`, and automatic `dmr`. Keep disabled until the device-accepted range is established. |
 | Automatic humidity threshold | Number control, % | Read from `atg`. In a serialized per-device transaction, read both thresholds fresh, preserve temperature, then issue `ams`. It writes both values and selects automatic mode; confirm with accepted ACK, matching paired `atg`, and automatic `dmr`. Keep disabled until the device-accepted range is established. |
 | Timer remaining | Duration sensor, minutes | Read from `ttg`; never present the original duration as remaining time. |
-| Timer duration | Number control, minutes | `tms` is verified for 0 (clear) and 1 minute. Zero clears the timer; positive values select timer mode. Keep the upper range disabled until its accepted bound is established. Confirm with accepted ACK and matching `ttr`; accept a timer that expires before readback only when the original duration matches, remaining time is zero, and controller state is consistent with expiration. |
+| Timer duration | Number control, minutes | `tms` is verified for 0 (clear) and 1 minute. Zero clears the timer; positive values select timer mode. Keep the upper range disabled until its accepted bound is established. Confirm a zero clear only with accepted ACK, matching `ttr`, timer mode, and the controller fan flag off. Confirm a positive timer only with accepted ACK, matching `ttr`, and timer mode. A timer-expiry pattern before readback is unverified and must not be reported as confirmed. |
 | Controller mode | Diagnostic sensor | Report decoded automatic/timer observations. Do not present a separate mode selector: available commands select automatic or timer, and no independent off/manual operation is verified. |
 | Controller fan flag | Diagnostic sensor or attribute | Label explicitly as a controller report. Do not expose it as physical `running` or airflow. |
 | Firmware version | Diagnostic sensor/device software version | Use the decoded version prefix only. No serial number entity. |
@@ -99,10 +99,11 @@ capability.
   operation.
   Threshold confirmation requires accepted `amr0`, both requested values in a
   fresh matching `atg`, and automatic mode in `dmr`. Timer confirmation
-  requires accepted `tmr0`, matching original duration in `ttr`, and timer mode;
-  if it expires before readback, accept only the verified expiration case
-  (matching original duration, zero remaining, and automatic mode). A mismatch
-  or timeout leaves the last confirmed value intact and reports the failure.
+  requires accepted `tmr0`, matching original duration in `ttr`, and timer mode.
+  Clearing a timer also requires the controller fan flag to be off. A timer
+  expiry pattern before readback is unverified and does not confirm the
+  command. A mismatch or timeout leaves the last confirmed value intact and
+  reports the failure.
 - The controller fan flag is never physical proof. Do not synthesize a
   `Running` sensor from thresholds or mode; that inference belongs only to the
   distinct upstream cloud product and is not validated for this legacy fan.

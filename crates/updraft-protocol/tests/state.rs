@@ -366,7 +366,7 @@ fn threshold_control_requires_automatic_mode_after_matching_thresholds() {
 }
 
 #[test]
-fn timer_control_rejects_automatic_mode_but_accepts_observed_expiry() {
+fn timer_control_does_not_confirm_unverified_expiry() {
     let command = ControlCommand::SetTimer(Minutes::new(1));
     let still_automatic = snapshot_with_mode(b"#dmraf\n", b"#atr041a012c\n", b"#ttr00010001\n");
     let outcome =
@@ -376,10 +376,45 @@ fn timer_control_rejects_automatic_mode_but_accepts_observed_expiry() {
     let expired = snapshot_with_mode(b"#dmraf\n", b"#atr041a012c\n", b"#ttr00000001\n");
     let outcome =
         ControlOutcome::from_response(command, frame(b"#tmr0\n"), Some(&expired)).unwrap();
+    assert!(!outcome.is_confirmed());
+    assert_eq!(
+        outcome.mode_readback(),
+        ModeReadback::UnverifiedTimerExpiry(OperatingMode::Automatic)
+    );
+}
+
+#[test]
+fn clearing_timer_requires_timer_mode_and_controller_fan_off() {
+    let command = ControlCommand::SetTimer(Minutes::new(0));
+
+    let still_on = snapshot_with_mode(b"#dmrtn\n", b"#atr041a012c\n", b"#ttr00000000\n");
+    let outcome =
+        ControlOutcome::from_response(command, frame(b"#tmr0\n"), Some(&still_on)).unwrap();
+    assert!(!outcome.is_confirmed());
+    assert_eq!(
+        outcome.mode_readback(),
+        ModeReadback::FanFlagDiffers {
+            mode: OperatingMode::Timer,
+            actual: FanState::On,
+        }
+    );
+
+    let cleared = snapshot_with_mode(b"#dmrtf\n", b"#atr041a012c\n", b"#ttr00000000\n");
+    let outcome =
+        ControlOutcome::from_response(command, frame(b"#tmr0\n"), Some(&cleared)).unwrap();
     assert!(outcome.is_confirmed());
     assert_eq!(
         outcome.mode_readback(),
-        ModeReadback::TimerExpired(OperatingMode::Automatic)
+        ModeReadback::Matches(OperatingMode::Timer)
+    );
+
+    let automatic = snapshot_with_mode(b"#dmraf\n", b"#atr041a012c\n", b"#ttr00000000\n");
+    let outcome =
+        ControlOutcome::from_response(command, frame(b"#tmr0\n"), Some(&automatic)).unwrap();
+    assert!(!outcome.is_confirmed());
+    assert_eq!(
+        outcome.mode_readback(),
+        ModeReadback::Differs(OperatingMode::Automatic)
     );
 }
 
