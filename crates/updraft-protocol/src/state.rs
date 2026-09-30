@@ -1,5 +1,7 @@
 //! Typed interpretations of observed replies, kept beside their wire frames.
 
+use std::time::{Duration, Instant, SystemTime};
+
 use thiserror::Error;
 
 use crate::{
@@ -182,6 +184,9 @@ pub(super) fn validate_response(
 /// One complete set of state replies, retaining every original frame.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DeviceSnapshot {
+    /// Wall-clock timestamp for display and logs.
+    pub observed_at: SystemTime,
+    freshness_started_at: Instant,
     /// Identity and firmware version prefix.
     pub identity: Observation<Identity>,
     /// Controller mode and fan flag.
@@ -204,6 +209,27 @@ impl DeviceSnapshot {
         thresholds: Frame<'static>,
         timer: Frame<'static>,
     ) -> Result<Self, UnexpectedResponse> {
+        Self::from_frames_at(
+            identity,
+            mode,
+            sensors,
+            thresholds,
+            timer,
+            SystemTime::now(),
+            Instant::now(),
+        )
+    }
+
+    /// Pair replies with the time at which the complete set was observed.
+    pub fn from_frames_at(
+        identity: Frame<'static>,
+        mode: Frame<'static>,
+        sensors: Frame<'static>,
+        thresholds: Frame<'static>,
+        timer: Frame<'static>,
+        observed_at: SystemTime,
+        freshness_started_at: Instant,
+    ) -> Result<Self, UnexpectedResponse> {
         [
             (ReadCommand::Identity, &identity),
             (ReadCommand::Mode, &mode),
@@ -215,6 +241,8 @@ impl DeviceSnapshot {
         .try_for_each(|(request, frame)| validate_response(frame, request.response_id()))?;
 
         Ok(Self {
+            observed_at,
+            freshness_started_at,
             identity: Observation::new(identity, Identity::from_payload),
             mode: Observation::new(mode, DeviceMode::parse),
             sensors: Observation::new(sensors, SensorReadings::parse),
@@ -227,6 +255,24 @@ impl DeviceSnapshot {
         })
     }
 
+    /// Whether this snapshot is no older than `max_age` at `now`.
+    #[must_use]
+    pub fn is_fresh_at(&self, now: Instant, max_age: Duration) -> bool {
+        now.checked_duration_since(self.freshness_started_at)
+            .is_some_and(|age| age <= max_age)
+    }
+
+    fn decoding_error(&self) -> Option<PayloadError> {
+        self.identity
+            .decoded()
+            .err()
+            .copied()
+            .or_else(|| self.mode.decoded().err().copied())
+            .or_else(|| self.sensors.decoded().err().copied())
+            .or_else(|| self.thresholds.decoded().err().copied())
+            .or_else(|| self.timer.decoded().err().copied())
+    }
+
     /// Iterate through the five retained replies in request order.
     pub fn frames(&self) -> impl Iterator<Item = (ReadCommand, &Frame<'static>)> {
         [
@@ -237,5 +283,97 @@ impl DeviceSnapshot {
             (ReadCommand::Timer, self.timer.frame()),
         ]
         .into_iter()
+    }
+}
+
+/// Freshness of the most recently observed snapshot.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum StateFreshness {
+    /// No successful poll has been recorded.
+    Unknown,
+    /// The last snapshot is within the configured age limit.
+    Fresh,
+    /// The last snapshot is older than the configured age limit.
+    Stale,
+}
+
+/// Reconciles completed polls without replacing a newer snapshot with a late reply.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct StateReconciler {
+    latest: Option<DeviceSnapshot>,
+    last_error: Option<String>,
+    next_poll_id: u64,
+    latest_completed_poll: Option<u64>,
+}
+
+impl StateReconciler {
+    /// Reserve an identifier before starting a poll. Pass it to either completion method.
+    pub fn begin_poll(&mut self) -> u64 {
+        let poll_id = self.next_poll_id;
+        self.next_poll_id = self.next_poll_id.saturating_add(1);
+        poll_id
+    }
+
+    /// Store a completed poll unless a later-started poll already completed.
+    /// Returns false when this poll result arrived out of order.
+    pub fn apply_success(&mut self, poll_id: u64, snapshot: DeviceSnapshot) -> bool {
+        if self
+            .latest_completed_poll
+            .is_some_and(|latest| poll_id < latest)
+        {
+            return false;
+        }
+        self.latest_completed_poll = Some(poll_id);
+        if let Some(error) = snapshot.decoding_error() {
+            self.last_error = Some(format!("poll snapshot contains invalid payload: {error}"));
+            return false;
+        }
+        self.latest = Some(snapshot);
+        self.last_error = None;
+        true
+    }
+
+    /// Record a poll failure while retaining the last observed snapshot and timestamp.
+    /// Returns false when this older poll finished after a newer poll.
+    pub fn apply_failure(&mut self, poll_id: u64, error: impl Into<String>) -> bool {
+        if self
+            .latest_completed_poll
+            .is_some_and(|latest| poll_id < latest)
+        {
+            return false;
+        }
+        self.last_error = Some(error.into());
+        self.latest_completed_poll = Some(poll_id);
+        true
+    }
+
+    /// Return the last observed snapshot, even if it is stale.
+    #[must_use]
+    pub fn latest_snapshot(&self) -> Option<&DeviceSnapshot> {
+        self.latest.as_ref()
+    }
+
+    /// Return the last snapshot only while it is fresh at `now`.
+    #[must_use]
+    pub fn current_snapshot_at(&self, now: Instant, max_age: Duration) -> Option<&DeviceSnapshot> {
+        self.latest
+            .as_ref()
+            .filter(|snapshot| snapshot.is_fresh_at(now, max_age))
+    }
+
+    /// Report whether the last successful poll is fresh, stale, or absent.
+    #[must_use]
+    pub fn freshness_at(&self, now: Instant, max_age: Duration) -> StateFreshness {
+        match self.latest.as_ref() {
+            None => StateFreshness::Unknown,
+            Some(snapshot) if snapshot.is_fresh_at(now, max_age) => StateFreshness::Fresh,
+            Some(_) => StateFreshness::Stale,
+        }
+    }
+
+    /// Return the latest poll error without replacing observed device state.
+    #[must_use]
+    pub fn last_error(&self) -> Option<&str> {
+        self.last_error.as_deref()
     }
 }

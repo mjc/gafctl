@@ -18,7 +18,7 @@ pub use control::{
 pub use frame::{Frame, FrameDecoder, FrameError};
 pub use state::{
     DeviceMode, DeviceSnapshot, FanState, FirmwareVersion, Identity, Observation, OperatingMode,
-    PayloadError, SensorReadings, UnexpectedResponse,
+    PayloadError, SensorReadings, StateFreshness, StateReconciler, UnexpectedResponse,
 };
 pub use values::{
     AutomaticThresholds, HumidityTenthsPercent, Minutes, ReadbackError, TemperatureTenthsF,
