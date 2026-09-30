@@ -19,19 +19,39 @@ struct Cli {
 enum Command {
     /// Inspect the GAF Wi-Fi Vent over a device transport.
     Probe(ProbeCommand),
-    /// Serve read-only device state to a same-host Home Assistant instance.
+    /// Serve read-only device state to Home Assistant.
     Serve(ServeOptions),
 }
 
 #[derive(Debug, Args)]
 struct ServeOptions {
     /// Peripheral ID printed by a scan-only run. Never include it in logs or API responses.
-    #[arg(long)]
+    #[arg(long, env = "UPDRAFT_DEVICE_ID")]
     device_id: String,
 
-    /// Local listener address. Keep it on loopback unless a separate access boundary is configured.
+    /// Listener address. Non-loopback addresses require --allow-remote.
     #[arg(long, default_value = "127.0.0.1:8787")]
     bind: SocketAddr,
+
+    /// Allow non-loopback access. Restrict network access with the host firewall.
+    #[arg(long)]
+    allow_remote: bool,
+
+    /// MQTT broker host. When set, publish retained state and Home Assistant discovery.
+    #[arg(long, env = "UPDRAFT_MQTT_HOST", requires_all = ["mqtt_username", "mqtt_password"])]
+    mqtt_host: Option<String>,
+
+    /// MQTT broker port.
+    #[arg(long, env = "UPDRAFT_MQTT_PORT", default_value_t = 1883)]
+    mqtt_port: u16,
+
+    /// MQTT username. Required with --mqtt-host.
+    #[arg(long, env = "UPDRAFT_MQTT_USERNAME", requires = "mqtt_host")]
+    mqtt_username: Option<String>,
+
+    /// MQTT password. Required with --mqtt-host.
+    #[arg(long, env = "UPDRAFT_MQTT_PASSWORD", requires = "mqtt_host")]
+    mqtt_password: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -129,7 +149,29 @@ impl BleOptions {
 pub(crate) async fn run() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
-        Command::Serve(options) => crate::api::serve(options.device_id, options.bind).await,
+        Command::Serve(options) => {
+            let mqtt_config = match (
+                options.mqtt_host,
+                options.mqtt_username,
+                options.mqtt_password,
+            ) {
+                (Some(host), Some(username), Some(password)) => Some(crate::mqtt::MqttConfig {
+                    host,
+                    port: options.mqtt_port,
+                    username,
+                    password,
+                }),
+                (None, None, None) => None,
+                _ => anyhow::bail!("MQTT host, username, and password must be configured together"),
+            };
+            crate::api::serve(
+                options.device_id,
+                options.bind,
+                options.allow_remote,
+                mqtt_config,
+            )
+            .await
+        }
         Command::Probe(ProbeCommand {
             transport: ProbeTransport::Ble(options),
         }) => run_ble_probe(options).await,
@@ -214,6 +256,50 @@ mod tests {
                 "--set-auto-thresholds-tenths",
                 "1100",
                 "350",
+            ])
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn serve_keeps_http_pull_and_allows_mqtt_push_together() {
+        let cli = Cli::try_parse_from([
+            "updraft",
+            "serve",
+            "--device-id",
+            "local-device-id",
+            "--bind",
+            "0.0.0.0:8787",
+            "--allow-remote",
+            "--mqtt-host",
+            "192.168.1.5",
+            "--mqtt-username",
+            "updraft",
+            "--mqtt-password",
+            "password",
+        ])
+        .unwrap();
+
+        let options = if let Command::Serve(options) = cli.command {
+            options
+        } else {
+            return;
+        };
+        assert_eq!(options.bind, "0.0.0.0:8787".parse().unwrap());
+        assert!(options.allow_remote);
+        assert_eq!(options.mqtt_host.as_deref(), Some("192.168.1.5"));
+    }
+
+    #[test]
+    fn serve_requires_both_mqtt_credentials_when_push_is_enabled() {
+        assert!(
+            Cli::try_parse_from([
+                "updraft",
+                "serve",
+                "--device-id",
+                "local-device-id",
+                "--mqtt-host",
+                "192.168.1.5",
             ])
             .is_err()
         );

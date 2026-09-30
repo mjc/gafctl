@@ -9,7 +9,7 @@ use axum::{Json, Router, extract::State, routing::get};
 use serde::Serialize;
 use tokio::{
     net::TcpListener,
-    sync::RwLock,
+    sync::{RwLock, watch},
     time::{MissedTickBehavior, interval},
 };
 use updraft_bluetooth::{ProbeErrorKind, ProbeMode, ProbeOptions, ProbeResult, probe};
@@ -34,22 +34,39 @@ impl ApiState {
     }
 }
 
-pub(crate) async fn serve(device_id: String, address: SocketAddr) -> Result<()> {
-    ensure_loopback_address(address)?;
+pub(crate) async fn serve(
+    device_id: String,
+    address: SocketAddr,
+    allow_remote: bool,
+    mqtt_config: Option<crate::mqtt::MqttConfig>,
+) -> Result<()> {
+    validate_bind_address(address, allow_remote)?;
     let listener = TcpListener::bind(address).await?;
     let state = ApiState::new(DEFAULT_FRESHNESS_LIMIT);
     let app = router(state.clone());
-    tokio::spawn(poll_device(state, device_id, DEFAULT_POLL_INTERVAL));
+    let mqtt_updates = match mqtt_config {
+        Some(config) => {
+            let initial_state = serde_json::to_string(&device_state_response(&state).await)?;
+            Some(crate::mqtt::start(config, initial_state))
+        }
+        None => None,
+    };
+    tokio::spawn(poll_device(
+        state,
+        device_id,
+        DEFAULT_POLL_INTERVAL,
+        mqtt_updates,
+    ));
 
     tracing::info!(%address, "Updraft read-only API listening");
     axum::serve(listener, app).await?;
     Ok(())
 }
 
-fn ensure_loopback_address(address: SocketAddr) -> Result<()> {
+fn validate_bind_address(address: SocketAddr, allow_remote: bool) -> Result<()> {
     anyhow::ensure!(
-        address.ip().is_loopback(),
-        "the read-only API only binds to loopback"
+        address.ip().is_loopback() || allow_remote,
+        "non-loopback API binding requires --allow-remote"
     );
     Ok(())
 }
@@ -78,11 +95,15 @@ async fn devices() -> Json<DeviceListResponse> {
 }
 
 async fn device_state(State(state): State<ApiState>) -> Json<DeviceStateResponse> {
+    Json(device_state_response(&state).await)
+}
+
+async fn device_state_response(state: &ApiState) -> DeviceStateResponse {
     let reconciler = state.reconciler.read().await;
     let now = Instant::now();
     let freshness = reconciler.freshness_at(now, state.freshness_limit);
     let snapshot = reconciler.current_snapshot_at(now, state.freshness_limit);
-    Json(DeviceStateResponse {
+    DeviceStateResponse {
         device_id: DEVICE_ID,
         available: freshness == StateFreshness::Fresh,
         freshness: freshness_name(freshness),
@@ -91,7 +112,7 @@ async fn device_state(State(state): State<ApiState>) -> Json<DeviceStateResponse
             .and_then(|snapshot| unix_millis(snapshot.observed_at)),
         last_error: reconciler.last_error().map(str::to_owned),
         state: snapshot.and_then(StateValues::from_snapshot),
-    })
+    }
 }
 
 #[derive(Serialize)]
@@ -112,7 +133,7 @@ struct DeviceDescription {
     controls: bool,
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 struct DeviceStateResponse {
     device_id: &'static str,
     available: bool,
@@ -122,7 +143,7 @@ struct DeviceStateResponse {
     state: Option<StateValues>,
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 struct StateValues {
     firmware_version: String,
     mode: &'static str,
@@ -164,7 +185,12 @@ impl StateValues {
     }
 }
 
-async fn poll_device(state: ApiState, device_id: String, poll_interval: Duration) {
+async fn poll_device(
+    state: ApiState,
+    device_id: String,
+    poll_interval: Duration,
+    mqtt_updates: Option<watch::Sender<String>>,
+) {
     let mut ticker = interval(poll_interval);
     ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
     loop {
@@ -235,6 +261,15 @@ async fn poll_device(state: ApiState, device_id: String, poll_interval: Duration
                     .write()
                     .await
                     .apply_failure(poll_id, message);
+            }
+        }
+
+        if let Some(updates) = &mqtt_updates {
+            match serde_json::to_string(&device_state_response(&state).await) {
+                Ok(payload) => {
+                    updates.send_replace(payload);
+                }
+                Err(error) => tracing::error!(%error, "could not serialize device state for MQTT"),
             }
         }
     }
@@ -406,17 +441,13 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn serve_rejects_non_loopback_bind_addresses() {
-        let result = serve("private-device-id".to_owned(), "0.0.0.0:0".parse().unwrap()).await;
-        assert!(result.is_err());
-    }
-
     #[test]
-    fn bind_address_validation_accepts_ipv4_and_ipv6_loopback_only() {
-        assert!(ensure_loopback_address("127.0.0.1:8787".parse().unwrap()).is_ok());
-        assert!(ensure_loopback_address("[::1]:8787".parse().unwrap()).is_ok());
-        assert!(ensure_loopback_address("192.168.1.5:8787".parse().unwrap()).is_err());
+    fn bind_address_validation_requires_remote_opt_in() {
+        assert!(validate_bind_address("127.0.0.1:8787".parse().unwrap(), false).is_ok());
+        assert!(validate_bind_address("[::1]:8787".parse().unwrap(), false).is_ok());
+        assert!(validate_bind_address("192.168.1.5:8787".parse().unwrap(), false).is_err());
+        assert!(validate_bind_address("0.0.0.0:8787".parse().unwrap(), true).is_ok());
+        assert!(validate_bind_address("192.168.1.5:8787".parse().unwrap(), true).is_ok());
     }
 
     #[test]

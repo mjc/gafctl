@@ -1,6 +1,6 @@
 # Updraft
 
-Updraft is a Rust BLE proxy for the GAF Wi-Fi Vent. It reads device state and has verified threshold and timer controls. Its loopback HTTP API is read-only; the Home Assistant integration exposes state and diagnostics only.
+Updraft is a Rust BLE proxy for the GAF Wi-Fi Vent. It reads device state and has verified threshold and timer controls. Its HTTP API is read-only; the Home Assistant integration exposes state and diagnostics only. The service supports both HTTP polling and optional MQTT state publishing.
 
 ## Workspace
 
@@ -9,7 +9,7 @@ Updraft is a Rust BLE proxy for the GAF Wi-Fi Vent. It reads device state and ha
 | `updraft-protocol` | Typed commands, values, and frame parsing. |
 | `updraft-bluetooth` | BLE discovery, connection, and protocol transport. |
 | `updraft-wifi` | Reserved for Wi-Fi transport. |
-| `updraft` | CLI and loopback HTTP API. |
+| `updraft` | CLI, read-only HTTP API, and optional MQTT publisher. |
 
 ## GAF Wi-Fi Vent
 
@@ -43,16 +43,23 @@ cargo run -- probe ble --set-timer-minutes 0
 
 ## Home Assistant
 
-Run the local API on the same host as Home Assistant:
+Run the HTTP API on the same host as Home Assistant, or use `--allow-remote` to
+let Home Assistant poll a host on the LAN. MQTT push is optional and publishes
+retained state with Home Assistant MQTT discovery:
 
 ```sh
 cargo run -- serve --device-id DEVICE_ID_FROM_SCAN
 ```
 
-The API defaults to `127.0.0.1:8787` and rejects non-loopback bind addresses.
+The API defaults to `127.0.0.1:8787`; non-loopback binding requires the explicit
+`--allow-remote` flag. The Home Assistant integration polls the API. To also
+publish MQTT state, configure `UPDRAFT_MQTT_HOST`, `UPDRAFT_MQTT_PORT`,
+`UPDRAFT_MQTT_USERNAME`, and `UPDRAFT_MQTT_PASSWORD`. The MQTT user only needs
+write access to the Updraft state and Home Assistant discovery topics.
+
 Copy `custom_components/updraft` into Home Assistant's `custom_components`
-directory, restart Home Assistant, then add **Updraft GAF Vent** and enter
-`http://127.0.0.1:8787`.
+directory, restart Home Assistant, then add **Updraft GAF Vent** and enter the
+HTTP API URL. MQTT discovery can be used alongside the polling integration.
 
 The integration reports temperature, humidity, controller mode and fan flag,
 firmware, thresholds, timer state, availability, and freshness. The controller
