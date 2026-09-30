@@ -18,8 +18,7 @@
 
   tasks."check:fmt".exec = "cargo fmt --all -- --check";
   tasks."check:clippy".exec = "cargo clippy --workspace --all-targets --locked -- -D warnings";
-  # Empty suites are expected until the first captured protocol fixtures arrive.
-  tasks."check:test".exec = "cargo nextest run --workspace --locked --no-tests=warn";
+  tasks."check:test".exec = "cargo nextest run --workspace --all-targets --locked";
   tasks."check:doc".exec = "cargo test --workspace --doc --locked";
   tasks."check:all".after = [ "check:fmt" "check:clippy" "check:test" "check:doc" ];
 }

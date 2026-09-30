@@ -1,60 +1,57 @@
 # Updraft
 
-Updraft is a Rust proxy for GAF Master Flow powered attic vents. The first target is the older **GAF Wi-Fi Vent** generation controlled by the `com.gaf.wifivent` app. The goal is to read fan state and control the fan from Home Assistant while keeping the GAF controller's stock firmware.
+Updraft is a Rust BLE probe for the GAF Wi-Fi Vent. It reads state, sets automatic thresholds, and starts or clears the timer. It does not change firmware. HTTP and Home Assistant support are planned.
 
-This repository is an early scaffold. It does not yet connect to a fan or expose Home Assistant entities.
+## Workspace
 
-## How it will work
+| Crate | Purpose |
+| --- | --- |
+| `updraft-protocol` | Typed commands, values, and frame parsing. |
+| `updraft-bluetooth` | BLE discovery, connection, and protocol transport. |
+| `updraft-wifi` | Reserved for Wi-Fi transport. |
+| `updraft` | CLI. The HTTP service is planned. |
 
-```text
-GAF attic fan <-- verified Wi-Fi or Bluetooth protocol --> Updraft <-- local API --> Home Assistant adapter
+## GAF Wi-Fi Vent
+
+The GAF Wi-Fi Vent app (`com.gaf.wifivent`) uses the same command family over BLE and Wi-Fi TCP. BLE service `00FF` and characteristic `FF01` carry commands and replies. The fan access point is `192.168.4.1`; setup connects to `GAFVent_XXXX`.
+
+BLE reads return identity, mode, sensors, thresholds, and timer state. Threshold and timer writes return acknowledgements and readbacks. The Wi-Fi port and TLS configuration are unknown. Home-LAN setup is unconfirmed, and Wi-Fi control is not implemented. See [protocol findings](docs/protocol-findings.md).
+
+## BLE probe
+
+Run commands inside the repository's devenv:
+
+```sh
+cargo run -- probe ble --scan-only
+cargo run -- probe ble
 ```
 
-The legacy app advertises direct Wi-Fi and Bluetooth control. Its exact transport, pairing method, message format, and behavior on the target fan still need to be measured. Updraft will implement only operations confirmed against the device.
+Use `--scan-only` to list nearby fans. If several appear, pass one ID to `--device-id`.
 
-The Cargo workspace has four crates:
+Set automatic thresholds in tenths of a degree Fahrenheit and tenths of a percent. The current values are 1050 and 300:
 
-| Crate | Responsibility |
-| --- | --- |
-| `updraft-protocol` | Typed commands, readings, device capabilities, and verified message encoding/decoding. It has no device I/O, HTTP, or Home Assistant code. |
-| `updraft-bluetooth` | Bluetooth discovery, connection lifecycle, and transfer of protocol messages. |
-| `updraft-wifi` | Wi-Fi discovery, connection lifecycle, and transfer of protocol messages. |
-| `updraft` | The running service: coordinates transports, polls and reconciles device state, validates controls, and exposes a local API for Home Assistant. |
+```sh
+cargo run -- probe ble --set-auto-thresholds-tenths 1050 300
+```
 
-A small Home Assistant adapter will turn the local HTTP/JSON API's device state and supported controls into entities. Axum will serve the API, with Tokio handling asynchronous work. The adapter may be delivered separately because Home Assistant integrations run in Python. The Rust service will own protocol and device-state semantics.
+Set or clear the timer in minutes:
 
-The service will keep these states separate:
+```sh
+cargo run -- probe ble --set-timer-minutes 1
+cargo run -- probe ble --set-timer-minutes 0
+```
 
-- **Requested:** the command sent by Home Assistant.
-- **Acknowledged:** a response from the controller, if the protocol provides one.
-- **Read back:** the configuration or telemetry reported after the command.
-- **Running:** reported directly only if the controller exposes it; otherwise clearly labeled as inferred.
+The probe reads state after a control command. Acknowledgements and readbacks report controller state; they do not measure airflow. Firmware update commands are not exposed.
 
-An accepted command will not be treated as proof that the fan changed state. Stale or unreachable devices should become unavailable in Home Assistant.
+## Protocol behavior
 
-## Initial feature target
+The protocol has five state queries and two controls. Queries run in sequence. Each snapshot entry keeps the response frame and its decoded value or payload error. Missing replies fail the query; unknown payloads stay in the snapshot. Control results keep the command, acknowledgement, and readback.
 
-- Discover and identify supported legacy GAF fans.
-- Read available temperature, humidity, operating mode, targets, and timer state.
-- Control supported on/off, mode, temperature/humidity targets, and timer settings.
-- Expose stable device identities, state freshness, availability, and errors to Home Assistant.
-- Support more than one fan if the verified protocol permits it.
-
-The exact entity set and value ranges will come from device evidence. Firmware updates, firmware replacement, resets, and pairing changes are outside the project scope. Updraft will not flash the user's equipment with ESPHome.
-
-## Related GAF software
-
-[GAFVentControl-HA](https://github.com/hitchin999/GAFVentControl-HA) is an MIT-licensed Home Assistant integration for the newer **Master Flow QuickConnect / Vent Control** generation (`com.gaf.quickconnectapp`). It uses a GAF/Keen Home cloud API and provides a useful reference for Home Assistant entities and control behavior. That API has not been shown to work with the older Wi-Fi Vent app or fan. Updraft's first backend is for the older device; support for QuickConnect would be separate work.
-
-Open ESP32 and ESPHome fan projects are useful design references. They are not assumed to be compatible with GAF hardware, and replacing device firmware is not part of Updraft.
-
-## Development status
-
-The workspace has dependencies and development tooling in place, but no protocol or HTTP endpoint implementation. Work starts with redacted captures from the stock app and fan, followed by protocol fixtures and tests. Once the transport is known, the service API and Home Assistant adapter can be fixed to observed capabilities. Bluetooth and Wi-Fi may use different framing; their crates can keep transport-specific framing while sharing verified command and state types from `updraft-protocol`.
+`Frame::parse` borrows a slice. `Frame::from_bytes` shares `Bytes` storage. `into_owned()` copies only when needed. The decoder parses complete frames in place and assembles fragments in `BytesMut`. BLE retains notification storage for the matching response.
 
 ## Development
 
-The repository uses devenv and pins Rust in `rust-toolchain.toml`. Review the environment files, then run from the repository root:
+The repository uses devenv and pins Rust in `rust-toolchain.toml`:
 
 ```sh
 devenv allow
@@ -62,8 +59,6 @@ devenv shell
 devenv tasks run check:all
 ```
 
-Inside the environment, Cargo commands run directly. The checks cover formatting, Clippy, nextest, and doctests. There are no tests yet; the test task reports the empty suite explicitly.
+`check:all` runs formatting, Clippy, nextest, and doctests. The workspace has protocol, Bluetooth, and CLI tests. The BLE probe has completed live state reads and control readbacks.
 
-See [development tooling and dependencies](docs/development.md) for the crate choices, individual commands, platform requirements, and dependencies to consider when the device protocol is known.
-
-No account credentials, device secrets, private keys, or unredacted traffic captures belong in this repository.
+See [development tooling](docs/development.md) for dependency and platform requirements.
