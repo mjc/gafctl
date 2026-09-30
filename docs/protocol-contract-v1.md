@@ -1,7 +1,9 @@
 # Legacy GAF BLE protocol contract
 
-**Contract revision:** 1  
-**Evidence scope:** GAF Wi-Fi Vent app 2.1 and one BLE peripheral reporting firmware version `030000` (3.0.0).  
+**Contract revision:** 1
+
+**Evidence scope:** One GAF BLE peripheral reporting firmware version `030000` (3.0.0).
+
 **Status:** The read and automatic-threshold operations below are verified. Other behaviors are explicitly unverified or out of scope.
 
 This is a revision of the documented contract, not a version negotiated on the wire. It describes the observed BLE subset needed by the local Home Assistant proxy. Wi-Fi/TLS transport, its listener port, and its authentication policy are outside this contract.
@@ -26,11 +28,11 @@ This is a revision of the documented contract, not a version negotiated on the w
 | `atg` | `atr` + 8 hex characters | Two four-character fields: automatic temperature threshold in tenths of °F, then humidity threshold in tenths of a percent. |
 | `ttg` | `ttr` + 8 hex characters | Two four-character fields: remaining timer minutes, then original timer minutes. |
 
-The five reads above have produced matching exact-device replies in repeated BLE sessions. The app parser agrees with the field order, scale, and units.
+The five reads above have produced matching exact-device replies in repeated BLE sessions. The client parser agrees with the field order, scale, and units.
 
 ## Verified ordinary control
 
-`ams` sets automatic mode and both thresholds. Its payload is two four-character uppercase hexadecimal values: temperature tenths of °F, then humidity tenths of a percent. The app accepts exactly `amr0` as success. A following `atg` readback must match both requested values, and a `dmg` readback must report automatic mode, before the control is reported as confirmed. Exact-device writes received `amr0`; the paired threshold readbacks matched and the mode readbacks reported automatic.
+`ams` sets automatic mode and both thresholds. Its payload is two four-character uppercase hexadecimal values: temperature tenths of °F, then humidity tenths of a percent. Only exact `amr0` is treated as a successful acknowledgement. A following `atg` readback must match both requested values, and a `dmg` readback must report automatic mode, before the control is reported as confirmed. Exact-device writes received `amr0`; the paired threshold readbacks matched and the mode readbacks reported automatic.
 
 No other mutating operation is enabled by this contract revision.
 
@@ -46,16 +48,19 @@ No other mutating operation is enabled by this contract revision.
 | Accepted control ranges and physical actuation | Unverified. Controller acknowledgement/readback does not prove airflow or motor movement. |
 | OTA, reboot, reset, `pptP`, and other unknown commands | Unsupported and must not be sent. |
 
+The experimental BLE probe has a timer-write option, but that CLI capability does not extend this contract or define a Home Assistant capability. Do not expose timer writes through Home Assistant until the accepted range is established and bounded by the integration.
+
 ## Error and retry behavior for clients
 
 - A missing or malformed response is a protocol failure; retain the raw response bytes for diagnostics where safe.
 - A BLE adapter, service, or peripheral that is absent is unavailable, not a protocol mismatch.
 - A platform-level authentication or pairing rejection must remain distinguishable from unavailable and protocol failures when surfaced by the operating system. This device capture did not exercise that path.
 - Bound discovery, connection, GATT setup, writes, and response waits. A timeout does not prove a control failed to execute.
+- The current BLE probe defaults to a six-second discovery scan and a three-second timeout for each BLE operation and command response; these are client-side bounds, not measured device requirements. The probe can override them.
 - Reads may be retried by a higher-level poller after reconnecting. Do not retry a mutating command automatically unless an acknowledgement/readback proves the prior attempt did not take effect.
 
 ## Versioning and evidence
 
 Revision 1 is limited to the operations in the verified read table and the `ams` control. Firmware version `030000` is observed device identity, not the contract revision. Add a new contract revision when verified fields, command semantics, framing, or error behavior change. Keep unknowns marked as unknown until captured evidence resolves them.
 
-The sanitized exact-device traces and app-parser findings are recorded in the [protocol findings](protocol-findings.md). Rust command enums, wire-unit newtypes, parser negative cases, and captured-frame tests are the executable checks for the supported subset.
+Sanitized exact-device traces are recorded in the [protocol findings](protocol-findings.md). Rust command enums, wire-unit newtypes, parser negative cases, and captured-frame tests are the executable checks for the supported subset.
