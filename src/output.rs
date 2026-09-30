@@ -2,7 +2,8 @@ use std::fmt;
 
 use updraft_bluetooth::{DiscoveredDevice, ProbeResult};
 use updraft_protocol::{
-    Acknowledgement, ControlOutcome, ControlReadback, DeviceSnapshot, ReadCommand, ReadbackMatch,
+    Acknowledgement, ControlOutcome, ControlReadback, DeviceSnapshot, ModeReadback, OperatingMode,
+    ReadCommand, ReadbackMatch,
 };
 
 pub(crate) fn print_probe_result(result: ProbeResult, show_identity: bool) {
@@ -20,6 +21,11 @@ pub(crate) fn print_probe_result(result: ProbeResult, show_identity: bool) {
                 "More than one candidate found. Re-run with --device-id <id> to query one fan."
             );
         }
+        ProbeResult::DiscoveryIncomplete { devices, failures } => {
+            print_devices(devices.iter().map(|candidate| candidate.device()));
+            println!("BLE discovery incomplete; automatic selection was skipped.");
+            print_discovery_failures(&failures);
+        }
         ProbeResult::Queried { device, result } => {
             println!("Queried GAF BLE device: {}", DeviceDescription(&device));
             if let Some(control) = &result.control {
@@ -30,15 +36,26 @@ pub(crate) fn print_probe_result(result: ProbeResult, show_identity: bool) {
             }
             if let Some(control) = &result.control {
                 println!("{}", ControlReadbackDisplay(control.readback()));
+                println!("{}", ModeReadbackDisplay(control.mode_readback()));
             }
             if let Some(error) = &result.state_error {
                 eprintln!("state readback unavailable after control acknowledgement: {error}");
             }
+            print_discovery_failures(&result.discovery_failures);
             if let updraft_bluetooth::DisconnectOutcome::Failed(error) = &result.disconnect {
                 eprintln!("BLE query succeeded, but disconnect failed: {error}");
             }
         }
     }
+}
+
+fn print_discovery_failures(failures: &[updraft_bluetooth::DiscoveryFailure]) {
+    failures.iter().for_each(|failure| {
+        eprintln!(
+            "BLE properties unavailable for {}: {}",
+            failure.device_id, failure.reason
+        );
+    });
 }
 
 fn print_devices<'a>(devices: impl ExactSizeIterator<Item = &'a DiscoveredDevice>) {
@@ -150,6 +167,42 @@ impl fmt::Display for ControlReadbackDisplay<'_> {
                 output.write_str("timer readback: unrecognized payload")
             }
         }
+    }
+}
+
+struct ModeReadbackDisplay(ModeReadback);
+
+impl fmt::Display for ModeReadbackDisplay {
+    fn fmt(&self, output: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self.0 {
+            ModeReadback::Matches(mode) => write!(
+                output,
+                "mode readback: {}; matches request",
+                mode_name(mode)
+            ),
+            ModeReadback::Differs(mode) => write!(
+                output,
+                "mode readback: {}; differs from request",
+                mode_name(mode)
+            ),
+            ModeReadback::TimerExpired(mode) => write!(
+                output,
+                "mode readback: {}; timer expired during verification",
+                mode_name(mode)
+            ),
+            ModeReadback::Unrecognized(error) => {
+                write!(output, "mode readback: unrecognized payload ({error})")
+            }
+            ModeReadback::Unavailable => output.write_str("mode readback: unavailable"),
+        }
+    }
+}
+
+fn mode_name(mode: OperatingMode) -> &'static str {
+    match mode {
+        OperatingMode::Automatic => "automatic",
+        OperatingMode::Timer => "timer",
+        OperatingMode::Ota => "OTA",
     }
 }
 

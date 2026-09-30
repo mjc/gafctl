@@ -1,6 +1,7 @@
 use std::{
     collections::HashSet,
     fmt::{self, Write as _},
+    future::Future,
     time::Duration,
 };
 
@@ -9,7 +10,7 @@ use btleplug::{
     api::{Central, Manager as _, Peripheral as _, ScanFilter},
     platform::{Adapter, Manager, Peripheral, PeripheralId},
 };
-use futures_util::{StreamExt, TryStreamExt, future, stream};
+use futures_util::{StreamExt, future, stream};
 use tokio::time::sleep;
 
 use crate::{
@@ -35,6 +36,49 @@ pub struct Candidate {
     device: DiscoveredDevice,
 }
 
+/// A peripheral whose advertisement properties could not be read.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DiscoveryFailure {
+    /// Peripheral ID observed during the scan.
+    pub device_id: PeripheralId,
+    /// Property-read error.
+    pub reason: String,
+}
+
+#[derive(Debug)]
+pub(super) struct DiscoveryReport<T> {
+    pub(super) candidates: Vec<T>,
+    pub(super) failures: Vec<DiscoveryFailure>,
+}
+
+impl<T> Default for DiscoveryReport<T> {
+    fn default() -> Self {
+        Self {
+            candidates: Vec::new(),
+            failures: Vec::new(),
+        }
+    }
+}
+
+impl<T> DiscoveryReport<T> {
+    pub(super) const fn can_select_automatically(&self) -> bool {
+        self.failures.is_empty()
+    }
+}
+
+pub(super) fn can_query_with_report(
+    report: &DiscoveryReport<Candidate>,
+    requested_id: Option<&str>,
+) -> bool {
+    report.can_select_automatically()
+        || requested_id.is_some_and(|expected| {
+            report
+                .candidates
+                .iter()
+                .any(|candidate| peripheral_id_matches(&candidate.device.id, expected))
+        })
+}
+
 impl Candidate {
     /// Borrow the public description of this device.
     #[must_use]
@@ -56,23 +100,38 @@ pub(super) enum CandidateSelection {
     },
 }
 
-pub(super) fn summarize_scan(mut candidates: Vec<Candidate>) -> ProbeResult {
-    if candidates.is_empty() {
+pub(super) fn summarize_scan(mut report: DiscoveryReport<Candidate>) -> ProbeResult {
+    if !report.can_select_automatically() {
+        return incomplete_result(report);
+    }
+    if report.candidates.is_empty() {
         ProbeResult::NoDevices
     } else {
-        candidates
+        report
+            .candidates
             .iter_mut()
             .for_each(Candidate::release_peripheral);
         ProbeResult::Discovered {
-            devices: candidates,
+            devices: report.candidates,
         }
+    }
+}
+
+pub(super) fn incomplete_result(mut report: DiscoveryReport<Candidate>) -> ProbeResult {
+    report
+        .candidates
+        .iter_mut()
+        .for_each(Candidate::release_peripheral);
+    ProbeResult::DiscoveryIncomplete {
+        devices: report.candidates,
+        failures: report.failures,
     }
 }
 
 pub(super) async fn discover_candidates(
     scan_duration: Duration,
     operation_timeout: Duration,
-) -> Result<Vec<Candidate>> {
+) -> Result<DiscoveryReport<Candidate>> {
     let manager = complete_before(operation_timeout, "create Bluetooth manager", async {
         Manager::new().await.context("create Bluetooth manager")
     })
@@ -141,27 +200,61 @@ async fn collect_advertised_candidates(
     adapter: &Adapter,
     fresh_devices: Option<&HashSet<btleplug::platform::PeripheralId>>,
     operation_timeout: Duration,
-) -> Result<Vec<Candidate>> {
+) -> Result<DiscoveryReport<Candidate>> {
     let peripherals = complete_before(operation_timeout, "list BLE peripherals", async {
         adapter.peripherals().await.context("list BLE peripherals")
     })
     .await?;
+    let devices = peripherals
+        .into_iter()
+        .filter(|peripheral| fresh_devices.is_none_or(|devices| devices.contains(&peripheral.id())))
+        .map(|peripheral| (peripheral.id(), peripheral));
+    let mut report = inspect_peripherals(devices, |peripheral| {
+        read_gaf_advertisement(peripheral, operation_timeout)
+    })
+    .await;
+    report.candidates =
+        report
+            .candidates
+            .into_iter()
+            .fold(Vec::new(), |mut candidates, candidate| {
+                if !already_discovered(&candidates, &candidate) {
+                    candidates.push(candidate);
+                }
+                candidates
+            });
+    Ok(report)
+}
+
+async fn inspect_peripherals<I, H, C, E, F, Fut>(
+    peripherals: I,
+    mut inspect: F,
+) -> DiscoveryReport<C>
+where
+    I: IntoIterator<Item = (PeripheralId, H)>,
+    E: fmt::Display,
+    F: FnMut(H) -> Fut,
+    Fut: Future<Output = std::result::Result<Option<C>, E>>,
+{
     stream::iter(peripherals)
-        .then(|peripheral| async move {
-            if fresh_devices.is_none_or(|devices| devices.contains(&peripheral.id())) {
-                read_gaf_advertisement(peripheral, operation_timeout).await
-            } else {
-                Ok(None)
-            }
+        .then(|(device_id, peripheral)| {
+            let properties = inspect(peripheral);
+            async move { (device_id, properties.await) }
         })
-        .try_fold(Vec::new(), |mut candidates, candidate| {
-            if let Some(candidate) = candidate
-                && !already_discovered(&candidates, &candidate)
-            {
-                candidates.push(candidate);
-            }
-            future::ready(Ok(candidates))
-        })
+        .fold(
+            DiscoveryReport::default(),
+            |mut report, (device_id, result)| {
+                match result {
+                    Ok(Some(candidate)) => report.candidates.push(candidate),
+                    Ok(None) => {}
+                    Err(error) => report.failures.push(DiscoveryFailure {
+                        device_id,
+                        reason: error.to_string(),
+                    }),
+                }
+                future::ready(report)
+            },
+        )
         .await
 }
 
@@ -250,7 +343,7 @@ pub(super) fn select_candidate(
     }
 }
 
-fn peripheral_id_matches(peripheral_id: &PeripheralId, expected: &str) -> bool {
+pub(super) fn peripheral_id_matches(peripheral_id: &PeripheralId, expected: &str) -> bool {
     let mut output = StringMatch {
         expected,
         offset: 0,
@@ -291,6 +384,58 @@ impl Candidate {
 mod tests {
     use super::*;
     use btleplug::api::CentralEvent;
+
+    #[tokio::test]
+    async fn property_failure_keeps_valid_candidate_and_diagnostic() {
+        let report = inspect_peripherals(
+            [
+                (PeripheralId::from(uuid::Uuid::nil()), false),
+                (PeripheralId::from(uuid::Uuid::from_u128(1)), true),
+            ],
+            |properties_available| async move {
+                if properties_available {
+                    Ok::<_, &'static str>(Some("selected-fan"))
+                } else {
+                    Err("property request timed out")
+                }
+            },
+        )
+        .await;
+
+        assert_eq!(report.candidates, ["selected-fan"]);
+        assert_eq!(
+            report.failures,
+            [DiscoveryFailure {
+                device_id: PeripheralId::from(uuid::Uuid::nil()),
+                reason: String::from("property request timed out"),
+            }],
+        );
+        assert!(!report.can_select_automatically());
+    }
+
+    #[test]
+    fn incomplete_scan_allows_only_explicitly_found_candidate() {
+        let candidate = Candidate {
+            peripheral: None,
+            device: DiscoveredDevice {
+                id: PeripheralId::from(uuid::Uuid::from_u128(1)),
+                name: None,
+                rssi: None,
+            },
+        };
+        let id = candidate.device.id.to_string();
+        let report = DiscoveryReport {
+            candidates: vec![candidate],
+            failures: vec![DiscoveryFailure {
+                device_id: PeripheralId::from(uuid::Uuid::nil()),
+                reason: String::from("property request timed out"),
+            }],
+        };
+
+        assert!(can_query_with_report(&report, Some(&id)));
+        assert!(!can_query_with_report(&report, None));
+        assert!(!can_query_with_report(&report, Some("not-scanned")));
+    }
 
     #[test]
     fn bluez_cached_initial_events_do_not_count_as_fresh_advertisements() {

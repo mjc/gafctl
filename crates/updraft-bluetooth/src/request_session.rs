@@ -54,6 +54,7 @@ impl<T: GattTransport> RequestSession<T> {
                     ),
                     snapshot: Some(snapshot),
                     state_error: None,
+                    discovery_failures: Vec::new(),
                     disconnect: DisconnectOutcome::Disconnected,
                 }),
                 Err(error) => Ok(QueryResult {
@@ -63,6 +64,7 @@ impl<T: GattTransport> RequestSession<T> {
                     ),
                     snapshot: None,
                     state_error: Some(format!("{error:#}")),
+                    discovery_failures: Vec::new(),
                     disconnect: DisconnectOutcome::Disconnected,
                 }),
             };
@@ -72,6 +74,7 @@ impl<T: GattTransport> RequestSession<T> {
         Ok(QueryResult {
             snapshot: Some(snapshot),
             state_error: None,
+            discovery_failures: Vec::new(),
             control: None,
             disconnect: DisconnectOutcome::Disconnected,
         })

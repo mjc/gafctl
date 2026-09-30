@@ -10,7 +10,7 @@ mod lifecycle;
 mod probe;
 mod session;
 
-pub use discovery::{Candidate, DiscoveredDevice};
+pub use discovery::{Candidate, DiscoveredDevice, DiscoveryFailure};
 pub use probe::probe;
 
 /// GAF's observed primary BLE service UUID.
@@ -63,6 +63,8 @@ pub struct QueryResult {
     pub snapshot: Option<DeviceSnapshot>,
     /// Failure to collect state after an acknowledged command.
     pub state_error: Option<String>,
+    /// Advertisement property failures elsewhere in the scan.
+    pub discovery_failures: Vec<DiscoveryFailure>,
     /// Outcome of the optional ordinary control request, interpreted with readback.
     pub control: Option<ControlOutcome>,
     /// Whether the BLE connection closed cleanly after the query.
@@ -89,6 +91,11 @@ pub enum ProbeResult {
     Discovered { devices: Vec<Candidate> },
     /// A query needs an exact device ID because multiple candidates were found.
     Ambiguous { devices: Vec<Candidate> },
+    /// Discovery was incomplete, so automatic selection is unsafe.
+    DiscoveryIncomplete {
+        devices: Vec<Candidate>,
+        failures: Vec<DiscoveryFailure>,
+    },
     /// One peripheral was queried successfully.
     Queried {
         device: DiscoveredDevice,

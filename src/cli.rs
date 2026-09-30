@@ -142,7 +142,8 @@ fn control_result_confirmed(
         updraft_bluetooth::ProbeResult::Queried { result, .. } => (true, result.control.as_ref()),
         updraft_bluetooth::ProbeResult::NoDevices
         | updraft_bluetooth::ProbeResult::Discovered { .. }
-        | updraft_bluetooth::ProbeResult::Ambiguous { .. } => (false, None),
+        | updraft_bluetooth::ProbeResult::Ambiguous { .. }
+        | updraft_bluetooth::ProbeResult::DiscoveryIncomplete { .. } => (false, None),
     };
     control_status_successful(control_requested, selected, control)
 }
@@ -220,7 +221,7 @@ mod tests {
         let snapshot = |timer: &[u8]| {
             updraft_protocol::DeviceSnapshot::from_frames(
                 Frame::parse(b"#idr030000\n").unwrap().into_owned(),
-                Frame::parse(b"#dmran\n").unwrap().into_owned(),
+                Frame::parse(b"#dmrtn\n").unwrap().into_owned(),
                 Frame::parse(b"#sdr03CA00AA\n").unwrap().into_owned(),
                 Frame::parse(b"#atr041a012c\n").unwrap().into_owned(),
                 Frame::parse(timer).unwrap().into_owned(),

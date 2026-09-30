@@ -2,8 +2,8 @@ use bytes::Bytes;
 use updraft_protocol::{
     Acknowledgement, AutomaticThresholds, ControlCommand, ControlOutcome, ControlReadback,
     DeviceMode, DeviceSnapshot, FanState, FirmwareVersion, Frame, HumidityTenthsPercent, Identity,
-    Minutes, OperatingMode, PayloadError, ReadCommand, Readback, ReadbackError, ReadbackMatch,
-    Request, SensorReadings, TemperatureTenthsF, TimerState, UnexpectedResponse,
+    Minutes, ModeReadback, OperatingMode, PayloadError, ReadCommand, Readback, ReadbackError,
+    ReadbackMatch, Request, SensorReadings, TemperatureTenthsF, TimerState, UnexpectedResponse,
 };
 
 fn frame(wire: &'static [u8]) -> Frame<'static> {
@@ -269,11 +269,15 @@ fn threshold_outcome_uses_exact_ack_and_compares_typed_readback() {
 #[test]
 fn timer_outcome_allows_elapsed_time_and_keeps_readback_errors() {
     let command = ControlCommand::SetTimer(Minutes::new(2));
-    let matching = snapshot(b"#atr041a012c\n", b"#ttr00010002\n");
+    let matching = snapshot_with_mode(b"#dmrtn\n", b"#atr041a012c\n", b"#ttr00010002\n");
     let outcome =
         ControlOutcome::from_response(command, frame(b"#tmr0\n"), Some(&matching)).unwrap();
     assert_eq!(outcome.acknowledgement(), Acknowledgement::Accepted);
     assert!(outcome.is_confirmed());
+    assert_eq!(
+        outcome.mode_readback(),
+        ModeReadback::Matches(OperatingMode::Timer)
+    );
     assert_eq!(
         outcome.readback(),
         &ControlReadback::Timer(Ok(Readback {
@@ -331,4 +335,78 @@ fn timer_outcome_allows_elapsed_time_and_keeps_readback_errors() {
             actual: *b"amr",
         })
     );
+}
+
+#[test]
+fn threshold_control_requires_automatic_mode_after_matching_thresholds() {
+    let requested = AutomaticThresholds {
+        temperature: TemperatureTenthsF::new(1050),
+        humidity: HumidityTenthsPercent::new(300),
+    };
+    let snapshot = snapshot_with_mode(b"#dmrtn\n", b"#atr041a012c\n", b"#ttr00000000\n");
+    let outcome = ControlOutcome::from_response(
+        ControlCommand::SetAutomaticThresholds(requested),
+        frame(b"#amr0\n"),
+        Some(&snapshot),
+    )
+    .unwrap();
+
+    assert_eq!(
+        outcome.readback(),
+        &ControlReadback::Thresholds(Ok(Readback {
+            actual: requested,
+            comparison: ReadbackMatch::Matches,
+        })),
+    );
+    assert_eq!(
+        outcome.mode_readback(),
+        ModeReadback::Differs(OperatingMode::Timer)
+    );
+    assert!(!outcome.is_confirmed());
+}
+
+#[test]
+fn timer_control_rejects_automatic_mode_but_accepts_observed_expiry() {
+    let command = ControlCommand::SetTimer(Minutes::new(1));
+    let still_automatic = snapshot_with_mode(b"#dmraf\n", b"#atr041a012c\n", b"#ttr00010001\n");
+    let outcome =
+        ControlOutcome::from_response(command, frame(b"#tmr0\n"), Some(&still_automatic)).unwrap();
+    assert!(!outcome.is_confirmed());
+
+    let expired = snapshot_with_mode(b"#dmraf\n", b"#atr041a012c\n", b"#ttr00000001\n");
+    let outcome =
+        ControlOutcome::from_response(command, frame(b"#tmr0\n"), Some(&expired)).unwrap();
+    assert!(outcome.is_confirmed());
+    assert_eq!(
+        outcome.mode_readback(),
+        ModeReadback::TimerExpired(OperatingMode::Automatic)
+    );
+}
+
+#[test]
+fn control_confirmation_requires_decodable_mode() {
+    let requested = AutomaticThresholds {
+        temperature: TemperatureTenthsF::new(1050),
+        humidity: HumidityTenthsPercent::new(300),
+    };
+    let snapshot = snapshot_with_mode(b"#dmrzz\n", b"#atr041a012c\n", b"#ttr00000000\n");
+    let outcome = ControlOutcome::from_response(
+        ControlCommand::SetAutomaticThresholds(requested),
+        frame(b"#amr0\n"),
+        Some(&snapshot),
+    )
+    .unwrap();
+
+    assert_eq!(
+        outcome.readback(),
+        &ControlReadback::Thresholds(Ok(Readback {
+            actual: requested,
+            comparison: ReadbackMatch::Matches,
+        })),
+    );
+    assert_eq!(
+        outcome.mode_readback(),
+        ModeReadback::Unrecognized(PayloadError::InvalidMode)
+    );
+    assert!(!outcome.is_confirmed());
 }

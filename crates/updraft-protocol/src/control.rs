@@ -1,6 +1,6 @@
 use crate::{
-    AutomaticThresholds, ControlCommand, DeviceSnapshot, Frame, PayloadError, TimerState,
-    UnexpectedResponse, state::validate_response,
+    AutomaticThresholds, ControlCommand, DeviceSnapshot, Frame, OperatingMode, PayloadError,
+    TimerState, UnexpectedResponse, state::validate_response,
 };
 
 /// Whether a decoded state readback agrees with a control request.
@@ -28,6 +28,16 @@ pub enum ControlReadback {
     Unavailable,
 }
 
+/// Operating mode observed after a control command.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ModeReadback {
+    Matches(OperatingMode),
+    Differs(OperatingMode),
+    TimerExpired(OperatingMode),
+    Unrecognized(PayloadError),
+    Unavailable,
+}
+
 /// An exact `0` acknowledgement or an unrecognized response payload.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Acknowledgement {
@@ -42,6 +52,7 @@ pub struct ControlOutcome {
     frame: Frame<'static>,
     acknowledgement: Acknowledgement,
     readback: ControlReadback,
+    mode_readback: ModeReadback,
 }
 
 impl ControlOutcome {
@@ -89,11 +100,37 @@ impl ControlOutcome {
                     .map_err(|error| *error),
             ),
         };
+        let mode_readback = snapshot.map_or(ModeReadback::Unavailable, |snapshot| {
+            let mode = match snapshot.mode.decoded() {
+                Ok(mode) => mode.mode,
+                Err(error) => return ModeReadback::Unrecognized(*error),
+            };
+            match command {
+                ControlCommand::SetAutomaticThresholds(_) if mode == OperatingMode::Automatic => {
+                    ModeReadback::Matches(mode)
+                }
+                ControlCommand::SetAutomaticThresholds(_) => ModeReadback::Differs(mode),
+                ControlCommand::SetTimer(_) if mode == OperatingMode::Timer => {
+                    ModeReadback::Matches(mode)
+                }
+                ControlCommand::SetTimer(requested)
+                    if mode == OperatingMode::Automatic
+                        && requested.value() > 0
+                        && snapshot.timer.decoded().is_ok_and(|timer| {
+                            timer.original == requested && timer.remaining.value() == 0
+                        }) =>
+                {
+                    ModeReadback::TimerExpired(mode)
+                }
+                ControlCommand::SetTimer(_) => ModeReadback::Differs(mode),
+            }
+        });
         Ok(Self {
             command,
             frame,
             acknowledgement,
             readback,
+            mode_readback,
         })
     }
 
@@ -121,13 +158,19 @@ impl ControlOutcome {
         &self.readback
     }
 
+    /// Return the operating-mode observation and its relation to the command.
+    #[must_use]
+    pub const fn mode_readback(&self) -> ModeReadback {
+        self.mode_readback
+    }
+
     /// Whether the command was acknowledged and its setting matches the request.
     #[must_use]
     pub fn is_confirmed(&self) -> bool {
         if self.acknowledgement != Acknowledgement::Accepted {
             return false;
         }
-        match &self.readback {
+        let setting_matches = match &self.readback {
             ControlReadback::Thresholds(Ok(readback)) => {
                 readback.comparison == ReadbackMatch::Matches
             }
@@ -135,6 +178,13 @@ impl ControlOutcome {
             ControlReadback::Thresholds(Err(_))
             | ControlReadback::Timer(Err(_))
             | ControlReadback::Unavailable => false,
-        }
+        };
+        setting_matches
+            && match self.mode_readback {
+                ModeReadback::Matches(_) | ModeReadback::TimerExpired(_) => true,
+                ModeReadback::Differs(_)
+                | ModeReadback::Unrecognized(_)
+                | ModeReadback::Unavailable => false,
+            }
     }
 }

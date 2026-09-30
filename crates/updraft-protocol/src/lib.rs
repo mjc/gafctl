@@ -12,7 +12,9 @@ mod state;
 mod values;
 
 pub use command::{ControlCommand, EncodedControlFrame, ReadCommand, Request, RequestFrame};
-pub use control::{Acknowledgement, ControlOutcome, ControlReadback, Readback, ReadbackMatch};
+pub use control::{
+    Acknowledgement, ControlOutcome, ControlReadback, ModeReadback, Readback, ReadbackMatch,
+};
 pub use frame::{Frame, FrameDecoder, FrameError};
 pub use state::{
     DeviceMode, DeviceSnapshot, FanState, FirmwareVersion, Identity, Observation, OperatingMode,
