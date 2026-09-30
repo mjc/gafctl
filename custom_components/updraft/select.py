@@ -117,7 +117,14 @@ class UpdraftControlSelect(CoordinatorEntity[UpdraftCoordinator], SelectEntity):
             raise HomeAssistantError(
                 "Control was confirmed, but Home Assistant could not refresh state"
             ) from error
-        if not self.coordinator.last_update_success:
+        state = self.coordinator.data
+        if (
+            not self.coordinator.last_update_success
+            or not state
+            or state.get("freshness") != "fresh"
+            or state.get("available") is not True
+            or state.get("state") is None
+        ):
             if control_error is not None:
                 raise HomeAssistantError(
                     f"{control_error}; current state refresh failed"
