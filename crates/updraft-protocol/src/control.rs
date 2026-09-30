@@ -1,6 +1,6 @@
 use crate::{
-    AutomaticThresholds, ControlCommand, DeviceSnapshot, Frame, OperatingMode, PayloadError,
-    TimerState, UnexpectedResponse, state::validate_response,
+    AutomaticThresholds, ControlCommand, DeviceSnapshot, FanState, Frame, OperatingMode,
+    PayloadError, TimerState, UnexpectedResponse, state::validate_response,
 };
 
 /// Whether a decoded state readback agrees with a control request.
@@ -33,7 +33,11 @@ pub enum ControlReadback {
 pub enum ModeReadback {
     Matches(OperatingMode),
     Differs(OperatingMode),
-    TimerExpired(OperatingMode),
+    FanFlagDiffers {
+        mode: OperatingMode,
+        actual: FanState,
+    },
+    UnverifiedTimerExpiry(OperatingMode),
     Unrecognized(PayloadError),
     Unavailable,
 }
@@ -101,17 +105,27 @@ impl ControlOutcome {
             ),
         };
         let mode_readback = snapshot.map_or(ModeReadback::Unavailable, |snapshot| {
-            let mode = match snapshot.mode.decoded() {
-                Ok(mode) => mode.mode,
+            let device_mode = match snapshot.mode.decoded() {
+                Ok(mode) => mode,
                 Err(error) => return ModeReadback::Unrecognized(*error),
             };
+            let mode = device_mode.mode;
             match command {
                 ControlCommand::SetAutomaticThresholds(_) if mode == OperatingMode::Automatic => {
                     ModeReadback::Matches(mode)
                 }
                 ControlCommand::SetAutomaticThresholds(_) => ModeReadback::Differs(mode),
-                ControlCommand::SetTimer(_) if mode == OperatingMode::Timer => {
+                ControlCommand::SetTimer(requested)
+                    if mode == OperatingMode::Timer
+                        && (requested.value() > 0 || device_mode.fan == FanState::Off) =>
+                {
                     ModeReadback::Matches(mode)
+                }
+                ControlCommand::SetTimer(_) if mode == OperatingMode::Timer => {
+                    ModeReadback::FanFlagDiffers {
+                        mode,
+                        actual: device_mode.fan,
+                    }
                 }
                 ControlCommand::SetTimer(requested)
                     if mode == OperatingMode::Automatic
@@ -120,7 +134,7 @@ impl ControlOutcome {
                             timer.original == requested && timer.remaining.value() == 0
                         }) =>
                 {
-                    ModeReadback::TimerExpired(mode)
+                    ModeReadback::UnverifiedTimerExpiry(mode)
                 }
                 ControlCommand::SetTimer(_) => ModeReadback::Differs(mode),
             }
@@ -181,8 +195,10 @@ impl ControlOutcome {
         };
         setting_matches
             && match self.mode_readback {
-                ModeReadback::Matches(_) | ModeReadback::TimerExpired(_) => true,
+                ModeReadback::Matches(_) => true,
                 ModeReadback::Differs(_)
+                | ModeReadback::FanFlagDiffers { .. }
+                | ModeReadback::UnverifiedTimerExpiry(_)
                 | ModeReadback::Unrecognized(_)
                 | ModeReadback::Unavailable => false,
             }
