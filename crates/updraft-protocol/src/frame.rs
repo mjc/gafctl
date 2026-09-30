@@ -1,6 +1,8 @@
 use bytes::{Bytes, BytesMut};
 use thiserror::Error;
 
+const MAX_FRAME_LEN: usize = 1024;
+
 /// One validated `#<three-byte-id><payload>\n` protocol line.
 ///
 /// Parsing a slice borrows it; decoding transport [`Bytes`] shares its storage.
@@ -27,6 +29,10 @@ impl Eq for Frame<'_> {}
 impl<'a> Frame<'a> {
     /// Validate one complete line without copying its bytes.
     pub fn parse(bytes: &'a [u8]) -> Result<Self, FrameError> {
+        if bytes.len() > MAX_FRAME_LEN {
+            return Err(FrameError::TooLong);
+        }
+
         let body = bytes.strip_prefix(b"#").ok_or(FrameError::InvalidStart)?;
         let body = body
             .strip_suffix(b"\n")
@@ -103,8 +109,6 @@ impl FrameDecoder {
         bytes: Bytes,
         mut visit: impl FnMut(Frame<'static>),
     ) -> Result<(), FrameError> {
-        const MAX_FRAME_LEN: usize = 1024;
-
         let result = bytes
             .as_ref()
             .split_inclusive(|byte| *byte == b'\n')
@@ -156,7 +160,7 @@ pub enum FrameError {
     /// The frame does not contain a three-letter command identifier.
     #[error("frame command must contain three ASCII letters")]
     InvalidCommand,
-    /// An incomplete frame exceeded the decoder's maximum buffered length.
-    #[error("incomplete frame exceeds 1024 bytes")]
+    /// A complete or incomplete frame exceeded the maximum length.
+    #[error("frame exceeds 1024 bytes")]
     TooLong,
 }
