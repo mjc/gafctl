@@ -44,7 +44,7 @@ No other mutating operation is enabled by this contract revision.
 | A separate fan on/off command or other mode setter | No supported command is established. Do not synthesize one from the `dmr` state flags. |
 | Pairing or authentication sequence | Not captured. The tested BLE path connected and read state, but this does not establish behavior for other devices or pairing states. |
 | Wi-Fi/TLS | Not part of this contract. Listener port, authentication, and LAN reachability remain unknown. |
-| Retry behavior | No device retry semantics are established. The implementation uses bounded operations; do not automatically repeat a mutating command after an ambiguous timeout. |
+| Connection retries | The client retries transient discovery/connect failures up to three attempts with 100 ms and 300 ms delays. It does not replay a request or control exchange after connection, and it stops retrying if cleanup fails. |
 | Accepted control ranges and physical actuation | Unverified. Controller acknowledgement/readback does not prove airflow or motor movement. |
 | OTA, reboot, reset, `pptP`, and other unknown commands | Unsupported and must not be sent. |
 
