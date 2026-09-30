@@ -20,7 +20,8 @@ use tokio::{
     time::{MissedTickBehavior, interval},
 };
 use updraft_bluetooth::{
-    DisconnectOutcome, ProbeClient, ProbeErrorKind, ProbeMode, ProbeOptions, ProbeResult,
+    DisconnectOutcome, ProbeClient, ProbeError, ProbeErrorKind, ProbeMode, ProbeOptions,
+    ProbeResult,
 };
 use updraft_protocol::{DeviceSnapshot, StateFreshness, StateReconciler};
 
@@ -77,8 +78,26 @@ impl ApiState {
 
     async fn execute_control_locked(&self, preset: ControlPreset) -> ControlResponse {
         let poll_id = self.reconciler.write().await.begin_poll();
-        let result = self
-            .ble_client
+        let ControlOutcome {
+            success,
+            message,
+            snapshot,
+        } = control_outcome(self.probe_control(preset).await);
+        let state = self
+            .reconcile_control_snapshot(poll_id, snapshot, message)
+            .await;
+        self.publish_state().await;
+
+        ControlResponse {
+            success,
+            preset,
+            message,
+            state,
+        }
+    }
+
+    async fn probe_control(&self, preset: ControlPreset) -> Result<ProbeResult, ProbeError> {
+        self.ble_client
             .probe(ProbeOptions {
                 scan_duration: Duration::from_secs(6),
                 response_timeout: Duration::from_secs(3),
@@ -87,63 +106,32 @@ impl ApiState {
                     control_command: Some(preset.command()),
                 },
             })
-            .await;
+            .await
+    }
 
-        let (confirmed, message, snapshot) = match result {
-            Ok(ProbeResult::Queried { result, .. }) => {
-                if let DisconnectOutcome::Failed(error) = &result.disconnect {
-                    tracing::warn!(%error, "BLE disconnect failed after control request");
-                }
-                let confirmed = result
-                    .control
-                    .as_ref()
-                    .is_some_and(|control| control.is_confirmed());
-                let message = if confirmed {
-                    "command acknowledged and readback matched"
-                } else if let Some(error) = result.state_error.as_deref() {
-                    tracing::warn!(%error, "control readback failed");
-                    "command was not confirmed; readback failed"
-                } else {
-                    "command was not confirmed; acknowledgement or readback differed"
-                };
-                (confirmed, message, result.snapshot)
+    async fn reconcile_control_snapshot(
+        &self,
+        poll_id: u64,
+        snapshot: Option<DeviceSnapshot>,
+        message: &'static str,
+    ) -> Option<StateValues> {
+        match snapshot {
+            Some(snapshot) => {
+                let state = StateValues::from_snapshot(&snapshot);
+                self.reconciler
+                    .write()
+                    .await
+                    .apply_success(poll_id, snapshot);
+                state
             }
-            Ok(_) => (
-                false,
-                "command was not confirmed; device selection failed",
-                None,
-            ),
-            Err(error) => {
-                tracing::warn!(error = %error, "control request failed");
-                (false, "command was not confirmed; BLE request failed", None)
+            None => {
+                self.reconciler
+                    .write()
+                    .await
+                    .apply_failure(poll_id, message);
+                None
             }
-        };
-
-        let response = if let Some(snapshot) = snapshot {
-            self.reconciler
-                .write()
-                .await
-                .apply_success(poll_id, snapshot.clone());
-            ControlResponse {
-                success: confirmed,
-                preset,
-                message,
-                state: StateValues::from_snapshot(&snapshot),
-            }
-        } else {
-            self.reconciler
-                .write()
-                .await
-                .apply_failure(poll_id, message);
-            ControlResponse {
-                success: false,
-                preset,
-                message,
-                state: None,
-            }
-        };
-        self.publish_state().await;
-        response
+        }
     }
 
     async fn publish_state(&self) {
@@ -156,6 +144,50 @@ impl ApiState {
             }
             Err(error) => tracing::error!(%error, "could not serialize device state for MQTT"),
         }
+    }
+}
+
+struct ControlOutcome {
+    success: bool,
+    message: &'static str,
+    snapshot: Option<DeviceSnapshot>,
+}
+
+fn control_outcome(result: Result<ProbeResult, ProbeError>) -> ControlOutcome {
+    let (success, message, snapshot) = match result {
+        Ok(ProbeResult::Queried { result, .. }) => {
+            if let DisconnectOutcome::Failed(error) = &result.disconnect {
+                tracing::warn!(%error, "BLE disconnect failed after control request");
+            }
+            let success = result
+                .control
+                .as_ref()
+                .is_some_and(|control| control.is_confirmed());
+            let message = match (success, result.state_error.as_deref()) {
+                (true, _) => "command acknowledged and readback matched",
+                (false, Some(error)) => {
+                    tracing::warn!(%error, "control readback failed");
+                    "command was not confirmed; readback failed"
+                }
+                (false, None) => "command was not confirmed; acknowledgement or readback differed",
+            };
+            (success, message, result.snapshot)
+        }
+        Ok(_) => (
+            false,
+            "command was not confirmed; device selection failed",
+            None,
+        ),
+        Err(error) => {
+            tracing::warn!(error = %error, "control request failed");
+            (false, "command was not confirmed; BLE request failed", None)
+        }
+    };
+
+    ControlOutcome {
+        success,
+        message,
+        snapshot,
     }
 }
 
