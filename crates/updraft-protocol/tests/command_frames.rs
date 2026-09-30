@@ -259,6 +259,40 @@ fn frame_decoder_rejects_oversized_complete_and_partial_frames() {
 }
 
 #[test]
+fn borrowed_frame_constructor_enforces_maximum_length() {
+    let maximum = frame_with_total_len(1024);
+    let oversized = frame_with_total_len(1025);
+
+    assert_eq!(Frame::parse(&maximum).unwrap().as_bytes().len(), 1024);
+    assert_eq!(
+        Frame::parse(&oversized).map(|frame| frame.as_bytes().len()),
+        Err(FrameError::TooLong)
+    );
+}
+
+#[test]
+fn shared_frame_constructor_enforces_maximum_length() {
+    let maximum = frame_with_total_len(1024);
+    let oversized = frame_with_total_len(1025);
+
+    assert_eq!(
+        Frame::from_bytes(Bytes::from(maximum))
+            .unwrap()
+            .as_bytes()
+            .len(),
+        1024
+    );
+    assert_eq!(
+        Frame::from_bytes(Bytes::from(oversized)).map(|frame| frame.as_bytes().len()),
+        Err(FrameError::TooLong)
+    );
+}
+
+fn frame_with_total_len(total_len: usize) -> Vec<u8> {
+    [b"#sdr".as_slice(), &vec![b'x'; total_len - 5], b"\n"].concat()
+}
+
+#[test]
 fn frame_decoder_accepts_maximum_length_and_recovers_after_malformed_partial() {
     let mut decoder = FrameDecoder::default();
     let maximum_frame = [b"#sdr".as_slice(), &vec![b'x'; 1019], b"\n"].concat();
