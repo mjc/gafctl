@@ -64,6 +64,7 @@ SENSORS = (
         key="automatic_temperature_threshold",
         name="Automatic temperature threshold",
         value_key="automatic_temperature_threshold_f",
+        device_class=SensorDeviceClass.TEMPERATURE,
         native_unit_of_measurement=UnitOfTemperature.FAHRENHEIT,
         entity_category=EntityCategory.DIAGNOSTIC,
     ),
