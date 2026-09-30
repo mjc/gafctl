@@ -1,9 +1,11 @@
 use bytes::Bytes;
+use std::time::{Duration, Instant, SystemTime};
 use updraft_protocol::{
     Acknowledgement, AutomaticThresholds, ControlCommand, ControlOutcome, ControlReadback,
     DeviceMode, DeviceSnapshot, FanState, FirmwareVersion, Frame, HumidityTenthsPercent, Identity,
     Minutes, ModeReadback, OperatingMode, PayloadError, ReadCommand, Readback, ReadbackError,
-    ReadbackMatch, Request, SensorReadings, TemperatureTenthsF, TimerState, UnexpectedResponse,
+    ReadbackMatch, Request, SensorReadings, StateFreshness, StateReconciler, TemperatureTenthsF,
+    TimerState, UnexpectedResponse,
 };
 
 fn frame(wire: &'static [u8]) -> Frame<'static> {
@@ -27,6 +29,170 @@ fn snapshot_with_mode(
 
 fn snapshot(thresholds: &'static [u8], timer: &'static [u8]) -> DeviceSnapshot {
     snapshot_with_mode(b"#dmraf\n", thresholds, timer)
+}
+
+fn snapshot_at(
+    mode: &'static [u8],
+    observed_at: SystemTime,
+    freshness_started_at: Instant,
+) -> DeviceSnapshot {
+    DeviceSnapshot::from_frames_at(
+        frame(b"#idr030000example-suffix\n"),
+        frame(mode),
+        frame(b"#sdr03ca00aa\n"),
+        frame(b"#atr041a012c\n"),
+        frame(b"#ttr00000000\n"),
+        observed_at,
+        freshness_started_at,
+    )
+    .unwrap()
+}
+
+#[test]
+fn reconciler_exposes_only_fresh_snapshots_and_keeps_failures_separate() {
+    let observed_at = SystemTime::UNIX_EPOCH + Duration::from_secs(100);
+    let freshness_started_at = Instant::now();
+    let first = snapshot_at(b"#dmraf\n", observed_at, freshness_started_at);
+    let mut state = StateReconciler::default();
+    let first_poll = state.begin_poll();
+
+    assert_eq!(
+        state.freshness_at(freshness_started_at, Duration::from_secs(5)),
+        StateFreshness::Unknown
+    );
+    state.apply_success(first_poll, first);
+    assert_eq!(
+        state.freshness_at(
+            freshness_started_at + Duration::from_secs(4),
+            Duration::from_secs(5)
+        ),
+        StateFreshness::Fresh
+    );
+    assert!(
+        state
+            .current_snapshot_at(
+                freshness_started_at + Duration::from_secs(5),
+                Duration::from_secs(5)
+            )
+            .is_some()
+    );
+
+    let failed_poll = state.begin_poll();
+    state.apply_failure(failed_poll, "BLE poll timed out");
+    assert_eq!(state.last_error(), Some("BLE poll timed out"));
+    assert!(
+        state
+            .current_snapshot_at(
+                freshness_started_at + Duration::from_secs(5),
+                Duration::from_secs(5)
+            )
+            .is_some()
+    );
+    assert!(
+        state
+            .current_snapshot_at(
+                freshness_started_at + Duration::from_secs(6),
+                Duration::from_secs(5)
+            )
+            .is_none()
+    );
+    assert_eq!(
+        state.freshness_at(
+            freshness_started_at + Duration::from_secs(6),
+            Duration::from_secs(5)
+        ),
+        StateFreshness::Stale
+    );
+    let future_wall_clock = snapshot_at(
+        b"#dmraf\n",
+        SystemTime::UNIX_EPOCH + Duration::from_secs(10_000_000_000),
+        freshness_started_at,
+    );
+    assert!(!future_wall_clock.is_fresh_at(
+        freshness_started_at + Duration::from_secs(6),
+        Duration::from_secs(5)
+    ));
+}
+
+#[test]
+fn reconciler_applies_newer_app_side_state_and_ignores_late_older_polls() {
+    let observed_at = SystemTime::UNIX_EPOCH + Duration::from_secs(100);
+    let freshness_started_at = Instant::now();
+    let mut state = StateReconciler::default();
+    let older_poll = state.begin_poll();
+    let newer_poll = state.begin_poll();
+
+    state.apply_success(
+        newer_poll,
+        snapshot_at(
+            b"#dmrtf\n",
+            observed_at + Duration::from_secs(1),
+            freshness_started_at + Duration::from_secs(1),
+        ),
+    );
+    assert_eq!(
+        state
+            .latest_snapshot()
+            .unwrap()
+            .mode
+            .decoded()
+            .unwrap()
+            .mode,
+        OperatingMode::Timer
+    );
+
+    assert!(!state.apply_success(
+        older_poll,
+        snapshot_at(
+            b"#dmraf\n",
+            observed_at + Duration::from_secs(2),
+            freshness_started_at + Duration::from_secs(2),
+        ),
+    ));
+    assert_eq!(
+        state
+            .latest_snapshot()
+            .unwrap()
+            .mode
+            .decoded()
+            .unwrap()
+            .mode,
+        OperatingMode::Timer
+    );
+}
+
+#[test]
+fn reconciler_rejects_undecodable_state_and_keeps_last_confirmed_snapshot() {
+    let observed_at = SystemTime::now();
+    let monotonic_at = Instant::now();
+    let mut state = StateReconciler::default();
+    let confirmed_poll = state.begin_poll();
+    state.apply_success(
+        confirmed_poll,
+        snapshot_at(b"#dmraf\n", observed_at, monotonic_at),
+    );
+
+    let invalid_poll = state.begin_poll();
+    assert!(!state.apply_success(
+        invalid_poll,
+        snapshot_at(b"#dmrax\n", observed_at, monotonic_at),
+    ));
+    assert_eq!(
+        state.last_error(),
+        Some(
+            "poll snapshot contains invalid payload: mode does not begin with a known mode and fan flag"
+        )
+    );
+    assert_eq!(
+        state
+            .latest_snapshot()
+            .unwrap()
+            .mode
+            .decoded()
+            .unwrap()
+            .mode,
+        OperatingMode::Automatic
+    );
 }
 
 #[test]
