@@ -3,7 +3,7 @@
     "step": {
       "user": {
         "title": "Connect to Updraft",
-        "description": "Enter the local address of the Updraft read-only API.",
+        "description": "Enter the local address of the Updraft API.",
         "data": { "api_url": "API address" }
       }
     },

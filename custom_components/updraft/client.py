@@ -1,4 +1,4 @@
-"""Small, validated client for the local Updraft read-only API."""
+"""Small, validated client for the local Updraft API."""
 
 import asyncio
 import math
@@ -118,6 +118,31 @@ class ApiClient:
             ),
         }
 
+    async def set_control(self, device_id: str, preset: str) -> None:
+        """Send one verified preset and reject mismatched or unverified readback."""
+        if not _valid_identifier(device_id):
+            raise ApiError("invalid configured device")
+        if preset not in CONTROL_PRESETS:
+            raise ApiError("unsupported control preset")
+        url = urljoin(self._base_url, f"api/v1/devices/{device_id}/control")
+        try:
+            async with self._session.post(
+                url, json={"preset": preset}, timeout=90
+            ) as response:
+                payload = await response.json()
+                if response.status != 200 or not isinstance(payload, Mapping):
+                    raise ApiError(_control_error(payload, response.status))
+                if payload.get("preset") != preset:
+                    raise ApiError("proxy returned a mismatched control confirmation")
+                if payload.get("success") is not True:
+                    raise ApiError(_control_error(payload, response.status))
+        except asyncio.CancelledError:
+            raise
+        except ApiError:
+            raise
+        except Exception as error:
+            raise ApiError("cannot send control to the local proxy") from error
+
     async def _get_json(self, path: str) -> Any:
         url = urljoin(self._base_url, path)
         try:
@@ -131,6 +156,24 @@ class ApiClient:
             raise
         except Exception as error:
             raise ApiError("cannot connect to the local proxy") from error
+
+
+CONTROL_PRESETS = frozenset(
+    {
+        "automatic105_f30_percent",
+        "automatic105_1_f30_1_percent",
+        "timer_clear",
+        "timer_one_minute",
+    }
+)
+
+
+def _control_error(payload: Any, status: int) -> str:
+    if isinstance(payload, Mapping):
+        message = payload.get("message")
+        if isinstance(message, str):
+            return f"control was not confirmed: {message}"
+    return f"proxy returned HTTP {status} for control"
 
 
 def _valid_identifier(value: str) -> bool:

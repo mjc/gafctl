@@ -35,9 +35,15 @@ class FakeSession:
     def __init__(self, responses):
         self.responses = list(responses)
         self.urls = []
+        self.posts = []
 
     def get(self, url, **_kwargs):
         self.urls.append(url)
+        return self.responses.pop(0)
+
+    def post(self, url, **kwargs):
+        self.urls.append(url)
+        self.posts.append(kwargs)
         return self.responses.pop(0)
 
 
@@ -139,6 +145,53 @@ class ApiClientTests(unittest.TestCase):
         self.assertIsNone(result["state"])
         self.assertFalse(result["available"])
         self.assertEqual(result["freshness"], "stale")
+
+    def test_sends_only_supported_controls_and_requires_confirmation(self):
+        session = FakeSession(
+            [FakeResponse({"success": True, "preset": "timer_clear"})]
+        )
+        client = ApiClient("http://127.0.0.1:8787", session)
+
+        asyncio.run(client.set_control("configured", "timer_clear"))
+
+        self.assertEqual(
+            session.urls,
+            ["http://127.0.0.1:8787/api/v1/devices/configured/control"],
+        )
+        self.assertEqual(session.posts[0]["json"], {"preset": "timer_clear"})
+        self.assertEqual(session.posts[0]["timeout"], 90)
+        with self.assertRaisesRegex(ApiError, "unsupported control preset"):
+            asyncio.run(client.set_control("configured", "timer_999"))
+
+    def test_rejects_unconfirmed_control_readback(self):
+        client = ApiClient(
+            "http://127.0.0.1:8787",
+            FakeSession(
+                [
+                    FakeResponse(
+                        {"success": False, "message": "readback differed"}, status=502
+                    )
+                ]
+            ),
+        )
+
+        with self.assertRaisesRegex(ApiError, "readback differed"):
+            asyncio.run(client.set_control("configured", "timer_clear"))
+
+    def test_rejects_mismatched_control_confirmation(self):
+        client = ApiClient(
+            "http://127.0.0.1:8787",
+            FakeSession(
+                [
+                    FakeResponse(
+                        {"success": True, "preset": "timer_one_minute"}
+                    )
+                ]
+            ),
+        )
+
+        with self.assertRaisesRegex(ApiError, "mismatched control confirmation"):
+            asyncio.run(client.set_control("configured", "timer_clear"))
 
 
     def test_rejects_inconsistent_or_invalid_proxy_responses(self):

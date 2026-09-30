@@ -1,6 +1,6 @@
 # Updraft
 
-Updraft is a Rust BLE proxy for the GAF Wi-Fi Vent. It reads device state and has verified threshold and timer controls. Its HTTP API is read-only; the Home Assistant integration exposes state and diagnostics only. The service supports both HTTP polling and optional MQTT state publishing.
+Updraft is a Rust BLE proxy for the GAF Wi-Fi Vent. It reads device state and exposes a fixed set of threshold and timer controls that have been exercised on the owner's fan. The service supports HTTP polling and optional MQTT state publishing.
 
 ## Workspace
 
@@ -9,7 +9,7 @@ Updraft is a Rust BLE proxy for the GAF Wi-Fi Vent. It reads device state and ha
 | `updraft-protocol` | Typed commands, values, and frame parsing. |
 | `updraft-bluetooth` | BLE discovery, connection, and protocol transport. |
 | `updraft-wifi` | Reserved for Wi-Fi transport. |
-| `updraft` | CLI, read-only HTTP API, and optional MQTT publisher. |
+| `updraft` | CLI, HTTP API, and optional MQTT publisher. |
 
 ## GAF Wi-Fi Vent
 
@@ -62,9 +62,11 @@ directory, restart Home Assistant, then add **Updraft GAF Vent** and enter the
 HTTP API URL. MQTT discovery can be used alongside the polling integration.
 
 The integration reports temperature, humidity, controller mode and fan flag,
-firmware, thresholds, timer state, availability, and freshness. The controller
-fan flag is diagnostic; it does not prove physical airflow. Controls and a
-physical running entity are not exposed.
+firmware, thresholds, timer state, availability, and freshness. Its selectors
+offer only the verified threshold pairs 105.0°F/30.0% and 105.1°F/30.1% RH,
+plus timer clear and one minute. Other values and standalone on/off or mode
+controls are not exposed. The controller fan flag is diagnostic; it does not
+prove physical airflow.
 
 The probe reads state after a control command. Acknowledgements and readbacks report controller state; they do not measure airflow. Firmware update commands are not exposed.
 
