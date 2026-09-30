@@ -13,7 +13,7 @@ mod session;
 
 pub use discovery::{Candidate, DiscoveredDevice, DiscoveryFailure};
 pub use error::{ProbeError, ProbeErrorKind};
-pub use probe::probe;
+pub use probe::{ProbeClient, probe};
 
 /// GAF's observed primary BLE service UUID.
 pub const GAF_SERVICE_UUID: Uuid = Uuid::from_u128(0x000000ff_0000_1000_8000_00805f9b34fb);

@@ -7,8 +7,8 @@ use std::{
 
 use anyhow::{Context, Result};
 use btleplug::{
-    api::{Central, Manager as _, Peripheral as _, ScanFilter},
-    platform::{Adapter, Manager, Peripheral, PeripheralId},
+    api::{Central, Peripheral as _, ScanFilter},
+    platform::{Adapter, Peripheral, PeripheralId},
 };
 use futures_util::{StreamExt, future, stream};
 use tokio::time::sleep;
@@ -129,22 +129,11 @@ pub(super) fn incomplete_result(mut report: DiscoveryReport<Candidate>) -> Probe
 }
 
 pub(super) async fn discover_candidates(
+    adapter: &Adapter,
     scan_duration: Duration,
     operation_timeout: Duration,
     requested_device_id: Option<&str>,
 ) -> Result<DiscoveryReport<Candidate>> {
-    let manager = complete_before(operation_timeout, "create Bluetooth manager", async {
-        Manager::new().await.context("create Bluetooth manager")
-    })
-    .await?;
-    let adapter = complete_before(operation_timeout, "list Bluetooth adapters", async {
-        manager.adapters().await.context("list Bluetooth adapters")
-    })
-    .await?
-    .into_iter()
-    .next()
-    .context("no Bluetooth adapter is available")?;
-
     #[cfg(target_os = "linux")]
     let existing_devices =
         complete_before(operation_timeout, "list cached BLE peripherals", async {
@@ -193,7 +182,7 @@ pub(super) async fn discover_candidates(
     #[cfg(not(target_os = "linux"))]
     let fresh_devices = None;
     collect_advertised_candidates(
-        &adapter,
+        adapter,
         fresh_devices,
         requested_device_id,
         operation_timeout,
@@ -214,11 +203,7 @@ async fn collect_advertised_candidates(
     let devices = peripherals
         .into_iter()
         .filter(|peripheral| {
-            should_inspect_peripheral(
-                &peripheral.id(),
-                fresh_devices,
-                requested_device_id,
-            )
+            should_inspect_peripheral(&peripheral.id(), fresh_devices, requested_device_id)
         })
         .map(|peripheral| (peripheral.id(), peripheral));
     let mut report = inspect_peripherals(devices, |peripheral| {
@@ -342,8 +327,8 @@ async fn read_gaf_advertisement(
     requested_device_id: Option<&str>,
 ) -> Result<Option<Candidate>> {
     let id = peripheral.id();
-    let configured_device = requested_device_id
-        .is_some_and(|expected| peripheral_id_matches(&id, expected));
+    let configured_device =
+        requested_device_id.is_some_and(|expected| peripheral_id_matches(&id, expected));
     let properties = complete_before(
         operation_timeout,
         "read BLE advertisement properties",
@@ -365,7 +350,9 @@ async fn read_gaf_advertisement(
     };
     if !should_keep_candidate(
         &id,
-        properties.as_ref().map(|properties| properties.services.as_slice()),
+        properties
+            .as_ref()
+            .map(|properties| properties.services.as_slice()),
         requested_device_id,
     ) {
         return Ok(None);
@@ -374,13 +361,9 @@ async fn read_gaf_advertisement(
         .map(|properties| (properties.local_name, properties.rssi))
         .unwrap_or((None, None));
     Ok(Some(Candidate {
-            device: DiscoveredDevice {
-                id,
-                name,
-                rssi,
-            },
-            peripheral: Some(peripheral),
-        }))
+        device: DiscoveredDevice { id, name, rssi },
+        peripheral: Some(peripheral),
+    }))
 }
 
 pub(super) fn select_candidate(
@@ -572,11 +555,7 @@ mod tests {
             Some(&fresh_unrelated),
             Some(&configured_id),
         ));
-        assert!(!should_inspect_peripheral(
-            &configured,
-            Some(&fresh),
-            None,
-        ));
+        assert!(!should_inspect_peripheral(&configured, Some(&fresh), None,));
     }
 
     #[test]
@@ -585,8 +564,16 @@ mod tests {
         let unrelated = test_peripheral_id(1);
         let configured_id = configured.to_string();
 
-        assert!(should_keep_candidate(&configured, None, Some(&configured_id)));
-        assert!(!should_keep_candidate(&unrelated, None, Some(&configured_id)));
+        assert!(should_keep_candidate(
+            &configured,
+            None,
+            Some(&configured_id)
+        ));
+        assert!(!should_keep_candidate(
+            &unrelated,
+            None,
+            Some(&configured_id)
+        ));
         assert!(should_keep_candidate(
             &unrelated,
             Some(&[GAF_SERVICE_UUID]),

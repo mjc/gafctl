@@ -17,7 +17,9 @@ use tokio::{
     sync::{Mutex, RwLock, watch},
     time::{MissedTickBehavior, interval},
 };
-use updraft_bluetooth::{ProbeErrorKind, ProbeMode, ProbeOptions, ProbeResult, probe};
+use updraft_bluetooth::{
+    DisconnectOutcome, ProbeClient, ProbeErrorKind, ProbeMode, ProbeOptions, ProbeResult,
+};
 use updraft_protocol::{
     AutomaticThresholds, ControlCommand, DeviceSnapshot, HumidityTenthsPercent, Minutes,
     StateFreshness, StateReconciler, TemperatureTenthsF,
@@ -31,6 +33,7 @@ const DEFAULT_FRESHNESS_LIMIT: Duration = Duration::from_secs(90);
 struct ApiState {
     reconciler: Arc<RwLock<StateReconciler>>,
     ble_lock: Arc<Mutex<()>>,
+    ble_client: Arc<ProbeClient>,
     freshness_limit: Duration,
     device_id: Option<String>,
 }
@@ -40,6 +43,7 @@ impl ApiState {
         Self {
             reconciler: Arc::new(RwLock::new(StateReconciler::default())),
             ble_lock: Arc::new(Mutex::new(())),
+            ble_client: Arc::new(ProbeClient::new()),
             freshness_limit,
             device_id: None,
         }
@@ -167,18 +171,23 @@ async fn control_device(
 ) -> (StatusCode, Json<ControlResponse>) {
     let _ble_guard = state.ble_lock.lock().await;
     let poll_id = state.reconciler.write().await.begin_poll();
-    let result = probe(ProbeOptions {
-        scan_duration: Duration::from_secs(6),
-        response_timeout: Duration::from_secs(3),
-        mode: ProbeMode::Query {
-            device_id: state.device_id.clone(),
-            control_command: Some(request.preset.command()),
-        },
-    })
-    .await;
+    let result = state
+        .ble_client
+        .probe(ProbeOptions {
+            scan_duration: Duration::from_secs(6),
+            response_timeout: Duration::from_secs(3),
+            mode: ProbeMode::Query {
+                device_id: state.device_id.clone(),
+                control_command: Some(request.preset.command()),
+            },
+        })
+        .await;
 
     let (confirmed, message, snapshot) = match result {
         Ok(ProbeResult::Queried { result, .. }) => {
+            if let DisconnectOutcome::Failed(error) = &result.disconnect {
+                tracing::warn!(%error, "BLE disconnect failed after control request");
+            }
             let confirmed = result
                 .control
                 .as_ref()
@@ -343,32 +352,39 @@ async fn poll_device(
         ticker.tick().await;
         let _ble_guard = state.ble_lock.lock().await;
         let poll_id = state.reconciler.write().await.begin_poll();
-        let result = probe(ProbeOptions {
-            scan_duration: Duration::from_secs(6),
-            response_timeout: Duration::from_secs(3),
-            mode: ProbeMode::Query {
-                device_id: Some(device_id.clone()),
-                control_command: None,
-            },
-        })
-        .await;
+        let result = state
+            .ble_client
+            .probe(ProbeOptions {
+                scan_duration: Duration::from_secs(6),
+                response_timeout: Duration::from_secs(3),
+                mode: ProbeMode::Query {
+                    device_id: Some(device_id.clone()),
+                    control_command: None,
+                },
+            })
+            .await;
 
         match result {
-            Ok(ProbeResult::Queried { result, .. }) => match result.snapshot {
-                Some(snapshot) => {
-                    state
-                        .reconciler
-                        .write()
-                        .await
-                        .apply_success(poll_id, snapshot);
+            Ok(ProbeResult::Queried { result, .. }) => {
+                if let DisconnectOutcome::Failed(error) = &result.disconnect {
+                    tracing::warn!(%error, "BLE disconnect failed after state poll");
                 }
-                None => {
-                    let error = result
-                        .state_error
-                        .unwrap_or_else(|| "state query returned no snapshot".to_owned());
-                    state.reconciler.write().await.apply_failure(poll_id, error);
+                match result.snapshot {
+                    Some(snapshot) => {
+                        state
+                            .reconciler
+                            .write()
+                            .await
+                            .apply_success(poll_id, snapshot);
+                    }
+                    None => {
+                        let error = result
+                            .state_error
+                            .unwrap_or_else(|| "state query returned no snapshot".to_owned());
+                        state.reconciler.write().await.apply_failure(poll_id, error);
+                    }
                 }
-            },
+            }
             Ok(ProbeResult::NoDevices) => {
                 state
                     .reconciler

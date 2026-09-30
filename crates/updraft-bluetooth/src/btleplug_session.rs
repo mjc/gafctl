@@ -15,7 +15,7 @@ use crate::{
     },
 };
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "linux"))]
 pub(super) const BACKEND: &str = "btleplug";
 
 struct ConnectedPeripheral<'a> {
@@ -178,9 +178,6 @@ mod tests {
             uuid::Uuid::nil(),
             GAF_CHARACTERISTIC_UUID,
         ));
-        assert!(!notification_matches(
-            GAF_SERVICE_UUID,
-            uuid::Uuid::nil(),
-        ));
+        assert!(!notification_matches(GAF_SERVICE_UUID, uuid::Uuid::nil(),));
     }
 }
