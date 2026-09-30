@@ -80,3 +80,4 @@ devenv tasks run check:all
 `check:all` runs formatting, Clippy, nextest, and doctests. The workspace has protocol, Bluetooth, and CLI tests. The BLE probe has completed live state reads and control readbacks.
 
 See [development tooling](docs/development.md) for dependency and platform requirements.
+See [local deployment](docs/deployment.md) for build, run, health, logging, and recovery steps.
