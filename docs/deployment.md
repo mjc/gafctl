@@ -1,7 +1,9 @@
 # Local deployment
 
 Run Updraft on a Linux host that can reach the fan over Bluetooth. For this
-setup, Updraft runs on Tali and Home Assistant runs on Tina on the same LAN.
+setup, the Updraft host and Home Assistant broker are on the same LAN. The
+NixOS service and firewall settings are maintained in the shared NixOS
+configuration repository, outside this source repository.
 The API defaults to loopback; `--allow-remote` enables LAN polling when needed.
 The optional MQTT publisher connects outbound to the broker on Tina, so HA can
 receive retained state and discover entities without connecting to Updraft.
@@ -63,5 +65,5 @@ selected repository revision with the locked command above, then restart it.
 To roll back, rebuild and run the last known-good revision. Updraft stores no
 device state on disk; Home Assistant keeps its integration configuration.
 
-The NixOS configuration provides the Tali system service and opens TCP 8787
-only on Tali's wired LAN interface.
+The shared NixOS configuration provides the system service and opens TCP 8787
+only on the service host's wired LAN interface.

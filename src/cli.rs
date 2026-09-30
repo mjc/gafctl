@@ -38,7 +38,12 @@ struct ServeOptions {
     allow_remote: bool,
 
     /// MQTT broker host. When set, publish retained state and Home Assistant discovery.
-    #[arg(long, env = "UPDRAFT_MQTT_HOST", requires_all = ["mqtt_username", "mqtt_password"])]
+    #[arg(
+        long,
+        env = "UPDRAFT_MQTT_HOST",
+        requires = "mqtt_username",
+        value_parser = clap::builder::NonEmptyStringValueParser::new()
+    )]
     mqtt_host: Option<String>,
 
     /// MQTT broker port.
@@ -46,12 +51,13 @@ struct ServeOptions {
     mqtt_port: u16,
 
     /// MQTT username. Required with --mqtt-host.
-    #[arg(long, env = "UPDRAFT_MQTT_USERNAME", requires = "mqtt_host")]
+    #[arg(
+        long,
+        env = "UPDRAFT_MQTT_USERNAME",
+        requires = "mqtt_host",
+        value_parser = clap::builder::NonEmptyStringValueParser::new()
+    )]
     mqtt_username: Option<String>,
-
-    /// MQTT password. Required with --mqtt-host.
-    #[arg(long, env = "UPDRAFT_MQTT_PASSWORD", requires = "mqtt_host")]
-    mqtt_password: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -150,20 +156,19 @@ pub(crate) async fn run() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
         Command::Serve(options) => {
-            let mqtt_config = match (
-                options.mqtt_host,
-                options.mqtt_username,
-                options.mqtt_password,
-            ) {
-                (Some(host), Some(username), Some(password)) => Some(crate::mqtt::MqttConfig {
-                    host,
-                    port: options.mqtt_port,
-                    username,
-                    password,
-                }),
-                (None, None, None) => None,
-                _ => anyhow::bail!("MQTT host, username, and password must be configured together"),
+            let mqtt_password = match std::env::var("UPDRAFT_MQTT_PASSWORD") {
+                Ok(password) => Some(password),
+                Err(std::env::VarError::NotPresent) => None,
+                Err(std::env::VarError::NotUnicode(_)) => {
+                    anyhow::bail!("UPDRAFT_MQTT_PASSWORD must be valid UTF-8")
+                }
             };
+            let mqtt_config = mqtt_config(
+                options.mqtt_host,
+                options.mqtt_port,
+                options.mqtt_username,
+                mqtt_password,
+            )?;
             crate::api::serve(
                 options.device_id,
                 options.bind,
@@ -175,6 +180,30 @@ pub(crate) async fn run() -> Result<()> {
         Command::Probe(ProbeCommand {
             transport: ProbeTransport::Ble(options),
         }) => run_ble_probe(options).await,
+    }
+}
+
+fn mqtt_config(
+    host: Option<String>,
+    port: u16,
+    username: Option<String>,
+    password: Option<String>,
+) -> Result<Option<crate::mqtt::MqttConfig>> {
+    match (host, username, password) {
+        (Some(host), Some(username), Some(password))
+            if !host.is_empty() && !username.is_empty() && !password.is_empty() =>
+        {
+            Ok(Some(crate::mqtt::MqttConfig {
+                host,
+                port,
+                username,
+                password,
+            }))
+        }
+        (None, None, None) => Ok(None),
+        _ => anyhow::bail!(
+            "MQTT host, username, and UPDRAFT_MQTT_PASSWORD must be configured together"
+        ),
     }
 }
 
@@ -275,8 +304,6 @@ mod tests {
             "192.168.1.5",
             "--mqtt-username",
             "updraft",
-            "--mqtt-password",
-            "password",
         ])
         .unwrap();
 
@@ -291,16 +318,80 @@ mod tests {
     }
 
     #[test]
+    fn empty_mqtt_host_environment_is_rejected() {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "cli::tests::empty_mqtt_host_environment_child",
+                "--nocapture",
+            ])
+            .env("UPDRAFT_TEST_EMPTY_MQTT_HOST", "1")
+            .env("UPDRAFT_MQTT_HOST", "")
+            .env("UPDRAFT_MQTT_USERNAME", "updraft")
+            .env("UPDRAFT_MQTT_PASSWORD", "test-secret")
+            .output()
+            .unwrap();
+
+        assert!(
+            output.status.success(),
+            "empty MQTT host was accepted: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
+    fn empty_mqtt_host_environment_child() {
+        if std::env::var_os("UPDRAFT_TEST_EMPTY_MQTT_HOST").is_none() {
+            return;
+        }
+
+        assert!(
+            Cli::try_parse_from(["updraft", "serve", "--device-id", "local-device-id"]).is_err()
+        );
+    }
+
+    #[test]
+    fn mqtt_password_is_not_in_cli_debug_output() {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "cli::tests::mqtt_password_debug_child",
+                "--nocapture",
+            ])
+            .env("UPDRAFT_TEST_MQTT_PASSWORD_DEBUG", "1")
+            .env("UPDRAFT_MQTT_HOST", "127.0.0.1")
+            .env("UPDRAFT_MQTT_USERNAME", "updraft")
+            .env("UPDRAFT_MQTT_PASSWORD", "test-secret")
+            .output()
+            .unwrap();
+
+        assert!(
+            output.status.success(),
+            "MQTT password appeared in CLI debug output: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
+    fn mqtt_password_debug_child() {
+        if std::env::var_os("UPDRAFT_TEST_MQTT_PASSWORD_DEBUG").is_none() {
+            return;
+        }
+
+        let cli =
+            Cli::try_parse_from(["updraft", "serve", "--device-id", "local-device-id"]).unwrap();
+        assert!(!format!("{cli:?}").contains("test-secret"));
+    }
+
+    #[test]
     fn serve_requires_both_mqtt_credentials_when_push_is_enabled() {
         assert!(
-            Cli::try_parse_from([
-                "updraft",
-                "serve",
-                "--device-id",
-                "local-device-id",
-                "--mqtt-host",
-                "192.168.1.5",
-            ])
+            mqtt_config(
+                Some("192.168.1.5".into()),
+                1883,
+                Some("updraft".into()),
+                None
+            )
             .is_err()
         );
     }
