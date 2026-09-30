@@ -15,9 +15,17 @@ use crate::{
 /// Discover GAF BLE peripherals and, when selected unambiguously, issue the
 /// read-only queries plus an optional ordinary control-setting write.
 pub async fn probe(options: ProbeOptions) -> Result<ProbeResult, ProbeError> {
-    let discovery = discover_candidates(options.scan_duration, options.response_timeout)
-        .await
-        .map_err(ProbeError::classify)?;
+    let requested_device_id = match &options.mode {
+        ProbeMode::Scan => None,
+        ProbeMode::Query { device_id, .. } => device_id.as_deref(),
+    };
+    let discovery = discover_candidates(
+        options.scan_duration,
+        options.response_timeout,
+        requested_device_id,
+    )
+    .await
+    .map_err(ProbeError::classify)?;
 
     match options.mode {
         ProbeMode::Scan => Ok(summarize_scan(discovery)),

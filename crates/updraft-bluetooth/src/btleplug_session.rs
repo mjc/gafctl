@@ -15,6 +15,9 @@ use crate::{
     },
 };
 
+#[cfg(test)]
+pub(super) const BACKEND: &str = "btleplug";
+
 struct ConnectedPeripheral<'a> {
     peripheral: &'a Peripheral,
     cleanup: DisconnectCleanup,
@@ -96,7 +99,8 @@ async fn request_session<'a, 'device>(
     let notifications = notifications
         .filter_map(|notification: ValueNotification| {
             future::ready(
-                (notification.uuid == GAF_CHARACTERISTIC_UUID).then_some(notification.value),
+                notification_matches(notification.service_uuid, notification.uuid)
+                    .then_some(notification.value),
             )
         })
         .boxed();
@@ -109,6 +113,10 @@ async fn request_session<'a, 'device>(
         notifications,
         response_timeout,
     ))
+}
+
+fn notification_matches(service_uuid: uuid::Uuid, characteristic_uuid: uuid::Uuid) -> bool {
+    service_uuid == GAF_SERVICE_UUID && characteristic_uuid == GAF_CHARACTERISTIC_UUID
 }
 
 async fn writable_characteristic(
@@ -153,5 +161,26 @@ impl GattTransport for BtleplugTransport<'_> {
             .write(&self.characteristic, bytes, self.write_type)
             .await
             .context("write GAF BLE characteristic")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn notification_matching_requires_gaf_service_and_characteristic() {
+        assert!(notification_matches(
+            GAF_SERVICE_UUID,
+            GAF_CHARACTERISTIC_UUID,
+        ));
+        assert!(!notification_matches(
+            uuid::Uuid::nil(),
+            GAF_CHARACTERISTIC_UUID,
+        ));
+        assert!(!notification_matches(
+            GAF_SERVICE_UUID,
+            uuid::Uuid::nil(),
+        ));
     }
 }

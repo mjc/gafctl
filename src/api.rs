@@ -398,6 +398,7 @@ async fn poll_device(
                     .apply_failure(poll_id, "device was not queried");
             }
             Err(error) => {
+                tracing::warn!(%error, "BLE state poll failed");
                 let message = match error.kind() {
                     ProbeErrorKind::Unavailable => "BLE unavailable",
                     ProbeErrorKind::Authentication => "BLE permission or authentication failed",
