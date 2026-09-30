@@ -45,6 +45,7 @@ tower = { version = "0.5", default-features = false }
 tower-http = { version = "0.7.1", default-features = false, features = ["trace", "timeout", "limit", "request-id"] }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter", "json"] }
+rumqttc = { version = "0.25.1", default-features = false }
 uuid = "1.26.1"
 
 [dependencies]
@@ -58,6 +59,7 @@ toml.workspace = true
 tower-http.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+rumqttc.workspace = true
 updraft-bluetooth = { path = "crates/updraft-bluetooth" }
 updraft-protocol = { path = "crates/updraft-protocol" }
 updraft-wifi = { path = "crates/updraft-wifi" }

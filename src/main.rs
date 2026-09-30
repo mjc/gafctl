@@ -1,6 +1,7 @@
 mod api;
 mod cli;
 mod logging;
+mod mqtt;
 mod output;
 
 use anyhow::Result;
