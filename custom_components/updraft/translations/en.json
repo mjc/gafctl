@@ -1,0 +1,19 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Connect to Updraft",
+        "description": "Enter the local address of the Updraft read-only API.",
+        "data": { "api_url": "API address" }
+      }
+    },
+    "error": {
+      "invalid_url": "Enter a valid HTTP or HTTPS address.",
+      "cannot_connect": "Cannot reach the Updraft API or its response was invalid.",
+      "no_device": "The API did not report a configured device with state support."
+    },
+    "abort": {
+      "already_configured": "Updraft is already configured."
+    }
+  }
+}

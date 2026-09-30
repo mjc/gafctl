@@ -1,0 +1,11 @@
+{
+  "domain": "updraft",
+  "name": "Updraft GAF Vent",
+  "codeowners": [],
+  "config_flow": true,
+  "single_config_entry": true,
+  "documentation": "https://github.com/mjc/updraft",
+  "iot_class": "local_polling",
+  "requirements": [],
+  "version": "0.1.0"
+}
