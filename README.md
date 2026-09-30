@@ -1,6 +1,6 @@
 # Updraft
 
-Updraft is a Rust BLE probe for the GAF Wi-Fi Vent. It reads state, sets automatic thresholds, and starts or clears the timer. It does not change firmware. HTTP and Home Assistant support are planned.
+Updraft is a Rust BLE proxy for the GAF Wi-Fi Vent. It reads device state and has verified threshold and timer controls. Its loopback HTTP API is read-only; the Home Assistant integration exposes state and diagnostics only.
 
 ## Workspace
 
@@ -9,7 +9,7 @@ Updraft is a Rust BLE probe for the GAF Wi-Fi Vent. It reads state, sets automat
 | `updraft-protocol` | Typed commands, values, and frame parsing. |
 | `updraft-bluetooth` | BLE discovery, connection, and protocol transport. |
 | `updraft-wifi` | Reserved for Wi-Fi transport. |
-| `updraft` | CLI. The HTTP service is planned. |
+| `updraft` | CLI and loopback HTTP API. |
 
 ## GAF Wi-Fi Vent
 
@@ -40,6 +40,24 @@ Set or clear the timer in minutes:
 cargo run -- probe ble --set-timer-minutes 1
 cargo run -- probe ble --set-timer-minutes 0
 ```
+
+## Home Assistant
+
+Run the local API on the same host as Home Assistant:
+
+```sh
+cargo run -- serve --device-id DEVICE_ID_FROM_SCAN
+```
+
+The API defaults to `127.0.0.1:8787` and rejects non-loopback bind addresses.
+Copy `custom_components/updraft` into Home Assistant's `custom_components`
+directory, restart Home Assistant, then add **Updraft GAF Vent** and enter
+`http://127.0.0.1:8787`.
+
+The integration reports temperature, humidity, controller mode and fan flag,
+firmware, thresholds, timer state, availability, and freshness. The controller
+fan flag is diagnostic; it does not prove physical airflow. Controls and a
+physical running entity are not exposed.
 
 The probe reads state after a control command. Acknowledgements and readbacks report controller state; they do not measure airflow. Firmware update commands are not exposed.
 
