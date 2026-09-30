@@ -66,7 +66,7 @@ impl ConnectedDevice {
                         tracing::warn!(%error, "BlueZ D-Bus connection ended");
                     }
                 });
-                Ok((session, driver))
+                Ok::<_, anyhow::Error>((session, driver))
             })
             .await?;
 

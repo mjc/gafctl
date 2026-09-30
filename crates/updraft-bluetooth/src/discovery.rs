@@ -385,12 +385,31 @@ mod tests {
     use super::*;
     use btleplug::api::CentralEvent;
 
+    fn test_peripheral_id(index: u8) -> PeripheralId {
+        #[cfg(target_os = "macos")]
+        {
+            PeripheralId::from(uuid::Uuid::from_u128(u128::from(index)))
+        }
+        #[cfg(target_os = "linux")]
+        {
+            let object_path = format!("/org/bluez/hci0/dev_{index:02X}");
+            let device_id =
+                serde_json::from_value(serde_json::json!({ "object_path": object_path }))
+                    .expect("valid BlueZ device ID");
+            PeripheralId::from(device_id)
+        }
+        #[cfg(any(target_os = "android", target_os = "windows"))]
+        {
+            PeripheralId::from(btleplug::api::BDAddr::from([0, 0, 0, 0, 0, index]))
+        }
+    }
+
     #[tokio::test]
     async fn property_failure_keeps_valid_candidate_and_diagnostic() {
         let report = inspect_peripherals(
             [
-                (PeripheralId::from(uuid::Uuid::nil()), false),
-                (PeripheralId::from(uuid::Uuid::from_u128(1)), true),
+                (test_peripheral_id(0), false),
+                (test_peripheral_id(1), true),
             ],
             |properties_available| async move {
                 if properties_available {
@@ -406,7 +425,7 @@ mod tests {
         assert_eq!(
             report.failures,
             [DiscoveryFailure {
-                device_id: PeripheralId::from(uuid::Uuid::nil()),
+                device_id: test_peripheral_id(0),
                 reason: String::from("property request timed out"),
             }],
         );
@@ -418,7 +437,7 @@ mod tests {
         let candidate = Candidate {
             peripheral: None,
             device: DiscoveredDevice {
-                id: PeripheralId::from(uuid::Uuid::from_u128(1)),
+                id: test_peripheral_id(1),
                 name: None,
                 rssi: None,
             },
@@ -427,7 +446,7 @@ mod tests {
         let report = DiscoveryReport {
             candidates: vec![candidate],
             failures: vec![DiscoveryFailure {
-                device_id: PeripheralId::from(uuid::Uuid::nil()),
+                device_id: test_peripheral_id(0),
                 reason: String::from("property request timed out"),
             }],
         };
@@ -439,8 +458,8 @@ mod tests {
 
     #[test]
     fn bluez_cached_initial_events_do_not_count_as_fresh_advertisements() {
-        let stale = btleplug::platform::PeripheralId::from(uuid::Uuid::nil());
-        let fresh = btleplug::platform::PeripheralId::from(uuid::Uuid::from_u128(1));
+        let stale = test_peripheral_id(0);
+        let fresh = test_peripheral_id(1);
         let initial = CentralEvent::ServicesAdvertisement {
             id: stale.clone(),
             services: vec![GAF_SERVICE_UUID],
