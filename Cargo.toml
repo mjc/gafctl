@@ -63,5 +63,6 @@ updraft-protocol = { path = "crates/updraft-protocol" }
 updraft-wifi = { path = "crates/updraft-wifi" }
 
 [dev-dependencies]
+bytes.workspace = true
 http-body-util.workspace = true
 tower = { workspace = true, features = ["util"] }
