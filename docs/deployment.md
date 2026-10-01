@@ -1,16 +1,8 @@
-# Local deployment
+# Deployment
 
-Run Updraft on a Linux host that can reach the fan over Bluetooth. For this
-setup, the Updraft host and Home Assistant broker are on the same LAN. The
-NixOS service and firewall settings are maintained in the shared NixOS
-configuration repository, outside this source repository.
-The API defaults to loopback; `--allow-remote` enables LAN polling when needed.
-The optional MQTT publisher connects outbound to the broker on Tina, so HA can
-receive retained state and discover entities without connecting to Updraft.
+Run Updraft on a Linux system with a BLE adapter that can reach the configured controller. Home Assistant must be able to reach the HTTP API or share an MQTT broker with Updraft.
 
 ## Build
-
-Build with the repository's pinned Rust toolchain and locked dependencies:
 
 ```sh
 devenv allow
@@ -19,51 +11,56 @@ devenv shell -- cargo build --release --locked
 
 The executable is `target/release/updraft`.
 
-## Run
+## Configure
 
-Get the fan's BLE identifier with `updraft probe ble --scan-only`, then start
-the API:
+Select the controller locally. Keep its identifier and deployment settings in local service configuration, not in tracked files.
 
-```sh
-UPDRAFT_DEVICE_ID=DEVICE_ID \
-UPDRAFT_MQTT_HOST=192.168.1.5 \
-UPDRAFT_MQTT_PORT=1883 \
-UPDRAFT_MQTT_USERNAME=updraft \
-target/release/updraft serve --bind 0.0.0.0:8787 --allow-remote
-```
+The HTTP API binds to loopback by default. Use `--allow-remote` only when the service is protected by appropriate network controls or an authenticated reverse proxy. The API has no built-in authentication.
 
-The MQTT password must also be loaded from a protected credential file into
-`UPDRAFT_MQTT_PASSWORD` by the service manager. Do not put it in the command
-line or a tracked environment file.
+Set these variables to enable MQTT:
 
-The device identifier is local configuration, not an authentication secret.
-Updraft does not use or store OEM account credentials. Keep the identifier out
-of tracked files and logs. Set it with `UPDRAFT_DEVICE_ID` or `--device-id`;
-the API does not expose it.
+- `UPDRAFT_MQTT_HOST`
+- `UPDRAFT_MQTT_PORT`
+- `UPDRAFT_MQTT_USERNAME`
+- `UPDRAFT_MQTT_PASSWORD`
+- `UPDRAFT_MQTT_DISCOVERY` (optional; defaults to disabled)
 
-The process writes structured JSON logs to standard error. The default filter
-shows Updraft info events. Set `RUST_LOG=updraft=debug` to include debug events.
+Load the password from a local secret store or service-manager credential. Do not pass it on the command line or commit it.
 
-## Check state
+Give Updraft and Home Assistant separate MQTT accounts with these permissions for this device:
 
-Check that the API process is responding:
+| Account | Operation | Topics |
+| --- | --- | --- |
+| Updraft | Publish | `updraft/gaf_vent/state`, `updraft/gaf_vent/availability`, `updraft/gaf_vent/control/result` |
+| Updraft | Publish discovery | `homeassistant/sensor/updraft/+/config`, `homeassistant/select/updraft/control/config` |
+| Updraft | Subscribe | `updraft/gaf_vent/control/set` |
+| Home Assistant | Publish | `updraft/gaf_vent/control/set` |
+| Home Assistant | Subscribe | The state, availability, result, and discovery topics above |
 
-```sh
-curl --fail http://tali.local:8787/health
-```
+Updraft's account must not publish commands. Avoid a publish grant for `updraft/gaf_vent/#`, which includes the command topic. Use broker authentication and transport encryption when the network is not trusted.
 
-`/health` checks the HTTP process only. Check
-`http://tali.local:8787/api/v1/devices/configured/state` for Bluetooth
-availability, state freshness, and the last query error. The Home Assistant
-integration reads the endpoint directly; the MQTT publisher also sends retained
-state, availability, diagnostics, and discovery messages when configured.
+## Choose a Home Assistant source
 
-## Upgrade and recover
+The native HTTP integration is the default entity source. MQTT can publish state and availability without discovery. To use MQTT entities, enable discovery and remove the HTTP integration entry for the same device. Do not enable both entity sources at once.
 
-Stop the running process before replacing the executable. Rebuild from the
-selected repository revision with the locked command above, then restart it.
-To roll back, rebuild and run the last known-good revision. Updraft stores no
-device state on disk; Home Assistant keeps its integration configuration.
+HTTP state includes availability, freshness, observation time, query errors, and the latest confirmed values. `/health` reports process health only; it does not confirm BLE availability.
 
-The shared NixOS configuration provides the system service and opens TCP 8787
-only on the service host's wired LAN interface.
+MQTT publishes retained state and availability. The broker's last will marks Updraft offline after an unexpected disconnect. On reconnect, Updraft republishes discovery when enabled, availability, and the latest state.
+
+## Controls
+
+HTTP and MQTT accept the same fixed control presets. They do not accept arbitrary threshold, timer, mode, or power values.
+
+MQTT control requests use QoS 1 and must be non-retained JSON with a request ID, a Unix timestamp in milliseconds, and a supported preset. Updraft rejects malformed, stale, future-dated, retained, and unsupported requests before BLE access. The request queue is bounded. Controls share the BLE transaction lock with polling and report success only after acknowledgement and matching device readback.
+
+Generate a unique request ID and the current Unix timestamp in milliseconds for each new command. Requests older than 30 seconds or more than five seconds in the future are rejected. Reuse an ID only when retrying the same command; replay protection is limited to the cached results described in [Home Assistant transports](home-assistant-entities.md#controls).
+
+MQTT results include the request ID, outcome, preset, message, and readback state when available. Results are non-retained. A missing result does not prove the controller rejected the command; check current state before retrying.
+
+## Verify and recover
+
+Run `devenv tasks run check:all` for formatting, Clippy, Rust tests, and doctests. Broker configuration checks and deployed-service checks are separate.
+
+After deployment, verify the process health endpoint, fresh device state, broker availability, one selected Home Assistant entity source, reconnect behavior, and control acknowledgement/readback. Record deployment-specific values in a private operations log.
+
+To upgrade, stop the service, install a build from the selected revision, and restart it. To roll back, restore the last known-good build. Home Assistant keeps HTTP integration configuration; MQTT discovery, state, and availability are stored by the broker.
