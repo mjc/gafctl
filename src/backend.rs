@@ -313,10 +313,11 @@ impl IdentityStore {
         })
         .map_err(DeviceRegistryError::Encoding)?;
         let temporary_path = temporary_path(path);
-        let mut file = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
+        let mut options = OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        options.mode(0o600);
+        let mut file = options
             .open(&temporary_path)
             .map_err(DeviceRegistryError::Io)?;
         file.write_all(&contents)
