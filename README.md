@@ -8,8 +8,11 @@ Updraft is a Rust service for reading a supported BLE ventilation controller and
 | --- | --- |
 | `updraft-protocol` | Typed commands, values, and frame parsing. |
 | `updraft-bluetooth` | BLE discovery, connection, and protocol transport. |
-| `updraft-wifi` | Reserved for a future transport. |
 | `updraft` | CLI, HTTP API, and optional MQTT bridge. |
+
+The `updraft` executable lives in root `src/`. Libraries live under `crates/`.
+The executable depends on Bluetooth and protocol; Bluetooth depends on protocol.
+Protocol has no transport or application dependencies.
 
 ## Run
 

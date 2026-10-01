@@ -218,11 +218,12 @@ fn mqtt_config(
 async fn run_ble_probe(options: BleOptions) -> Result<()> {
     let show_identity = options.show_identity;
     let control_requested = options.requested_control().is_some();
-    let probe_result = probe(options.into_probe_options()).await;
-    let result = probe_result.context("BLE probe failed")?;
+    let result = probe(options.into_probe_options())
+        .await
+        .context("BLE probe failed")?;
     let control_confirmed = control_result_confirmed(control_requested, &result);
     crate::output::print_probe_result(result, show_identity);
-    if control_requested && !control_confirmed {
+    if !control_confirmed {
         bail!("requested control was not confirmed");
     }
     Ok(())
@@ -232,23 +233,21 @@ fn control_result_confirmed(
     control_requested: bool,
     result: &updraft_bluetooth::ProbeResult,
 ) -> bool {
-    let (selected, control) = match result {
-        updraft_bluetooth::ProbeResult::Queried { result, .. } => (true, result.control.as_ref()),
+    let control = match result {
+        updraft_bluetooth::ProbeResult::Queried { result, .. } => result.control.as_ref(),
         updraft_bluetooth::ProbeResult::NoDevices
         | updraft_bluetooth::ProbeResult::Discovered { .. }
         | updraft_bluetooth::ProbeResult::Ambiguous { .. }
-        | updraft_bluetooth::ProbeResult::DiscoveryIncomplete { .. } => (false, None),
+        | updraft_bluetooth::ProbeResult::DiscoveryIncomplete { .. } => None,
     };
-    control_status_successful(control_requested, selected, control)
+    control_status_successful(control_requested, control)
 }
 
 fn control_status_successful(
     control_requested: bool,
-    selected: bool,
     control: Option<&updraft_protocol::ControlOutcome>,
 ) -> bool {
-    !control_requested
-        || (selected && control.is_some_and(updraft_protocol::ControlOutcome::is_confirmed))
+    !control_requested || control.is_some_and(updraft_protocol::ControlOutcome::is_confirmed)
 }
 
 #[cfg(test)]
@@ -431,53 +430,78 @@ mod tests {
     }
 
     #[test]
-    fn control_status_requires_selected_device_and_confirmed_readback() {
-        use updraft_bluetooth::ProbeResult;
-        use updraft_protocol::{ControlCommand, ControlOutcome, Frame, Minutes};
-
-        assert!(!control_result_confirmed(true, &ProbeResult::NoDevices));
-        assert!(!control_result_confirmed(
-            true,
-            &ProbeResult::Ambiguous {
-                devices: Vec::new()
+    fn only_requested_controls_require_a_queried_device() {
+        [
+            updraft_bluetooth::ProbeResult::NoDevices,
+            updraft_bluetooth::ProbeResult::Discovered {
+                devices: Vec::new(),
             },
-        ));
-        assert!(control_result_confirmed(false, &ProbeResult::NoDevices));
+            updraft_bluetooth::ProbeResult::Ambiguous {
+                devices: Vec::new(),
+            },
+            updraft_bluetooth::ProbeResult::DiscoveryIncomplete {
+                devices: Vec::new(),
+                failures: Vec::new(),
+            },
+        ]
+        .iter()
+        .for_each(|result| {
+            assert!(control_result_confirmed(false, result));
+            assert!(!control_result_confirmed(true, result));
+        });
+    }
 
-        let snapshot = |timer: &[u8]| {
-            updraft_protocol::DeviceSnapshot::from_frames(
-                Frame::parse(b"#idr030000\n").unwrap().into_owned(),
-                Frame::parse(b"#dmrtn\n").unwrap().into_owned(),
-                Frame::parse(b"#sdr03CA00AA\n").unwrap().into_owned(),
-                Frame::parse(b"#atr041a012c\n").unwrap().into_owned(),
-                Frame::parse(timer).unwrap().into_owned(),
-            )
+    #[test]
+    fn control_status_requires_acknowledgement_and_matching_readback() {
+        [
+            (None, false),
+            (
+                Some(timer_control_outcome(b"#tmr1\n", b"#ttr00010002\n")),
+                false,
+            ),
+            (
+                Some(timer_control_outcome(b"#tmr0\n", b"#ttr00010003\n")),
+                false,
+            ),
+            (
+                Some(timer_control_outcome(b"#tmr0\n", b"#ttr00010002\n")),
+                true,
+            ),
+        ]
+        .into_iter()
+        .for_each(|(control, confirmed)| {
+            assert_eq!(control_status_successful(true, control.as_ref()), confirmed);
+            assert!(control_status_successful(false, control.as_ref()));
+        });
+    }
+
+    fn timer_control_outcome(
+        acknowledgement: &'static [u8],
+        timer: &'static [u8],
+    ) -> updraft_protocol::ControlOutcome {
+        let snapshot = timer_snapshot(timer);
+        updraft_protocol::ControlOutcome::from_response(
+            ControlCommand::SetTimer(Minutes::new(2)),
+            protocol_frame(acknowledgement),
+            Some(&snapshot),
+        )
+        .unwrap()
+    }
+
+    fn timer_snapshot(timer: &'static [u8]) -> updraft_protocol::DeviceSnapshot {
+        let [identity, mode, sensors, thresholds, timer] = [
+            b"#idr030000\n".as_slice(),
+            b"#dmrtn\n",
+            b"#sdr03CA00AA\n",
+            b"#atr041a012c\n",
+            timer,
+        ]
+        .map(protocol_frame);
+        updraft_protocol::DeviceSnapshot::from_frames(identity, mode, sensors, thresholds, timer)
             .unwrap()
-        };
-        let command = ControlCommand::SetTimer(Minutes::new(2));
-        let matching = snapshot(b"#ttr00010002\n");
-        let unrecognized = ControlOutcome::from_response(
-            command,
-            Frame::parse(b"#tmr1\n").unwrap().into_owned(),
-            Some(&matching),
-        )
-        .unwrap();
-        let differing = snapshot(b"#ttr00010003\n");
-        let mismatched = ControlOutcome::from_response(
-            command,
-            Frame::parse(b"#tmr0\n").unwrap().into_owned(),
-            Some(&differing),
-        )
-        .unwrap();
-        let confirmed = ControlOutcome::from_response(
-            command,
-            Frame::parse(b"#tmr0\n").unwrap().into_owned(),
-            Some(&matching),
-        )
-        .unwrap();
+    }
 
-        assert!(!control_status_successful(true, true, Some(&unrecognized)));
-        assert!(!control_status_successful(true, true, Some(&mismatched)));
-        assert!(control_status_successful(true, true, Some(&confirmed)));
+    fn protocol_frame(payload: &'static [u8]) -> updraft_protocol::Frame<'static> {
+        updraft_protocol::Frame::from_bytes(bytes::Bytes::from_static(payload)).unwrap()
     }
 }
