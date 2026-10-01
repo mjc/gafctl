@@ -1,6 +1,6 @@
 # Deployment
 
-Run Updraft on a Linux system with a BLE adapter that can reach the configured controller. Home Assistant must be able to reach the HTTP API or share an MQTT broker with Updraft.
+Run Updraft on a Linux system. For the legacy controller, provide a BLE adapter that can reach it. Home Assistant must be able to reach the HTTP API or share an MQTT broker with Updraft.
 
 ## Build
 
@@ -13,7 +13,9 @@ The executable is `target/release/updraft`.
 
 ## Configure
 
-Select the controller locally. Keep its identifier and deployment settings in local service configuration, not in tracked files.
+To enable the legacy BLE backend, set `UPDRAFT_DEVICE_ID` or pass `--device-id` in local service configuration. Keep the peripheral identifier out of tracked files. Without a BLE identifier the service starts without the legacy `configured` device; v1 discovery is empty and the configured state/control routes return 404.
+
+Set `UPDRAFT_IDENTITY_STORE` to a private local path when persisting cloud account/provider identity mappings. Newly created identity files use owner-only permissions. This setting alone does not enable cloud authentication or polling. Cloud credentials and provider identifiers must remain in local configuration, not tracked files or public API payloads.
 
 The HTTP API binds to loopback by default. Use `--allow-remote` only when the service is protected by appropriate network controls or an authenticated reverse proxy. The API has no built-in authentication.
 

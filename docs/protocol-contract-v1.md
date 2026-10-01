@@ -50,6 +50,14 @@ No other mutating operation is enabled by this contract revision.
 
 The experimental BLE probe has a timer-write option, but that CLI capability does not extend this contract or define a Home Assistant capability. Do not expose timer writes through Home Assistant until the accepted range is established and bounded by the integration.
 
+## Application identity and backend boundary
+
+The legacy BLE service keeps the stable local ID `configured` and preserves its v1 response fields, supported presets, and Home Assistant entity identifiers. The BLE peripheral identifier remains local and is never returned by the API.
+
+The service can start without `UPDRAFT_DEVICE_ID`. In that mode, v1 discovery returns an empty inventory, and the legacy configured state and control routes return 404. Cloud devices are not substituted for `configured`; their local IDs are generated independently and mapped to the private `(account, provider ID)` identity in the file selected by `UPDRAFT_IDENTITY_STORE`. The mapping is account-scoped, survives restarts and discovery reordering, and is not included in public device descriptions. New mapping files are created with owner-only permissions. Numeric provider ID `0` is valid.
+
+Application state uses optional measurements, backend-specific settings, capabilities, and source provenance. Each registered local device owns its state and command transaction lock. State and command entity sources are selectable independently per device so HTTP and MQTT do not create duplicate entities or route commands to another device. QuickConnect devices begin read-only; no cloud controls are enabled by this application-model change.
+
 ## Error and retry behavior for clients
 
 - A missing or malformed response is a protocol failure; retain the raw response bytes for diagnostics where safe.

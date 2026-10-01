@@ -1,6 +1,8 @@
 mod api;
+pub mod backend;
 mod cli;
-mod control;
+pub mod control;
+pub mod device;
 mod logging;
 mod mqtt;
 mod output;

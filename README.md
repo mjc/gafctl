@@ -20,10 +20,12 @@ Use the pinned development environment:
 
 ```sh
 devenv allow
-devenv shell -- cargo run -- serve --device-id <local-device-id>
+devenv shell -- cargo run -- serve
 ```
 
-The API binds to loopback by default. Remote access requires `--allow-remote` and suitable access controls. The API does not provide authentication.
+For the legacy BLE controller, add `--device-id <peripheral-id>` or set `UPDRAFT_DEVICE_ID`. Without BLE configured, the service starts with an empty v1 inventory; the legacy `configured` state and control routes return 404. The API binds to loopback by default. Remote access requires `--allow-remote` and suitable access controls. The API does not provide authentication.
+
+Set `UPDRAFT_IDENTITY_STORE` to a private local file path when cloud-device identity persistence is configured. New identity files are created with owner-only permissions. Provider and account identifiers stay in that file and do not appear in public device payloads. This path alone does not enable cloud authentication or polling.
 
 Set `UPDRAFT_MQTT_HOST`, `UPDRAFT_MQTT_PORT`, `UPDRAFT_MQTT_USERNAME`, and `UPDRAFT_MQTT_PASSWORD` to enable MQTT. Supply the password through a service manager or another local secret store. Do not commit deployment credentials.
 
