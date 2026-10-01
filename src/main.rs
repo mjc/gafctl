@@ -6,6 +6,7 @@ pub mod device;
 mod logging;
 mod mqtt;
 mod output;
+pub mod quickconnect_control;
 
 use anyhow::Result;
 
