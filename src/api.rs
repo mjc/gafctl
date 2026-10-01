@@ -78,11 +78,9 @@ impl ApiState {
 
     async fn execute_control_locked(&self, preset: ControlPreset) -> ControlResponse {
         let poll_id = self.reconciler.write().await.begin_poll();
-        let ControlOutcome {
-            success,
-            message,
-            snapshot,
-        } = control_outcome(self.probe_control(preset).await);
+        let outcome = control_outcome(self.probe_control(preset).await);
+        outcome.log_warnings();
+        let (success, message, snapshot) = outcome.into_response();
         let state = self
             .reconcile_control_snapshot(poll_id, snapshot, message)
             .await;
@@ -147,47 +145,91 @@ impl ApiState {
     }
 }
 
+enum ControlStatus {
+    Confirmed,
+    ReadbackFailed(String),
+    Mismatch,
+    DeviceSelectionFailed,
+    BleRequestFailed(ProbeError),
+}
+
 struct ControlOutcome {
-    success: bool,
-    message: &'static str,
+    status: ControlStatus,
     snapshot: Option<DeviceSnapshot>,
+    disconnect_error: Option<String>,
+}
+
+impl ControlOutcome {
+    fn log_warnings(&self) {
+        if let Some(error) = &self.disconnect_error {
+            tracing::warn!(%error, "BLE disconnect failed after control request");
+        }
+        match &self.status {
+            ControlStatus::ReadbackFailed(error) => {
+                tracing::warn!(%error, "control readback failed");
+            }
+            ControlStatus::BleRequestFailed(error) => {
+                tracing::warn!(error = %error, "control request failed");
+            }
+            ControlStatus::Confirmed
+            | ControlStatus::Mismatch
+            | ControlStatus::DeviceSelectionFailed => {}
+        }
+    }
+
+    fn into_response(self) -> (bool, &'static str, Option<DeviceSnapshot>) {
+        let (success, message) = match self.status {
+            ControlStatus::Confirmed => (true, "command acknowledged and readback matched"),
+            ControlStatus::ReadbackFailed(_) => {
+                (false, "command was not confirmed; readback failed")
+            }
+            ControlStatus::Mismatch => (
+                false,
+                "command was not confirmed; acknowledgement or readback differed",
+            ),
+            ControlStatus::DeviceSelectionFailed => {
+                (false, "command was not confirmed; device selection failed")
+            }
+            ControlStatus::BleRequestFailed(_) => {
+                (false, "command was not confirmed; BLE request failed")
+            }
+        };
+        (success, message, self.snapshot)
+    }
 }
 
 fn control_outcome(result: Result<ProbeResult, ProbeError>) -> ControlOutcome {
-    let (success, message, snapshot) = match result {
+    match result {
         Ok(ProbeResult::Queried { result, .. }) => {
-            if let DisconnectOutcome::Failed(error) = &result.disconnect {
-                tracing::warn!(%error, "BLE disconnect failed after control request");
-            }
-            let success = result
+            let disconnect_error = match result.disconnect {
+                DisconnectOutcome::Failed(error) => Some(error),
+                DisconnectOutcome::Disconnected => None,
+            };
+            let confirmed = result
                 .control
                 .as_ref()
                 .is_some_and(|control| control.is_confirmed());
-            let message = match (success, result.state_error.as_deref()) {
-                (true, _) => "command acknowledged and readback matched",
-                (false, Some(error)) => {
-                    tracing::warn!(%error, "control readback failed");
-                    "command was not confirmed; readback failed"
-                }
-                (false, None) => "command was not confirmed; acknowledgement or readback differed",
+            let status = match (confirmed, result.state_error) {
+                (true, _) => ControlStatus::Confirmed,
+                (false, Some(error)) => ControlStatus::ReadbackFailed(error),
+                (false, None) => ControlStatus::Mismatch,
             };
-            (success, message, result.snapshot)
+            ControlOutcome {
+                status,
+                snapshot: result.snapshot,
+                disconnect_error,
+            }
         }
-        Ok(_) => (
-            false,
-            "command was not confirmed; device selection failed",
-            None,
-        ),
-        Err(error) => {
-            tracing::warn!(error = %error, "control request failed");
-            (false, "command was not confirmed; BLE request failed", None)
-        }
-    };
-
-    ControlOutcome {
-        success,
-        message,
-        snapshot,
+        Ok(_) => ControlOutcome {
+            status: ControlStatus::DeviceSelectionFailed,
+            snapshot: None,
+            disconnect_error: None,
+        },
+        Err(error) => ControlOutcome {
+            status: ControlStatus::BleRequestFailed(error),
+            snapshot: None,
+            disconnect_error: None,
+        },
     }
 }
 
