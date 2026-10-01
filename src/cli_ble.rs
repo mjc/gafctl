@@ -196,11 +196,11 @@ fn project_control(control: &ControlOutcome) -> ControlReport {
         },
         readback: ReadbackReport {
             status: readback_status,
-            message: crate::output::ControlReadbackDisplay(control.readback()).to_string(),
+            message: crate::control_display::ControlReadbackDisplay(control.readback()).to_string(),
         },
         mode_readback: ReadbackReport {
             status: mode_status,
-            message: crate::output::ModeReadbackDisplay(mode).to_string(),
+            message: crate::control_display::ModeReadbackDisplay(mode).to_string(),
         },
     }
 }

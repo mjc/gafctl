@@ -197,7 +197,10 @@ async fn query_selected_device(
                 *pending_disconnect = None;
             }
             result.discovery_failures = failures;
-            Ok(ProbeResult::Queried { device, result })
+            Ok(ProbeResult::Queried {
+                device,
+                result: Box::new(result),
+            })
         }
     }
 }

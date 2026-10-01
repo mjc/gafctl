@@ -11,11 +11,14 @@ pub enum ProbeErrorKind {
     Protocol,
 }
 
-#[derive(Debug)]
+#[derive(Debug, ThisError)]
 pub enum ProbeError {
-    Unavailable(Error),
-    Authentication(Error),
-    Protocol(Error),
+    #[error("BLE unavailable: {0:#}")]
+    Unavailable(#[source] Error),
+    #[error("BLE authentication or permission failure: {0:#}")]
+    Authentication(#[source] Error),
+    #[error("GAF BLE protocol failure: {0:#}")]
+    Protocol(#[source] Error),
 }
 
 impl ProbeError {
@@ -32,14 +35,6 @@ impl ProbeError {
             Self::Unavailable(_) => ProbeErrorKind::Unavailable,
             Self::Authentication(_) => ProbeErrorKind::Authentication,
             Self::Protocol(_) => ProbeErrorKind::Protocol,
-        }
-    }
-
-    fn source_error(&self) -> &Error {
-        match self {
-            Self::Unavailable(source) | Self::Authentication(source) | Self::Protocol(source) => {
-                source
-            }
         }
     }
 
@@ -147,23 +142,6 @@ impl fmt::Display for CleanupFailed {
 impl StdError for CleanupFailed {
     fn source(&self) -> Option<&(dyn StdError + 'static)> {
         self.operation.chain().next()
-    }
-}
-
-impl fmt::Display for ProbeError {
-    fn fmt(&self, output: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let category = match self {
-            Self::Unavailable(_) => "BLE unavailable",
-            Self::Authentication(_) => "BLE authentication or permission failure",
-            Self::Protocol(_) => "GAF BLE protocol failure",
-        };
-        write!(output, "{category}: {:#}", self.source_error())
-    }
-}
-
-impl StdError for ProbeError {
-    fn source(&self) -> Option<&(dyn StdError + 'static)> {
-        self.source_error().chain().next()
     }
 }
 

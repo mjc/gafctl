@@ -5,6 +5,31 @@ edition = "2024"
 description = "A Rust proxy for GAF Master Flow attic fans"
 readme = "README.md"
 keywords = ["attic-fan", "gaf", "home-assistant", "ventilation"]
+default-run = "updraft"
+
+[features]
+default = ["http", "mqtt"]
+http = [
+    "dep:axum",
+    "dep:clap",
+    "dep:clap_complete",
+    "dep:futures-util",
+    "dep:serde",
+    "dep:serde_json",
+    "dep:thiserror",
+    "dep:updraft-quickconnect",
+    "dep:uuid",
+]
+mqtt = ["http", "dep:rumqttc"]
+cli = [
+    "dep:clap",
+    "dep:clap_complete",
+    "dep:serde",
+    "dep:serde_json",
+    "dep:thiserror",
+    "dep:updraft-client",
+    "dep:uuid",
+]
 
 [lints]
 workspace = true
@@ -57,28 +82,49 @@ reqwest = { version = "0.13.5", default-features = false, features = ["json", "r
 uuid = { version = "1.26.1", features = ["v4", "serde"] }
 
 [dependencies]
-futures-util.workspace = true
-reqwest.workspace = true
+futures-util = { workspace = true, optional = true }
 anyhow.workspace = true
-axum.workspace = true
-clap.workspace = true
-clap_complete.workspace = true
-serde.workspace = true
-serde_json.workspace = true
+axum = { workspace = true, optional = true }
+clap = { workspace = true, optional = true }
+clap_complete = { workspace = true, optional = true }
+serde = { workspace = true, optional = true }
+serde_json = { workspace = true, optional = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "net", "sync", "time"] }
 tracing.workspace = true
 tracing-subscriber.workspace = true
-rumqttc.workspace = true
-thiserror.workspace = true
-uuid.workspace = true
+rumqttc = { workspace = true, optional = true }
+thiserror = { workspace = true, optional = true }
+uuid = { workspace = true, optional = true }
 updraft-bluetooth = { path = "crates/updraft-bluetooth" }
-updraft-quickconnect = { path = "crates/updraft-quickconnect" }
+updraft-quickconnect = { path = "crates/updraft-quickconnect", optional = true }
 updraft-protocol = { path = "crates/updraft-protocol" }
 updraft-api = { path = "crates/updraft-api" }
-updraft-client = { path = "crates/updraft-client" }
+updraft-client = { path = "crates/updraft-client", optional = true }
+
+[[bin]]
+name = "updraft"
+path = "src/main.rs"
+required-features = ["http"]
+
+[[bin]]
+name = "updraftctl"
+path = "src/bin/updraftctl.rs"
+required-features = ["cli"]
+
+[[test]]
+name = "cli"
+path = "tests/cli.rs"
+required-features = ["http", "cli"]
 
 [dev-dependencies]
 assert_cmd.workspace = true
 bytes.workspace = true
 http-body-util.workspace = true
+reqwest.workspace = true
+updraft-client = { path = "crates/updraft-client" }
 tower = { workspace = true, features = ["util"] }
+
+[[test]]
+name = "feature_isolation"
+path = "tests/feature_isolation.rs"
+required-features = ["http", "mqtt"]

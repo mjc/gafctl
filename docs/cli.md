@@ -1,222 +1,248 @@
-# Command line reference
+# Command line interface
 
-The `updraft` executable can connect directly to an original GAF Master Flow
-Wi-Fi Attic Vent over Bluetooth, or act as a client of a running Updraft service.
-Build instructions are in the [README](../README.md#install).
+The standalone `updraftctl` executable can access a fan directly over Bluetooth
+or act as an HTTP client of a running Updraft service. Run `updraftctl --help`
+and any command's `--help` for the full argument reference. The `updraft`
+executable runs the service and its diagnostic `probe` interface.
 
-The examples assume `updraft` is on your `PATH`. From a source build, replace it
-with `./target/release/updraft`. During development, use `cargo run --` inside
-the devenv shell. Run `updraft --help` or a subcommand's `--help` for its arguments.
-
-## Read through the service
+For development, use the repository's pinned environment:
 
 ```sh
-updraft devices
-updraft state configured
-updraft devices --server http://UPDRAFT_HOST:8787 --format json
-updraft state configured --server http://UPDRAFT_HOST:8787 --format json
+devenv allow
+devenv shell -- cargo run --no-default-features --features cli --bin updraftctl -- devices --format json
 ```
 
-Use an ID from `devices`. The original Bluetooth fan is `configured`; cloud IDs
-start with `qc-`. These service IDs differ from Bluetooth peripheral IDs.
+Cargo features default to `http` and `mqtt`; the control CLI is opt-in. `mqtt` also enables `http`.
+Build the service without MQTT with `--no-default-features --features http`, or
+build only the control CLI with `--no-default-features --features cli`.
 
-The server address is selected from `--server`, then `UPDRAFT_SERVER_URL`, then
-`http://127.0.0.1:8787`. HTTP, HTTPS, and reverse-proxy path prefixes are supported.
-Use a base address without `/api/v2`. Embedded credentials, query strings, and
-fragments are rejected. TLS certificates are checked. The client does not follow
-redirects, use proxy environment settings, or automatically retry requests.
-
-`state` reads the service's cached snapshot. It does not request a new reading
-from the fan. Inspect `available`, `inventory_status`, `last_error`, and
-`state.provenance` for freshness. A response with `available: false` and
-`state: null` is a successful read of an unavailable device.
-
-Service client commands do not initialize Bluetooth or need QuickConnect
-credentials. Account credentials belong on the service computer.
-
-## Original fan controls
-
-Through the running service:
+## Running service
 
 ```sh
-updraft control configured preset automatic-105-f-30-percent
-updraft control configured preset timer-one-minute
-updraft control configured preset timer-clear
+updraftctl devices
+updraftctl devices --server https://fan.example/updraft --format json
+updraftctl state configured --format json
+updraftctl control configured preset timer-clear
+updraftctl control configured preset timer-one-minute --request-id attic-timer-1
+updraftctl control qc-local mode automatic
+updraftctl control qc-local targets --temperature-f 105 --humidity-percent 40
+updraftctl control qc-local timer-duration 60
 ```
 
-Directly over Bluetooth, with the peripheral ID from `ble scan`:
+Use the local device ID returned by `devices`. A local ID contains 1–64 ASCII
+letters, digits, underscores, or hyphens. It is distinct from a BLE peripheral ID
+and a cloud provider's private ID. State and control require an explicit local
+ID. The client checks the inventory and advertised capabilities before reading
+state or submitting control. The service checks them again and owns execution,
+write gates, serialization, and replay handling.
 
-```sh
-updraft ble control --device-id 'PERIPHERAL_ID' preset automatic-105-f-30-percent
-updraft ble control --device-id 'PERIPHERAL_ID' preset timer-one-minute
-updraft ble control --device-id 'PERIPHERAL_ID' preset timer-clear
-```
+The URL is chosen in this order:
 
-| CLI preset | API value | Effect |
+1. `--server URL`
+2. `UPDRAFT_SERVER_URL`
+3. `http://127.0.0.1:8787`
+
+HTTP and HTTPS are supported, including reverse-proxy prefixes such as
+`https://fan.example/updraft`. Credentials, query strings, and fragments in the
+base URL are rejected. TLS certificates are verified. The client disables
+redirects, proxies, and automatic retries. It never falls back to BLE when a
+service request fails. Client commands require no QuickConnect account secrets
+and do not initialize Bluetooth.
+
+The service has no built-in authentication. Use the existing protected HTTP or
+HTTPS deployment; see [deployment](deployment.md). HA `state_source` and
+`command_source` describe entity ownership and do not gate administrative CLI
+access.
+
+`state` returns the service's cached snapshot. Inspect `available`,
+`inventory_status`, `last_error`, and `state.provenance` observation/fetch
+timestamps. An unavailable device with `state: null` is a valid read. This GET
+does not start a fresh physical fan query.
+
+### Controls
+
+The friendly legacy preset names map to the existing API wire values:
+
+| CLI preset | API value | Requested setting |
 | --- | --- | --- |
-| `automatic-105-f-30-percent` | `automatic105_f30_percent` | Set automatic mode, 105.0 °F, and 30.0% humidity |
-| `automatic-105-1-f-30-1-percent` | `automatic105_1_f30_1_percent` | Set automatic mode, 105.1 °F, and 30.1% humidity |
-| `timer-clear` | `timer_clear` | Clear the timer; leave the controller in timer mode |
-| `timer-one-minute` | `timer_one_minute` | Start a one-minute timer |
+| `automatic-105-f-30-percent` | `automatic105_f30_percent` | Automatic, 105.0 °F and 30.0% |
+| `automatic-105-1-f-30-1-percent` | `automatic105_1_f30_1_percent` | Automatic, 105.1 °F and 30.1% |
+| `timer-clear` | `timer_clear` | Clear the timer |
+| `timer-one-minute` | `timer_one_minute` | One-minute timer |
 
-Select an automatic preset to resume automatic operation after clearing a timer.
-The presets are the values tested on the original controller, not recommended
-attic settings. Normal controls do not accept arbitrary thresholds, longer
-Bluetooth timers, or a separate on/off command.
+QuickConnect controls are available only when the selected device advertises
+them and the service's write gate admits them:
 
-## QuickConnect controls
+- `mode`: `off`, `automatic`, `timer`, or `manual`.
+- `targets`: both `--temperature-f` and `--humidity-percent` are required.
+  Temperature must be an integer from 90–120 °F; humidity must be an integer from
+  30–80%.
+- `timer-duration`: 30–360 minutes in 30-minute steps. This sets configured
+  duration, not a remaining countdown.
 
-These work through the service only, when the device advertises the command and
-experimental cloud writes are enabled. Configure the account on the service as
-described in [deployment](deployment.md#quickconnect-experimental).
+The CLI rejects invalid arguments before accessing the transport. Backend
+validation remains authoritative.
 
-Replace `CLOUD_DEVICE_ID` with an ID returned by `devices`:
+### Deadlines and request IDs
 
-```sh
-updraft control CLOUD_DEVICE_ID mode automatic
-updraft control CLOUD_DEVICE_ID targets --temperature-f 105 --humidity-percent 40
-updraft control CLOUD_DEVICE_ID timer-duration 60
-```
+The connection timeout is five seconds. Total discovery/state request deadlines
+default to ten seconds; control defaults to 300 seconds to allow the backend's
+preparation, write, and readback phases. `--timeout-seconds POSITIVE_INTEGER`
+overrides read and control deadlines. It is a client deadline, not a service
+completion guarantee.
 
-| Command | Accepted values |
-| --- | --- |
-| `mode` | `off`, `automatic`, `timer`, `manual` |
-| `targets` | Both flags required: temperature 90–120 °F and humidity 30–80%, integers |
-| `timer-duration` | 30–360 minutes in 30-minute steps |
-
-Setting timer duration saves the duration; it does not activate timer mode or
-report a remaining countdown. These limits come from the reference app's UI;
-live model compatibility is still unverified.
-
-## Direct Bluetooth reads
+Control uses a new UUID by default. `--request-id ID` accepts the same 1–64 ASCII
+letter/digit/underscore/hyphen syntax as local IDs. The Unix-millisecond timestamp
+is generated immediately before the POST, after capability discovery. Global
+options within a command tree work before or after its subcommand, for example:
 
 ```sh
-updraft ble scan
-updraft ble scan --format json
-updraft ble state
-updraft ble state --device-id 'PERIPHERAL_ID' --format json
+updraftctl control configured --format json preset timer-clear --request-id attic-1
+updraftctl control configured preset timer-clear --format json --request-id attic-1
 ```
 
-A scan reads advertisements without connecting. A state command connects and
-queries the fan. Without an ID, `ble state` selects a fan only if discovery finds
-one unambiguous candidate. Direct controls always require an explicit ID.
+Success requires a matching request ID, a successful HTTP status, and the
+backend's `confirmed` outcome. Acknowledgement alone is insufficient. Unknown
+future backend outcomes are retained and count as unconfirmed.
 
-The scan defaults to six seconds. `--scan-seconds` changes it.
-`--timeout-seconds` defaults to three seconds for each Bluetooth operation and
-command response; connection setup and recovery have longer limits. Both values
-must be positive integers. These options and `--format` work throughout the
-`ble` command tree.
+A timeout or lost control response means the outcome is unknown. The output
+retains the request ID; the worker may continue after the CLI exits. Controls
+are sent once and never automatically retried. Reusing an ID relies on the
+running service's bounded, in-memory replay cache. It does not provide durable
+idempotency across service restarts. The service also rejects reuse with
+different command content. Inspect state and the outcome before deciding
+whether to retry.
 
-A partial read preserves decoded values, field errors, and disconnect errors.
-Raw identity bytes are hidden unless you add `--show-identity`; those bytes may
-contain a private identifier. The peripheral ID needed for selection is shown.
-The original controller's `estimated_running` value stays unknown: its fan flag
-is controller state, not a motor or airflow measurement.
-
-## Timeouts and retries
-
-Service discovery and state requests default to a ten-second deadline. Control
-requests default to 300 seconds, allowing time for preparation, the write, and
-readback. Connections have a five-second timeout. Use
-`--timeout-seconds POSITIVE_INTEGER` on a service command to override its read
-or control deadline.
-
-A control gets a new UUID request ID by default. For an explicit ID:
+## Direct Bluetooth
 
 ```sh
-updraft control configured preset timer-clear --request-id attic-1 --format json
+updraftctl ble scan --format json
+updraftctl ble state
+updraftctl ble state --device-id <peripheral-id> --format json
+updraftctl ble control --device-id <peripheral-id> preset timer-clear --format json
+updraftctl ble control --device-id <peripheral-id> preset automatic-105-1-f-30-1-percent
 ```
 
-Request IDs and service device IDs accept 1–64 ASCII letters, digits, underscores,
-or hyphens. The CLI adds the current Unix timestamp immediately before submission.
+`scan` discovers advertisements without connecting or sending protocol requests.
+`state` performs a fresh direct device query. It auto-selects only one
+unambiguous candidate under the existing discovery rules. With multiple
+candidates, supply the platform peripheral ID returned by the scan. Direct
+`control` always requires this ID and exposes exactly the four verified presets
+listed above. It uses the existing transport, identity validation, and readback
+confirmation logic.
 
-A control is successful only when the HTTP status, returned request ID, and
-backend's `confirmed` outcome all agree. A timeout means the outcome is unknown;
-the service worker may continue after the CLI exits. Commands are submitted once.
-Read current state before retrying.
+BLE discovery defaults to six seconds (`--scan-seconds`). Each BLE operation and
+command response defaults to three seconds (`--timeout-seconds`). Both options
+require positive integers; connection setup and recovery retain the existing
+transport-specific limits. These flags and `--format` work within the BLE
+command tree, including after `preset`.
 
-Repeating an ID with the same command can return the running service's cached
-result. Reusing an ID for different command content is rejected. The cache is
-bounded and lost on restart, so it does not prevent duplicate writes across
-service restarts. See the [HTTP API](http-api.md#controls) for details.
+Partial snapshots retain successfully decoded fields, nullable values, field
+errors, control acknowledgement/readback, discovery warnings, and disconnect
+failures. A write with missing or mismatched readback exits unsuccessfully.
+The `controller_fan_on` flag is reported controller state and does not prove
+motor operation or airflow. There is no verified standalone legacy on/off
+command. `estimated_running` stays unknown for legacy BLE.
+
+Raw identity payload bytes are omitted from both text and JSON. Supply
+`--show-identity` to include `identity_payload_hex`; it may contain a private
+device identifier. Peripheral IDs needed for selection are shown by direct BLE
+commands. Service output uses service-local IDs.
+
+The original diagnostic interface remains compatible:
+
+```sh
+updraft probe ble --scan-only
+updraft probe ble --device-id <peripheral-id> --set-auto-thresholds-tenths 1050 300
+updraft probe ble --device-id <peripheral-id> --set-timer-minutes 1
+```
+
+Diagnostic controls accept the existing raw `u16` values. That interface does
+not establish verified hardware limits for arbitrary settings; use the normal
+verified presets for routine BLE control. `serve` retains its existing flags
+and environment variables.
 
 ## Output and exit codes
 
-Text is the default. `--format json` writes one JSON value followed by a newline
-to stdout. Logs and text error diagnostics go to stderr. A closed stdout pipe
-exits cleanly.
+`--format text` is the default. `--format json` emits one complete JSON value
+and a newline on stdout. Tracing logs and text error diagnostics go to stderr.
+Usage errors from clap go to stderr. Closed stdout pipes exit cleanly.
 
-| Exit code | Meaning |
+| Exit | Meaning |
 | --- | --- |
-| 0 | Discovery/read completed, or control confirmed |
-| 1 | Transport or response error, ambiguous/missing Bluetooth target, incomplete direct read, or rejected/unconfirmed control |
-| 2 | Invalid arguments or input |
+| 0 | Completed discovery/read, or confirmed control |
+| 1 | Execution, transport, or contract error; missing/ambiguous direct query target; rejected or unconfirmed control |
+| 2 | Invalid command line or input |
 
-An empty scan or service inventory is successful discovery. Reading an unavailable
-service device also exits 0. A direct read with malformed or missing fields
-returns partial output and exits 1. A disconnect error remains in the output but
-does not invalidate an otherwise complete read or confirmed control.
+An empty scan or device inventory is successful discovery. A service state
+result with `available: false` is a successful read. Direct reads with malformed
+fields or a missing snapshot return partial output with exit 1. A disconnect
+failure remains in the output without invalidating an otherwise complete
+snapshot or confirmed control.
 
-### Service JSON
+### JSON contract
 
-Discovery and state use the [HTTP API shapes](http-api.md). Control includes
-request ID, outcome, and HTTP status:
+Service discovery and state use the [v2 API response shapes](http-api.md).
+Service control retains `request_id` and `status`, adding the HTTP status:
 
 ```json
 {"request_id":"attic-1","status":"confirmed","http_status":200}
 ```
 
-Execution errors use this envelope; unavailable context is `null`:
+Structured control outcomes are preserved even for non-2xx HTTP responses.
+Other execution failures use this envelope; absent context is explicit null:
 
 ```json
 {"error":{"kind":"timeout","message":"control outcome unknown for request attic-1: service request timed out","request_id":"attic-1","http_status":null}}
 ```
 
-Kinds include `configuration`, `timeout`, `transport`, `http`, `response_too_large`,
-`decoding`, `contract`, `correlation`, `unknown_device`, `unsupported_command`,
-`clock`, and `ble`. Structured control outcomes are preserved for non-2xx
-responses too. Responses are limited to two MiB. Additional response fields are
-accepted; missing required fields or inconsistent values are rejected.
+Error kinds include `configuration`, `timeout`, `transport`, `http`,
+`response_too_large`, `decoding`, `contract`, `correlation`, `unknown_device`,
+`unsupported_command`, `clock`, and `ble`. HTTP response bodies are limited to
+two MiB, including declared or streamed error bodies. Incomplete or malformed
+contracts are errors. Additional response fields are accepted; missing required
+fields, invalid identities, and inconsistent state are rejected.
 
-### Bluetooth JSON
+Direct BLE uses a `status` discriminator:
 
-The `status` field is `no_devices`, `discovered`, `ambiguous`,
-`discovery_incomplete`, or `queried`. Discovery results include `devices`; a query
-includes `device` and `query`. Each device has `peripheral_id`, nullable `name`,
-and nullable `rssi_dbm`.
+- `no_devices`
+- `discovered`, with `devices`
+- `ambiguous`, with `devices`
+- `discovery_incomplete`, with `devices` and `failures`
+- `queried`, with `device` and `query`
 
-`query` contains nullable normalized `state`, `field_errors`, nullable `control`,
-nullable `state_error`, `discovery_failures`, and a `disconnect` outcome. Control
-includes acknowledgement and readback results; `confirmed` is true only if the
-required checks passed. `identity_payload_hex` appears only with `--show-identity`.
+Each device contains `peripheral_id`, nullable `name`, and nullable `rssi_dbm`.
+Discovery failures contain `peripheral_id` and `message`. A `query` contains:
 
-## Diagnostic probe
+- Nullable `state` using normalized v2 settings, diagnostics, and provenance.
+- `field_errors` with `field` and `message`.
+- Nullable `control` with `confirmed`, `acknowledgement` (`accepted` or
+  `unrecognized`), `readback`, and `mode_readback`. Each readback has `status`
+  and `message`; statuses are `matches`, `differs`, `decode_error`, `unavailable`,
+  `fan_flag_differs`, or `unverified_timer_expiry` as applicable.
+- Nullable `state_error` and an array of `discovery_failures`.
+- `disconnect` with `status: disconnected`, or `status: failed` and `message`.
+- `identity_payload_hex` only with the identity opt-in.
 
-The older probe commands remain available:
-
-```sh
-updraft probe ble --scan-only
-updraft probe ble --device-id 'PERIPHERAL_ID' --set-auto-thresholds-tenths 1050 300
-updraft probe ble --device-id 'PERIPHERAL_ID' --set-timer-minutes 1
-```
-
-The threshold values use tenths of °F and percent. This interface accepts raw
-`u16` settings whose general hardware range is unknown. Use the normal presets
-for routine control. It does not update firmware.
-
-## Completions and Rust client
+## Completions and reusable Rust client
 
 ```sh
-updraft completions bash > updraft.bash
-updraft completions zsh > _updraft
-updraft completions fish > updraft.fish
+updraftctl completions bash > updraftctl.bash
+updraftctl completions zsh > _updraftctl
+updraftctl completions fish > updraftctl.fish
 ```
 
-Elvish and PowerShell are also supported. Completion generation does not connect
-to the network or Bluetooth.
+Completions are generated from the same clap command definition without network
+or Bluetooth initialization. Elvish and PowerShell are also supported.
 
-Rust applications can use `updraft-client::Client`, `ServerUrl`, and
-`ClientOptions`. `devices` and `state` return `updraft-api` models.
-`prepare_control` checks capabilities and returns a `PreparedControl`; `submit`
-sends it once. `ControlResult::Confirmed` is constructed only after HTTP status,
-request correlation, and backend confirmation checks.
+Rust callers can use `updraft-client::Client` with `ServerUrl` and
+`ClientOptions`. `devices` and `state` return shared `updraft-api` models.
+`prepare_control` resolves capabilities and returns a `PreparedControl` intent;
+consuming `submit` sends it once. A `ControlResult::Confirmed` contains a private
+`ConfirmedControl` value constructed only after HTTP, correlation, and backend
+confirmation checks. Libraries do not depend on clap, MQTT, the BLE runtime,
+or service handlers.
+
+Automated tests use local HTTP servers and the existing fake BLE transports.
+They establish software behavior; this change adds no physical device acceptance
+claim.

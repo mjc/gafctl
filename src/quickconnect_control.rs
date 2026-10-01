@@ -4,7 +4,7 @@ use std::{
         Arc,
         atomic::{AtomicBool, Ordering},
     },
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime},
 };
 
 use futures_util::{StreamExt, stream};
@@ -19,6 +19,7 @@ use updraft_quickconnect::{
 
 use crate::{
     backend::{DeviceRegistry, DeviceRuntime},
+    control::unix_millis,
     device::DeviceId,
 };
 
@@ -475,12 +476,6 @@ impl QuickConnectControlService {
 struct ReadbackProgress {
     matched: bool,
     state: Option<updraft_quickconnect::QuickConnectDeviceState>,
-}
-
-fn unix_millis(time: SystemTime) -> Option<u64> {
-    time.duration_since(UNIX_EPOCH)
-        .ok()
-        .and_then(|duration| u64::try_from(duration.as_millis()).ok())
 }
 
 fn fresh_state(state: &updraft_quickconnect::QuickConnectDeviceState) -> bool {

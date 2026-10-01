@@ -1,7 +1,6 @@
 use std::time::Duration;
 use std::{net::SocketAddr, path::PathBuf};
 
-use crate::cli_client::{BleCommand, ControlOptions, ServiceOptions, StateOptions};
 use anyhow::{Context, Result, bail};
 use clap::{Args, CommandFactory, Parser, Subcommand};
 use std::process::ExitCode;
@@ -24,14 +23,6 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
-    /// List registered devices on a running Updraft service.
-    Devices(ServiceOptions),
-    /// Read a device's cached service snapshot, including availability and timestamps.
-    State(StateOptions),
-    /// Issue a supported control through the running service's transaction owner.
-    Control(ControlOptions),
-    /// Scan, read, or control a fan directly over Bluetooth.
-    Ble(BleCommand),
     /// Generate shell completions without connecting to any transport.
     Completions { shell: clap_complete::Shell },
     /// Inspect the GAF Wi-Fi Vent over a device transport.
@@ -59,6 +50,7 @@ struct ServeOptions {
     allow_remote: bool,
 
     /// MQTT broker host. When set, publish retained state and availability.
+    #[cfg(feature = "mqtt")]
     #[arg(
         long,
         env = "UPDRAFT_MQTT_HOST",
@@ -68,10 +60,12 @@ struct ServeOptions {
     mqtt_host: Option<String>,
 
     /// MQTT broker port.
+    #[cfg(feature = "mqtt")]
     #[arg(long, env = "UPDRAFT_MQTT_PORT", default_value_t = 1883)]
     mqtt_port: u16,
 
     /// MQTT username. Required with --mqtt-host.
+    #[cfg(feature = "mqtt")]
     #[arg(
         long,
         env = "UPDRAFT_MQTT_USERNAME",
@@ -81,6 +75,7 @@ struct ServeOptions {
     mqtt_username: Option<String>,
 
     /// Publish Home Assistant MQTT discovery. Choose this instead of the HTTP integration to avoid duplicate entities.
+    #[cfg(feature = "mqtt")]
     #[arg(long, env = "UPDRAFT_MQTT_DISCOVERY", requires = "mqtt_host")]
     mqtt_discovery: bool,
 
@@ -195,10 +190,6 @@ pub(crate) async fn run() -> Result<ExitCode> {
     let cli = Cli::parse();
     tracing::debug!("running CLI command");
     match cli.command {
-        Command::Devices(options) => options.devices().await,
-        Command::State(options) => options.run().await,
-        Command::Control(options) => options.run().await,
-        Command::Ble(options) => options.run().await,
         Command::Completions { shell } => {
             let mut completions = Vec::new();
             clap_complete::generate(shell, &mut Cli::command(), "updraft", &mut completions);
@@ -214,12 +205,12 @@ pub(crate) async fn run() -> Result<ExitCode> {
 
 impl ServeOptions {
     async fn run(self) -> Result<()> {
-        let mqtt_password = read_mqtt_password()?;
+        #[cfg(feature = "mqtt")]
         let mqtt_config = mqtt_config(
             self.mqtt_host,
             self.mqtt_port,
             self.mqtt_username,
-            mqtt_password,
+            read_mqtt_password()?,
             self.mqtt_discovery,
         )?;
         let quickconnect_config =
@@ -233,6 +224,7 @@ impl ServeOptions {
             self.identity_store,
             self.bind,
             self.allow_remote,
+            #[cfg(feature = "mqtt")]
             mqtt_config,
             quickconnect_config,
         )
@@ -338,6 +330,7 @@ fn read_private_secret(path: &std::path::Path) -> Result<String> {
     Ok(password.to_owned())
 }
 
+#[cfg(feature = "mqtt")]
 fn read_mqtt_password() -> Result<Option<String>> {
     match std::env::var("UPDRAFT_MQTT_PASSWORD") {
         Ok(password) => Ok(Some(password)),
@@ -348,6 +341,7 @@ fn read_mqtt_password() -> Result<Option<String>> {
     }
 }
 
+#[cfg(feature = "mqtt")]
 fn mqtt_config(
     host: Option<String>,
     port: u16,
@@ -586,6 +580,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "mqtt")]
     fn serve_keeps_http_pull_and_allows_mqtt_push_together() {
         let cli = Cli::try_parse_from([
             "updraft",
@@ -613,6 +608,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "mqtt")]
     fn empty_mqtt_host_environment_is_rejected() {
         let output = std::process::Command::new(std::env::current_exe().unwrap())
             .args([
@@ -635,6 +631,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "mqtt")]
     fn empty_mqtt_host_environment_child() {
         if std::env::var_os("UPDRAFT_TEST_EMPTY_MQTT_HOST").is_none() {
             return;
@@ -646,6 +643,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "mqtt")]
     fn mqtt_password_is_not_in_cli_debug_output() {
         let output = std::process::Command::new(std::env::current_exe().unwrap())
             .args([
@@ -668,6 +666,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "mqtt")]
     fn mqtt_password_debug_child() {
         if std::env::var_os("UPDRAFT_TEST_MQTT_PASSWORD_DEBUG").is_none() {
             return;
@@ -679,6 +678,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "mqtt")]
     fn serve_requires_both_mqtt_credentials_when_push_is_enabled() {
         assert!(
             mqtt_config(
@@ -693,6 +693,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "mqtt")]
     fn mqtt_discovery_cannot_be_enabled_without_broker_credentials() {
         assert!(mqtt_config(None, 1883, None, None, true).is_err());
         assert!(
@@ -703,6 +704,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "mqtt")]
     fn mqtt_discovery_can_be_selected_with_broker_credentials() {
         let config = mqtt_config(
             Some("192.168.1.5".into()),

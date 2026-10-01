@@ -37,23 +37,24 @@ then run:
 git clone https://github.com/mjc/updraft.git
 cd updraft
 devenv allow
-devenv shell -- cargo build --release --locked
+devenv shell -- cargo build --release --features cli --locked
 ```
 
-The executable is `target/release/updraft`. The examples below use that path
-from the repository root. On Linux, install and start BlueZ using your
+This builds the `updraft` service and the separate `updraftctl` control CLI. The
+examples below use `target/release/updraft` and `target/release/updraftctl` from
+the repository root. A service-only build can omit `--features cli`. On Linux, install and start BlueZ using your
 distribution's package manager. On macOS, allow Bluetooth access if prompted.
 
 ## Find your fan
 
 ```sh
-./target/release/updraft ble scan
+./target/release/updraftctl ble scan
 ```
 
 Copy the fan's peripheral ID from the output, then read its state:
 
 ```sh
-./target/release/updraft ble state --device-id 'PERIPHERAL_ID'
+./target/release/updraftctl ble state --device-id 'PERIPHERAL_ID'
 ```
 
 Replace `PERIPHERAL_ID` with the ID from the scan. It is a platform-specific
@@ -130,16 +131,15 @@ MQTT discovery is an alternative to the HTTP integration. Use the
 With the service running:
 
 ```sh
-./target/release/updraft devices
-./target/release/updraft state configured
-./target/release/updraft control configured preset automatic-105-f-30-percent
+./target/release/updraftctl devices
+./target/release/updraftctl state configured
+./target/release/updraftctl control configured preset automatic-105-f-30-percent
 ```
 
-For a remote service, add `--server http://UPDRAFT_HOST:8787`. To control the fan
-directly over Bluetooth:
+For a remote service, add `--server http://UPDRAFT_HOST:8787`. The separate `updraftctl` binary can also control the fan directly over Bluetooth:
 
 ```sh
-./target/release/updraft ble control --device-id 'PERIPHERAL_ID' preset timer-one-minute
+./target/release/updraftctl ble control --device-id 'PERIPHERAL_ID' preset timer-one-minute
 ```
 
 Add `--format json` for scripts. See the [command line guide](docs/cli.md) for
