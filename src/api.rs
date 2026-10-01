@@ -30,7 +30,9 @@ use updraft_bluetooth::{
     ProbeResult, QueryResult,
 };
 use updraft_protocol::{DeviceSnapshot, StateFreshness, StateReconciler};
-use updraft_quickconnect::{QuickConnectCommand, QuickConnectCommandMode};
+use updraft_quickconnect::{
+    QuickConnectClient, QuickConnectCommand, QuickConnectCommandMode, QuickConnectConfig,
+};
 
 use crate::quickconnect_control::{
     QuickConnectControlIntent, QuickConnectControlService, QuickConnectControlStatus,
@@ -47,7 +49,14 @@ struct ApiState {
     mqtt_updates: Option<watch::Sender<Arc<crate::mqtt::MqttStateSnapshot>>>,
     mqtt_discovery_enabled: bool,
     quickconnect_control: Option<QuickConnectControlService>,
+    quickconnect_runtime: Option<QuickConnectRuntime>,
     v2_control_results: Arc<tokio::sync::Mutex<RecentV2ControlResults>>,
+}
+
+#[derive(Clone)]
+struct QuickConnectRuntime {
+    account_id: String,
+    client: QuickConnectClient,
 }
 
 struct LegacyBleRuntime {
@@ -66,6 +75,7 @@ impl ApiState {
             mqtt_updates: None,
             mqtt_discovery_enabled: false,
             quickconnect_control: None,
+            quickconnect_runtime: None,
             v2_control_results: Arc::default(),
         }
     }
@@ -86,6 +96,7 @@ impl ApiState {
             mqtt_updates: None,
             mqtt_discovery_enabled: false,
             quickconnect_control: None,
+            quickconnect_runtime: None,
             v2_control_results: Arc::default(),
         }
     }
@@ -107,6 +118,60 @@ impl ApiState {
         } else {
             self.publish_state().await;
         }
+    }
+
+    async fn start_quickconnect(
+        &mut self,
+        config: crate::cli::QuickConnectRuntimeConfig,
+    ) -> Result<()> {
+        let client = QuickConnectClient::new(config.credentials, QuickConnectConfig::production()?)
+            .context("could not configure QuickConnect client")?;
+        self.registry
+            .write()
+            .await
+            .set_quickconnect_writes_enabled(config.writes_enabled);
+        self.quickconnect_control = Some(QuickConnectControlService::new(
+            Arc::clone(&self.registry),
+            client.clone(),
+            config.account_id.clone(),
+            crate::quickconnect_control::QuickConnectControlPolicy::default(),
+        ));
+        self.quickconnect_runtime = Some(QuickConnectRuntime {
+            account_id: config.account_id,
+            client,
+        });
+        Ok(())
+    }
+
+    async fn poll_quickconnect(&self) {
+        let Some(runtime) = self.quickconnect_runtime.clone() else {
+            return;
+        };
+        let generations = self
+            .registry
+            .read()
+            .await
+            .begin_quickconnect_poll(&runtime.account_id);
+        let polls = runtime.client.poll_devices().await;
+        let mut registry = self.registry.write().await;
+        let result = match polls {
+            Ok(polls) => {
+                registry
+                    .reconcile_quickconnect_polls(&runtime.account_id, polls, &generations)
+                    .await
+            }
+            Err(error) => {
+                registry
+                    .mark_quickconnect_inventory_unavailable(&runtime.account_id, &generations)
+                    .await;
+                Err(error.into())
+            }
+        };
+        drop(registry);
+        if let Err(error) = result {
+            tracing::warn!(error = %error, "QuickConnect polling failed");
+        }
+        self.publish_state().await;
     }
 
     async fn start_mqtt(&mut self, config: crate::mqtt::MqttConfig) -> Result<()> {
@@ -389,6 +454,7 @@ pub(crate) async fn serve(
     address: SocketAddr,
     allow_remote: bool,
     mqtt_config: Option<crate::mqtt::MqttConfig>,
+    quickconnect_config: Option<crate::cli::QuickConnectRuntimeConfig>,
 ) -> Result<()> {
     validate_bind_address(address, allow_remote)?;
     let listener = TcpListener::bind(address)
@@ -400,12 +466,20 @@ pub(crate) async fn serve(
         Some(device_id) => ApiState::with_ble_device(DEFAULT_FRESHNESS_LIMIT, device_id, registry),
         None => ApiState::with_registry(registry),
     };
+    if let Some(config) = quickconnect_config {
+        state.start_quickconnect(config).await?;
+    }
     if let Some(config) = mqtt_config {
         state.start_mqtt(config).await?;
     }
     let app = router(state.clone());
-    if state_polling_enabled(&state) {
-        tokio::spawn(poll_device(state, DEFAULT_POLL_INTERVAL));
+    let poll_state = state_polling_enabled(&state);
+    let poll_quickconnect = quickconnect_polling_enabled(&state);
+    if poll_state {
+        tokio::spawn(poll_device(state.clone(), DEFAULT_POLL_INTERVAL));
+    }
+    if poll_quickconnect {
+        tokio::spawn(poll_quickconnect_device(state, DEFAULT_POLL_INTERVAL));
     }
 
     tracing::info!(%address, "Updraft API listening");
@@ -416,6 +490,10 @@ pub(crate) async fn serve(
 
 fn state_polling_enabled(state: &ApiState) -> bool {
     state.ble_device.is_some() || state.mqtt_updates.is_some()
+}
+
+fn quickconnect_polling_enabled(state: &ApiState) -> bool {
+    state.quickconnect_runtime.is_some()
 }
 
 fn validate_bind_address(address: SocketAddr, allow_remote: bool) -> Result<()> {
@@ -1005,6 +1083,12 @@ fn project_legacy_snapshot(snapshot: &DeviceSnapshot) -> Option<LegacyStateProje
 async fn poll_device(state: ApiState, poll_interval: Duration) {
     poll_ticks(poll_interval)
         .for_each(|()| state.poll_and_publish_state())
+        .await;
+}
+
+async fn poll_quickconnect_device(state: ApiState, poll_interval: Duration) {
+    poll_ticks(poll_interval)
+        .for_each(|()| state.poll_quickconnect())
         .await;
 }
 

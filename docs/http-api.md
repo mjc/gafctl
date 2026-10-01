@@ -82,7 +82,7 @@ Legacy preset values are `automatic105_f30_percent`, `automatic105_1_f30_1_perce
 {"kind":"quick_connect_timer_duration","minutes":90}
 ```
 
-Each device must advertise the matching capability before a request reaches its backend. QuickConnect devices remain read-only in the server's current runtime setup; unsupported controls return `422`. If a future runtime advertises cloud-write capabilities without an available control service, the API returns `503`.
+Each device must advertise the matching capability before a request reaches its backend. QuickConnect cloud controls remain disabled by default and require configured account credentials plus the explicit write gate; unsupported controls return `422`. If cloud-write capabilities are enabled without an available control service, the API returns `503`.
 
 Requests older than 30 seconds or more than five seconds in the future are rejected. Reusing a request ID with the same device and command returns the cached result; reusing it for a different command returns `request_id_reused`. Replay results are retained in a bounded in-memory cache.
 

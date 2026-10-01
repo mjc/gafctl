@@ -425,8 +425,21 @@ impl DeviceRegistry {
         account_id: &str,
         client: &updraft_quickconnect::QuickConnectClient,
     ) -> Result<Vec<DeviceId>, QuickConnectPollingError> {
-        let generations = self
-            .identities
+        let generations = self.begin_quickconnect_poll(account_id);
+        let polls = match client.poll_devices().await {
+            Ok(polls) => polls,
+            Err(error) => {
+                self.mark_quickconnect_inventory_unavailable(account_id, &generations)
+                    .await;
+                return Err(error.into());
+            }
+        };
+        self.reconcile_quickconnect_polls(account_id, polls, &generations)
+            .await
+    }
+
+    pub fn begin_quickconnect_poll(&self, account_id: &str) -> BTreeMap<DeviceId, u64> {
+        self.identities
             .bindings
             .iter()
             .filter(|binding| binding.identity.account_id == account_id)
@@ -434,15 +447,15 @@ impl DeviceRegistry {
                 self.runtime(&binding.local_id)
                     .map(|runtime| (binding.local_id.clone(), runtime.begin_state_read()))
             })
-            .collect::<BTreeMap<_, _>>();
-        let polls = match client.poll_devices().await {
-            Ok(polls) => polls,
-            Err(error) => {
-                self.mark_account_inventory_unavailable(account_id, &generations)
-                    .await;
-                return Err(error.into());
-            }
-        };
+            .collect()
+    }
+
+    pub async fn reconcile_quickconnect_polls(
+        &mut self,
+        account_id: &str,
+        polls: Vec<updraft_quickconnect::QuickConnectDevicePoll>,
+        generations: &BTreeMap<DeviceId, u64>,
+    ) -> Result<Vec<DeviceId>, QuickConnectPollingError> {
         let inputs = polls
             .iter()
             .map(|poll| {
@@ -458,7 +471,7 @@ impl DeviceRegistry {
         let ids = match self.reconcile_quickconnect(account_id, &inputs) {
             Ok(ids) => ids,
             Err(error) => {
-                self.mark_account_inventory_unavailable(account_id, &generations)
+                self.mark_quickconnect_inventory_unavailable(account_id, generations)
                     .await;
                 return Err(error.into());
             }
@@ -516,7 +529,7 @@ impl DeviceRegistry {
         Ok(ids)
     }
 
-    async fn mark_account_inventory_unavailable(
+    pub async fn mark_quickconnect_inventory_unavailable(
         &self,
         account_id: &str,
         generations: &BTreeMap<DeviceId, u64>,

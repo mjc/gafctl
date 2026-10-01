@@ -15,7 +15,15 @@ The executable is `target/release/updraft`.
 
 To enable the BLE backend, set `UPDRAFT_DEVICE_ID` or pass `--device-id` in local service configuration. Keep the peripheral identifier out of tracked files. Without a BLE identifier the service starts with an empty inventory. The v2 state and control routes return 404 for unregistered local IDs. See the [HTTP API](http-api.md) for request and response schemas.
 
-Set `UPDRAFT_IDENTITY_STORE` to a private local path when persisting cloud account/provider identity mappings. Newly created identity files use owner-only permissions. This setting alone does not enable cloud authentication or polling. Cloud credentials and provider identifiers must remain in local configuration, not tracked files or public API payloads.
+Set `UPDRAFT_IDENTITY_STORE` to a private local path whenever QuickConnect is configured. QuickConnect startup requires this persistent identity store so cloud devices keep stable Home Assistant identities across restarts. Newly created identity files use owner-only permissions. This setting alone does not enable cloud authentication or polling. Cloud credentials and provider identifiers must remain in local configuration, not tracked files or public API payloads.
+
+QuickConnect is optional. Without `UPDRAFT_QUICKCONNECT_USERNAME` and exactly one of `UPDRAFT_QUICKCONNECT_PASSWORD` or `UPDRAFT_QUICKCONNECT_PASSWORD_FILE`, no cloud login or polling is started. The account role defaults to `contractor`; set `UPDRAFT_QUICKCONNECT_ROLE=consumer` for a consumer account. The username and role scope the private identity mapping, so keep the identity store writable only by the service account.
+
+Prefer a service-manager credential file. The password file must be a regular file with no group or other permissions; systemd credentials with owner-only permissions are accepted. Direct `UPDRAFT_QUICKCONNECT_PASSWORD` is supported for secret managers that inject service environment variables. Never use a command-line password argument. Passwords are redacted from `Credentials` debug output, and account/provider identifiers stay out of API entities.
+
+QuickConnect writes remain disabled unless `UPDRAFT_QUICKCONNECT_WRITES_ENABLED=true` or `--quickconnect-writes-enabled` is explicitly set. Keep that gate off until field acceptance authorizes cloud writes. Read-only inventory and state polling do not require the write gate. BLE device ID is optional for cloud-only mode; configure it for BLE-only or mixed mode.
+
+In a systemd service, load the username and password with `LoadCredential`, export the username from its credential path, and set `UPDRAFT_QUICKCONNECT_PASSWORD_FILE` to the systemd credential path for the password. Keep BLE and QuickConnect credential loading independently optional so cloud-only startup does not require `UPDRAFT_DEVICE_ID`. The shared NixOS service defaults QuickConnect off and its write gate off; its package uses the locked source revision and preserves the local identity store across restarts.
 
 The HTTP API binds to loopback by default. Use `--allow-remote` only when the service is protected by appropriate network controls or an authenticated reverse proxy. The API has no built-in authentication.
 
@@ -49,6 +57,8 @@ Updraft's account must not publish commands, and Home Assistant's account must n
 
 HTTP v2 state includes availability, inventory status, optional measurements and settings, diagnostics, and state provenance. `/health` reports process health only; it does not confirm device availability.
 
+When QuickConnect is enabled, Updraft starts serving HTTP and MQTT immediately and polls the account independently at the normal state interval. A slow or failed cloud request does not delay BLE polling. Failed login or inventory reads leave the service running, mark that account's current devices unavailable, and retry on the next poll. Persist the identity map so a service restart or reordered cloud inventory does not assign an existing Home Assistant local ID to another device.
+
 MQTT publishes retained state and per-device availability at `updraft/{local-id}/state` and `updraft/{local-id}/availability`. Process availability has its own retained last-will topic, `updraft/availability`; it does not replace any device's availability. On reconnect, Updraft republishes discovery when enabled and the latest state for every registered device. The old `updraft/gaf_vent/...` topics remain aliases for the configured BLE device.
 
 ## Controls
@@ -66,5 +76,7 @@ Per-device MQTT results include the request ID and outcome and are non-retained.
 Run `devenv tasks run check:all` for formatting, Clippy, Rust tests, and doctests. Broker configuration checks and deployed-service checks are separate.
 
 After deployment, verify the process health endpoint, fresh device state, broker availability, one selected Home Assistant entity source, reconnect behavior, and control acknowledgement/readback. Record deployment-specific values in a private operations log.
+
+To rotate a QuickConnect credential, stop Updraft, replace the service-manager secret file, and restart it. A successful login and fresh device state confirm recovery. For a revoked account, restore account access with the provider, confirm the configured role, replace the secret, and restart; do not delete the identity map as a login-recovery step. If the cloud service or Internet is unavailable, keep the process running and treat the QuickConnect entities as unavailable. BLE polling and MQTT process availability remain independent. On recovery, Updraft polls fresh state; it does not queue or replay an old control request. To roll back a release, stop the service, restore the last known-good package, and restart without changing the identity map or device settings.
 
 To upgrade, stop the service, install a build from the selected revision, and restart it. To roll back, restore the last known-good build. Home Assistant keeps HTTP integration configuration; MQTT discovery, state, and availability are stored by the broker.
