@@ -13,6 +13,7 @@ use axum::{
     http::StatusCode,
     routing::{get, post},
 };
+use futures_util::{StreamExt, stream};
 use serde::{Deserialize, Serialize};
 use tokio::{
     net::TcpListener,
@@ -370,34 +371,42 @@ impl RecentControlResults {
 
 async fn process_mqtt_controls(
     state: ApiState,
-    mut controls: mpsc::Receiver<crate::mqtt::MqttControlWork>,
+    controls: mpsc::Receiver<crate::mqtt::MqttControlWork>,
 ) {
-    let mut recent = RecentControlResults::default();
-    while let Some(work) = controls.recv().await {
-        let preset = work.request.preset();
-        let fresh = unix_millis(SystemTime::now())
-            .is_some_and(|now_unix_ms| work.request.is_fresh_at(now_unix_ms));
-        if !fresh {
-            let _ = work.reply.send(Arc::new(ControlResponse::rejected(
-                preset,
-                "stale or future-dated control request",
-            )));
-            continue;
-        }
-        let response = match recent.get(work.request.request_id(), preset) {
-            Some(response) => response,
-            None => {
-                let response = Arc::new(state.execute_mqtt_control(&work.request).await);
-                recent.insert(
-                    work.request.request_id().clone(),
+    stream::unfold(controls, |mut controls| async move {
+        let work = controls.recv().await?;
+        Some((work, controls))
+    })
+    .fold(RecentControlResults::default(), |mut recent, work| {
+        let state = &state;
+        async move {
+            let preset = work.request.preset();
+            let fresh = unix_millis(SystemTime::now())
+                .is_some_and(|now_unix_ms| work.request.is_fresh_at(now_unix_ms));
+            if !fresh {
+                let _ = work.reply.send(Arc::new(ControlResponse::rejected(
                     preset,
-                    Arc::clone(&response),
-                );
-                response
+                    "stale or future-dated control request",
+                )));
+                return recent;
             }
-        };
-        let _ = work.reply.send(response);
-    }
+            let response = match recent.get(work.request.request_id(), preset) {
+                Some(response) => response,
+                None => {
+                    let response = Arc::new(state.execute_mqtt_control(&work.request).await);
+                    recent.insert(
+                        work.request.request_id().clone(),
+                        preset,
+                        Arc::clone(&response),
+                    );
+                    response
+                }
+            };
+            let _ = work.reply.send(response);
+            recent
+        }
+    })
+    .await;
 }
 
 async fn device_state(State(state): State<ApiState>) -> Json<DeviceStateResponse> {
@@ -497,8 +506,11 @@ impl StateValues {
 async fn poll_device(state: ApiState, poll_interval: Duration) {
     let mut ticker = interval(poll_interval);
     ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
-    loop {
+    stream::unfold(ticker, |mut ticker| async move {
         ticker.tick().await;
+        Some(((), ticker))
+    })
+    .for_each(|()| async {
         let _ble_guard = state.ble_lock.lock().await;
         let poll_id = state.reconciler.write().await.begin_poll();
         let result = state.probe(None).await;
@@ -547,7 +559,8 @@ async fn poll_device(state: ApiState, poll_interval: Duration) {
             }
         }
         state.publish_state().await;
-    }
+    })
+    .await;
 }
 
 const fn freshness_name(freshness: StateFreshness) -> &'static str {
@@ -731,7 +744,7 @@ mod tests {
         assert!(!changed.success);
         assert_eq!(changed.message, "request_id was reused for another preset");
 
-        for index in 0..=CONTROL_REPLAY_CAPACITY {
+        (0..=CONTROL_REPLAY_CAPACITY).for_each(|index| {
             recent.insert(
                 CommandId::parse(&format!("command-{index}")).unwrap(),
                 ControlPreset::TimerClear,
@@ -740,7 +753,7 @@ mod tests {
                     "not confirmed",
                 )),
             );
-        }
+        });
         assert!(recent.0.len() <= CONTROL_REPLAY_CAPACITY);
     }
 

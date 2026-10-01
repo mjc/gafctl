@@ -49,6 +49,7 @@ rumqttc = { version = "0.25.1", default-features = false }
 uuid = "1.26.1"
 
 [dependencies]
+futures-util.workspace = true
 anyhow.workspace = true
 axum.workspace = true
 clap.workspace = true

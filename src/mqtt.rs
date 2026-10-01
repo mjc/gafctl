@@ -7,6 +7,7 @@ use crate::{
     api::ControlResponse,
     control::{CommandId, ControlPreset, ControlRequest, FreshControlRequest, unix_millis},
 };
+use futures_util::{StreamExt, future, stream};
 use rumqttc::{AsyncClient, Event, EventLoop, LastWill, MqttOptions, Packet, Publish, QoS};
 use serde::Serialize;
 use serde_json::{Value, json};
@@ -111,13 +112,16 @@ pub(crate) fn start(config: MqttConfig, initial_state: String) -> MqttBridge {
 
 async fn setup_connection(
     client: AsyncClient,
-    mut connected: watch::Receiver<bool>,
+    connected: watch::Receiver<bool>,
     discovery_enabled: bool,
 ) {
-    while connected.changed().await.is_ok() {
-        if !*connected.borrow_and_update() {
-            continue;
-        }
+    stream::unfold(connected, |mut connected| async move {
+        connected.changed().await.ok()?;
+        let active = *connected.borrow_and_update();
+        Some((active, connected))
+    })
+    .filter(|active| future::ready(*active))
+    .for_each(|_| async {
         if let Err(error) = client
             .subscribe(CONTROL_REQUEST_TOPIC, QoS::AtLeastOnce)
             .await
@@ -130,18 +134,23 @@ async fn setup_connection(
             clear_discovery(&client).await;
         }
         publish(&client, AVAILABILITY_TOPIC, "online").await;
-    }
+    })
+    .await;
 }
 
 async fn run_event_loop(
-    mut eventloop: EventLoop,
+    eventloop: EventLoop,
     client: AsyncClient,
     connected: watch::Sender<bool>,
     controls: mpsc::Sender<MqttControlWork>,
 ) {
     let pending_results = Arc::new(Semaphore::new(MAX_PENDING_CONTROL_RESULTS));
-    loop {
-        match eventloop.poll().await {
+    stream::unfold(eventloop, |mut eventloop| async move {
+        let event = eventloop.poll().await;
+        Some((event, eventloop))
+    })
+    .for_each(|event| async {
+        match event {
             Ok(Event::Incoming(Packet::ConnAck(_))) => {
                 connected.send_replace(true);
             }
@@ -157,28 +166,34 @@ async fn run_event_loop(
                 sleep(Duration::from_secs(1)).await;
             }
         }
-    }
+    })
+    .await;
 }
 
 async fn publish_state_updates(
     client: AsyncClient,
-    mut state: watch::Receiver<Arc<String>>,
-    mut connected: watch::Receiver<bool>,
+    state: watch::Receiver<Arc<String>>,
+    connected: watch::Receiver<bool>,
 ) {
-    loop {
-        let changed = tokio::select! {
-            changed = state.changed() => changed,
-            changed = connected.changed() => changed,
-        };
-        if changed.is_err() {
-            return;
-        }
-        if !*connected.borrow_and_update() {
-            continue;
-        }
-        let payload = Arc::clone(&*state.borrow_and_update());
-        publish(&client, STATE_TOPIC, &payload).await;
-    }
+    stream::unfold(
+        (state, connected),
+        |(mut state, mut connected)| async move {
+            tokio::select! {
+                changed = state.changed() => changed,
+                changed = connected.changed() => changed,
+            }
+            .ok()?;
+            let active = *connected.borrow_and_update();
+            let payload = active.then(|| Arc::clone(&*state.borrow_and_update()));
+            Some((payload, (state, connected)))
+        },
+    )
+    .filter_map(future::ready)
+    .for_each(|payload| {
+        let client = &client;
+        async move { publish(client, STATE_TOPIC, &payload).await }
+    })
+    .await;
 }
 
 fn dispatch_control(
@@ -317,29 +332,34 @@ fn control_acknowledgement_payload(
 }
 
 async fn publish_discovery(client: &AsyncClient) {
-    for (topic, config) in discovery_configs() {
-        let payload = serde_json::to_vec(&config);
-        drop(config);
-        match payload {
-            Ok(payload) => {
-                if let Err(error) = client.publish(topic, QoS::AtLeastOnce, true, payload).await {
-                    tracing::warn!(%error, "could not queue MQTT discovery config");
+    stream::iter(discovery_configs())
+        .for_each(|(topic, config)| async move {
+            let payload = serde_json::to_vec(&config);
+            drop(config);
+            match payload {
+                Ok(payload) => {
+                    if let Err(error) = client.publish(topic, QoS::AtLeastOnce, true, payload).await
+                    {
+                        tracing::warn!(%error, "could not queue MQTT discovery config");
+                    }
                 }
+                Err(error) => tracing::error!(%error, "could not serialize MQTT discovery config"),
             }
-            Err(error) => tracing::error!(%error, "could not serialize MQTT discovery config"),
-        }
-    }
+        })
+        .await;
 }
 
 async fn clear_discovery(client: &AsyncClient) {
-    for topic in discovery_tombstones() {
-        if let Err(error) = client
-            .publish(topic, QoS::AtLeastOnce, true, Vec::new())
-            .await
-        {
-            tracing::warn!(%error, "could not clear retained MQTT discovery config");
-        }
-    }
+    stream::iter(discovery_tombstones())
+        .for_each(|topic| async move {
+            if let Err(error) = client
+                .publish(topic, QoS::AtLeastOnce, true, Vec::new())
+                .await
+            {
+                tracing::warn!(%error, "could not clear retained MQTT discovery config");
+            }
+        })
+        .await;
 }
 
 fn discovery_tombstones() -> impl Iterator<Item = &'static str> {
@@ -633,7 +653,7 @@ mod tests {
     #[tokio::test]
     async fn stalled_result_publication_bounds_accepted_controls() {
         let (client, eventloop) = AsyncClient::new(MqttOptions::new("test", "localhost", 1883), 1);
-        let (controls, mut queued) = mpsc::channel(CONTROL_QUEUE_CAPACITY);
+        let (controls, queued) = mpsc::channel(CONTROL_QUEUE_CAPACITY);
         let pending = Arc::new(Semaphore::new(2));
         let request = |index| {
             Publish::new(
@@ -649,19 +669,26 @@ mod tests {
         };
 
         // One result fills the MQTT queue; two more wait for publication.
-        for index in 0..3 {
-            dispatch_control(&client, &controls, &pending, request(index));
-            let work = queued.try_recv().expect("control should be accepted");
-            assert!(
-                work.reply
-                    .send(Arc::new(ControlResponse::rejected(
-                        work.request.preset(),
-                        "test result",
-                    )))
-                    .is_ok()
-            );
-            tokio::task::yield_now().await;
-        }
+        let mut queued = stream::iter(0..3)
+            .fold(queued, |mut queued, index| {
+                let (client, controls, pending, request) = (&client, &controls, &pending, &request);
+                async move {
+                    dispatch_control(client, controls, pending, request(index));
+                    let work = queued.try_recv().expect("control should be accepted");
+                    assert!(
+                        work.reply
+                            .send(Arc::new(ControlResponse::rejected(
+                                work.request.preset(),
+                                "test result",
+                            )))
+                            .is_ok()
+                    );
+                    tokio::task::yield_now().await;
+
+                    queued
+                }
+            })
+            .await;
         dispatch_control(&client, &controls, &pending, request(3));
         assert!(
             queued.try_recv().is_err(),
