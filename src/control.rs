@@ -147,7 +147,7 @@ impl FreshControlRequest {
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub(crate) enum ControlPreset {
+pub enum ControlPreset {
     #[serde(rename = "automatic105_f30_percent")]
     Automatic105F30Percent,
     #[serde(rename = "automatic105_1_f30_1_percent")]
@@ -159,7 +159,7 @@ pub(crate) enum ControlPreset {
 }
 
 impl ControlPreset {
-    pub(crate) fn command(self) -> ControlCommand {
+    pub fn command(self) -> ControlCommand {
         match self {
             Self::Automatic105F30Percent => {
                 ControlCommand::SetAutomaticThresholds(AutomaticThresholds {
@@ -178,7 +178,7 @@ impl ControlPreset {
         }
     }
 
-    pub(crate) const fn as_str(self) -> &'static str {
+    pub const fn as_str(self) -> &'static str {
         match self {
             Self::Automatic105F30Percent => "automatic105_f30_percent",
             Self::Automatic105_1F30_1Percent => "automatic105_1_f30_1_percent",
@@ -187,7 +187,7 @@ impl ControlPreset {
         }
     }
 
-    pub(crate) fn from_readback(
+    pub fn from_readback(
         mode: OperatingMode,
         thresholds: AutomaticThresholds,
         timer: TimerState,

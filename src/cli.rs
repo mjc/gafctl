@@ -1,5 +1,5 @@
-use std::net::SocketAddr;
 use std::time::Duration;
+use std::{net::SocketAddr, path::PathBuf};
 
 use anyhow::{Context, Result, bail};
 use clap::{Args, Parser, Subcommand};
@@ -27,7 +27,11 @@ enum Command {
 struct ServeOptions {
     /// Peripheral ID printed by a scan-only run. Never include it in logs or API responses.
     #[arg(long, env = "UPDRAFT_DEVICE_ID")]
-    device_id: String,
+    device_id: Option<String>,
+
+    /// Path to the private account/provider-to-local device identity map.
+    #[arg(long, env = "UPDRAFT_IDENTITY_STORE")]
+    identity_store: Option<PathBuf>,
 
     /// Listener address. Non-loopback addresses require --allow-remote.
     #[arg(long, default_value = "127.0.0.1:8787")]
@@ -176,7 +180,14 @@ impl ServeOptions {
             mqtt_password,
             self.mqtt_discovery,
         )?;
-        crate::api::serve(self.device_id, self.bind, self.allow_remote, mqtt_config).await
+        crate::api::serve(
+            self.device_id,
+            self.identity_store,
+            self.bind,
+            self.allow_remote,
+            mqtt_config,
+        )
+        .await
     }
 }
 
@@ -253,6 +264,14 @@ fn control_status_successful(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn serve_can_start_without_a_ble_device_identifier() {
+        assert!(
+            Cli::try_parse_from(["updraft", "serve"]).is_ok(),
+            "serving without a BLE backend must be a valid startup mode"
+        );
+    }
 
     #[test]
     fn scan_only_rejects_control_settings() {
