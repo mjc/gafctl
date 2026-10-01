@@ -21,6 +21,8 @@ from homeassistant.components.mqtt import sensor as mqtt_sensor, select as mqtt_
 from custom_components.updraft import UpdraftCoordinator
 from custom_components.updraft.button import UpdraftRefreshButton
 from custom_components.updraft import number as updraft_number
+from custom_components.updraft import binary_sensor as updraft_binary
+from custom_components.updraft import sensor as updraft_sensor, switch as updraft_switch, button as updraft_button
 from custom_components.updraft.client import ApiError
 from homeassistant.exceptions import HomeAssistantError
 
@@ -42,6 +44,113 @@ def device(proxy_id=PROXY_ID, owner="http"):
 
 
 class RegistryTests(unittest.IsolatedAsyncioTestCase):
+    async def test_reported_sensors_keep_raw_diagnostics_and_original_timer(self):
+        entry = await self.entry()
+        for backend, values, expected in (
+            ("legacy_ble", {"timer_original_minutes": 2}, {"timer_original": 2}),
+            ("quick_connect", {"signal_strength_raw": "unknown-units", "verified_raw": "unknown-semantics"},
+                {"signal_strength_raw": "unknown-units", "verified_raw": "unknown-semantics"}),
+        ):
+            coordinator = UpdraftCoordinator(self.hass, AsyncMock(), device() | {"backend": backend}, entry)
+            coordinator.async_set_updated_data({"available": True, "freshness": "fresh", "state": values})
+            self.hass.data["updraft"] = {entry.entry_id: coordinator}
+            entities = []
+            await updraft_sensor.async_setup_entry(self.hass, entry, entities.extend)
+            selected = {entity.entity_description.key: entity for entity in entities}
+            for key, value in expected.items():
+                self.assertEqual(selected[key].native_value, value)
+                if key.endswith("_raw"):
+                    self.assertIsNone(selected[key].native_unit_of_measurement)
+                    self.assertIsNone(selected[key].device_class)
+
+    async def test_switches_and_all_off_button_delegate_only_advertised_mode_control(self):
+        entry = await self.entry()
+        selected = device() | {"backend": "quick_connect", "commands": [{"kind": "quick_connect_mode"}]}
+        coordinator = UpdraftCoordinator(self.hass, AsyncMock(), selected, entry)
+        coordinator.async_set_updated_data({"available": True, "freshness": "fresh", "state": {"mode": "automatic"}})
+        self.hass.data["updraft"] = {entry.entry_id: coordinator}
+        coordinator.async_set_mode = AsyncMock()
+        switches, buttons = [], []
+        await updraft_switch.async_setup_entry(self.hass, entry, switches.extend)
+        await updraft_button.async_setup_entry(self.hass, entry, buttons.extend)
+        self.assertEqual([switch.is_on for switch in switches], [True, False, False])
+        self.assertTrue(all(switch.available for switch in switches))
+        await switches[2].async_turn_on()
+        coordinator.async_set_mode.assert_awaited_with("manual", only_if_current=None)
+        await switches[1].async_turn_off()
+        coordinator.async_set_mode.assert_awaited_with("off", only_if_current="timer")
+        all_off = next(button for button in buttons if button.unique_id.endswith("_all_off"))
+        await all_off.async_press()
+        coordinator.async_set_mode.assert_awaited_with("off")
+        coordinator.device = selected | {"commands": []}
+        self.assertFalse(all_off.available)
+        self.assertTrue(all(not switch.available for switch in switches))
+        empty = []
+        await updraft_switch.async_setup_entry(self.hass, entry, empty.extend)
+        self.assertEqual(empty, [])
+
+    async def test_mode_control_rejects_mismatched_readback_and_unknown_conditional_off(self):
+        entry = await self.entry()
+        selected = device() | {"backend": "quick_connect", "commands": [{"kind": "quick_connect_mode"}]}
+        self.hass.config_entries.async_update_entry(entry, data=dict(entry.data) | {"backend": "quick_connect"})
+        client = AsyncMock()
+        client.fetch_devices.return_value = [selected]
+        old = {"available": True, "freshness": "fresh", "state": {"mode": "automatic"}}
+        client.fetch_state.return_value = old
+        coordinator = UpdraftCoordinator(self.hass, client, selected, entry)
+        with self.assertRaises(ApiError):
+            await coordinator.async_set_mode("manual")
+        client.set_control.assert_awaited_once()
+        client.set_control.reset_mock()
+        client.fetch_state.return_value = old | {"state": {"mode": "conflicting"}}
+        with self.assertRaises(ApiError):
+            await coordinator.async_set_mode("off", only_if_current="automatic")
+        client.set_control.assert_not_called()
+
+    async def test_diagnostic_binary_sensors_preserve_unknown_and_reported_values(self):
+        entry = await self.entry()
+        for backend, values, expected in (
+            ("legacy_ble", {"controller_fan_flag": False}, {"controller_fan_flag": False}),
+            ("quick_connect", {"running_estimate": None, "ota_in_progress": True, "automatic_mode": None,
+                "timer_mode": None, "manual_mode": None, "humidity_monitor": None},
+                {"running_estimate": None, "ota_in_progress": True, "automatic_mode": None,
+                "timer_mode": None, "manual_mode": None, "humidity_monitor": None}),
+        ):
+            selected = device() | {"backend": backend}
+            coordinator = UpdraftCoordinator(self.hass, AsyncMock(), selected, entry)
+            coordinator.async_set_updated_data({"available": True, "freshness": "fresh", "state": values})
+            self.hass.data["updraft"] = {entry.entry_id: coordinator}
+            entities = []
+            await updraft_binary.async_setup_entry(self.hass, entry, entities.extend)
+            result = {entity.unique_id.removeprefix(entry.unique_id+"_"): entity.is_on for entity in entities}
+            self.assertEqual(result, expected)
+            self.assertTrue(all(entity.available for entity in entities))
+
+    async def test_mode_controls_recheck_identity_and_confirm_current_mode(self):
+        entry = await self.entry()
+        selected = device() | {"backend": "quick_connect", "commands": [{"kind": "quick_connect_mode"}]}
+        entry_data = dict(entry.data) | {"backend": "quick_connect"}
+        self.hass.config_entries.async_update_entry(entry, data=entry_data)
+        client = AsyncMock()
+        client.fetch_devices.return_value = [selected]
+        old = {"available": True, "freshness": "fresh", "state": {"mode": "automatic"}}
+        new = old | {"state": {"mode": "off"}}
+        client.fetch_state.side_effect = [old, new]
+        coordinator = UpdraftCoordinator(self.hass, client, selected, entry)
+        coordinator.async_set_updated_data(old)
+        await coordinator.async_set_mode("off", only_if_current="automatic")
+        client.set_control.assert_awaited_once_with("configured", {"kind": "quick_connect_mode", "mode": "off"})
+        self.assertEqual(coordinator.data, new)
+        client.set_control.reset_mock()
+        client.fetch_state.side_effect = None
+        client.fetch_state.return_value = old
+        await coordinator.async_set_mode("off", only_if_current="timer")
+        client.set_control.assert_not_called()
+        client.fetch_devices.return_value = [selected | {"state_source": "mqtt", "command_source": "mqtt"}]
+        with self.assertRaises(ApiError):
+            await coordinator.async_set_mode("manual")
+        client.set_control.assert_not_called()
+
     async def test_ble_timer_can_replace_manual_sentinel_with_bounded_timer(self):
         entry = await self.entry()
         selected = device() | {"commands": [{"kind": "legacy_timer"}]}

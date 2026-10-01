@@ -14,11 +14,12 @@ For an original **GAF Master Flow Wi-Fi Attic Vent** (ERV5SMT or EGV5SMT):
 | Ambient temperature | Attic temperature, °F |
 | Relative humidity | Attic relative humidity, % |
 | Controller mode | Automatic, timer, or OTA |
-| Controller fan flag | The controller's reported on/off state |
+| Controller fan flag | Binary diagnostic of the controller's reported on/off state |
 | Firmware version | Controller firmware version |
 | Automatic temperature threshold | Current threshold, °F |
 | Automatic humidity threshold | Current threshold, % |
 | Timer remaining | Remaining timer minutes |
+| Original timer setting | Original timer field reported by the controller, minutes |
 | Automatic thresholds | Select 105.0 °F / 30.0% or 105.1 °F / 30.1% |
 | Fan timer | Select Clear timer or 1 minute |
 | Target temperature | 90–120 °F in 1 °F steps |
@@ -43,6 +44,10 @@ the verified presets.
 
 QuickConnect devices expose temperature, humidity, and available diagnostics.
 They include the Refresh readings button without enabling cloud writes.
+Read-only diagnostics include the raw signal-strength and verification fields,
+OTA-in-progress, humidity monitoring, and automatic/timer/manual mode mirrors.
+Raw fields have no inferred units or connectivity meaning. Unknown or conflicting
+mode remains unknown in the mirrors. OTA status does not expose firmware writes.
 When experimental cloud writes are enabled, they also expose:
 
 | Entity | Choices or range |
@@ -51,6 +56,15 @@ When experimental cloud writes are enabled, they also expose:
 | Target temperature | 90–120 °F in 1 °F steps |
 | Target humidity | 30–80% in 1% steps |
 | Timer duration | 30–360 minutes in 30-minute steps |
+| Automatic, timer, manual switches | Select one active mode |
+| All off | Select off mode |
+
+Mode selectors, switches, and All off use the same serialized mode command.
+They recheck proxy identity, HTTP ownership, current capabilities and state
+before writing, then require confirmed control and matching current mode.
+Turning off a switch for an inactive mode leaves the active mode unchanged.
+Conditional off rejects unknown mode. These cloud controls have source and
+contract coverage; newer-controller physical acceptance is unavailable.
 
 QuickConnect timer duration is a configured setting, not a countdown. Saving the
 duration does not start the timer. Its Running diagnostic is estimated from the

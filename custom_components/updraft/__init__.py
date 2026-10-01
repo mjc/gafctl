@@ -10,7 +10,7 @@ from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers import device_registry as dr, entity_registry as er
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
-from .client import ApiClient, ApiError, entity_keys
+from .client import ApiClient, ApiError, QUICKCONNECT_MODES, entity_keys
 from .const import CONF_API_URL, CONF_DEVICE_ID, CONF_PROXY_ID, DOMAIN, PLATFORMS, UPDATE_INTERVAL
 
 LOGGER = logging.getLogger(__name__)
@@ -101,6 +101,45 @@ class UpdraftCoordinator(DataUpdateCoordinator[dict]):
         except Exception:
             self._reload_scheduled = False
             LOGGER.exception("Could not reload changed Updraft entities")
+
+    async def async_set_mode(self, mode: str, *, only_if_current: str | None = None) -> None:
+        if mode not in QUICKCONNECT_MODES:
+            raise ApiError("unsupported device mode")
+        async with self.command_lock:
+            await self.async_refresh()
+            self._require_mode_control()
+            current = self.data["state"].get("mode")
+            if only_if_current is not None:
+                if current not in QUICKCONNECT_MODES:
+                    raise ApiError("current device mode is unknown")
+                if current != only_if_current:
+                    return
+            control_error = None
+            try:
+                await self.client.set_control(self.device_id, {"kind": "quick_connect_mode", "mode": mode})
+            except ApiError as error:
+                control_error = error
+            await self.async_refresh()
+            self._require_mode_control()
+            if control_error is not None:
+                raise control_error
+            if self.data["state"].get("mode") != mode:
+                raise ApiError("confirmed control has no matching current mode")
+
+    def _require_mode_control(self) -> None:
+        if not self.mode_control_available:
+            raise ApiError("the selected device has no current mode control")
+
+    @property
+    def mode_control_available(self) -> bool:
+        data = self.data or {}
+        return bool(
+            self.last_update_success and self.http_state_owned
+            and self.supports("quick_connect_mode")
+            and self.device["backend"] == "quick_connect"
+            and data.get("available") is True and data.get("freshness") == "fresh"
+            and isinstance(data.get("state"), dict)
+        )
 
     def supports(self, command_kind: str) -> bool:
         return (

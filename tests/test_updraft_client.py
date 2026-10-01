@@ -69,8 +69,8 @@ def quickconnect_state(**overrides):
         "estimated_running": True,
         "diagnostics": {
             "firmware_version": "1.2.3",
-            "signal_strength_raw": -45,
-            "verified_raw": True,
+            "signal_strength_raw": "-45",
+            "verified_raw": "true",
         },
         "provenance": {
             "backend": "quick_connect",
@@ -136,6 +136,23 @@ class FailedSession:
 
 
 class ApiClientTests(unittest.TestCase):
+    def test_projects_reported_diagnostics_without_inventing_units_or_boolean_meaning(self):
+        raw = quickconnect_state()
+        raw["diagnostics"] = {"firmware_version": None, "signal_strength_raw": "-42", "verified_raw": "unknown-token", "ota_in_progress": True}
+        session = FakeSession([FakeResponse(v2_state_payload(raw, backend="quick_connect"))])
+        result = asyncio.run(ApiClient("http://proxy", session).fetch_state("configured"))["state"]
+        self.assertEqual(result["signal_strength_raw"], "-42")
+        self.assertEqual(result["verified_raw"], "unknown-token")
+        self.assertIs(result["ota_in_progress"], True)
+        self.assertIs(result["automatic_mode"], True)
+        self.assertIs(result["timer_mode"], False)
+        self.assertIs(result["manual_mode"], False)
+        raw["settings"]["mode"] = "conflicting"
+        result = CLIENT._home_assistant_values(raw, "quick_connect")
+        self.assertIsNone(result["automatic_mode"])
+        self.assertIsNone(result["timer_mode"])
+        self.assertIsNone(result["manual_mode"])
+
     def test_adjustable_ble_capabilities_create_numbers_and_send_bounded_commands(self):
         commands = [
             {"kind": "legacy_automatic_temperature", "temperature_f": 90},
@@ -305,7 +322,7 @@ class ApiClientTests(unittest.TestCase):
         )
         self.assertEqual(
             CLIENT.entity_platforms(devices[1]),
-            {"sensor", "binary_sensor", "select", "number", "button"},
+            {"sensor", "binary_sensor", "select", "number", "button", "switch"},
         )
         self.assertEqual(
             CLIENT.entity_keys(devices[1]),
@@ -315,10 +332,12 @@ class ApiClientTests(unittest.TestCase):
                     "humidity",
                     "mode",
                     "firmware_version",
-                    "humidity_monitor",
+                    "signal_strength_raw",
+                    "verified_raw",
                 },
-                "binary_sensor": {"running_estimate"},
-                "button": {"refresh"},
+                "binary_sensor": {"running_estimate", "ota_in_progress", "automatic_mode", "timer_mode", "manual_mode", "humidity_monitor"},
+                "button": {"refresh", "all_off"},
+                "switch": {"automatic_mode", "timer_mode", "manual_mode"},
                 "select": {"mode"},
                 "number": {
                     "automatic_temperature",
@@ -366,7 +385,7 @@ class ApiClientTests(unittest.TestCase):
         self.assertEqual(result["state"]["automatic_temperature_f"], 105)
         self.assertEqual(result["state"]["timer_duration_minutes"], 60)
         self.assertEqual(result["state"]["mode"], "automatic")
-        self.assertEqual(result["state"]["humidity_monitor"], "on")
+        self.assertIs(result["state"]["humidity_monitor"], True)
         self.assertIs(result["state"]["running_estimate"], True)
         self.assertEqual(result["state"]["running_estimate_provenance"], "inferred")
         self.assertNotIn("timer_remaining_minutes", result["state"])
@@ -399,7 +418,7 @@ class ApiClientTests(unittest.TestCase):
 
         self.assertEqual(
             CLIENT.entity_platforms(device | {"state_source": "mqtt"}),
-            {"select", "number"},
+            {"select", "number", "switch", "button"},
         )
         self.assertEqual(
             CLIENT.entity_platforms(device | {"command_source": "mqtt"}),
@@ -435,7 +454,7 @@ class ApiClientTests(unittest.TestCase):
         values = {
             "firmware_version": "3.0.0",
             "mode": "automatic",
-            "controller_fan_flag": "off",
+            "controller_fan_flag": False,
             "temperature_f": 98.6,
             "humidity_percent": 42.1,
             "automatic_temperature_threshold_f": 105.0,

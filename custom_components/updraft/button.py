@@ -22,6 +22,8 @@ async def async_setup_entry(
     coordinator = hass.data[DOMAIN][entry.entry_id]
     if "refresh" in entity_keys(coordinator.device).get("button", set()):
         async_add_entities([UpdraftRefreshButton(coordinator, entry)])
+    if "all_off" in entity_keys(coordinator.device).get("button", set()):
+        async_add_entities([UpdraftAllOffButton(coordinator, entry)])
 
 
 class UpdraftRefreshButton(CoordinatorEntity[UpdraftCoordinator], ButtonEntity):
@@ -57,3 +59,29 @@ class UpdraftRefreshButton(CoordinatorEntity[UpdraftCoordinator], ButtonEntity):
             manufacturer="GAF",
             model=("GAF QuickConnect Vent" if self.coordinator.device["backend"] == "quick_connect" else "GAF Wi-Fi Vent"),
         )
+
+
+class UpdraftAllOffButton(CoordinatorEntity[UpdraftCoordinator], ButtonEntity):
+    _attr_has_entity_name = True
+    _attr_name = "All off"
+    _attr_icon = "mdi:fan-off"
+
+    def __init__(self, coordinator: UpdraftCoordinator, entry: ConfigEntry) -> None:
+        super().__init__(coordinator)
+        self._entry = entry
+        self._attr_unique_id = f"{entry.unique_id}_all_off"
+
+    @property
+    def available(self) -> bool:
+        return bool(super().available and self.coordinator.mode_control_available)
+
+    async def async_press(self) -> None:
+        try:
+            await self.coordinator.async_set_mode("off")
+        except ApiError as error:
+            raise HomeAssistantError(str(error)) from error
+
+    @property
+    def device_info(self) -> dr.DeviceInfo:
+        return dr.DeviceInfo(identifiers={(DOMAIN, self._entry.unique_id)},
+                             name=self.coordinator.device["name"], manufacturer="GAF", model="GAF QuickConnect Vent")

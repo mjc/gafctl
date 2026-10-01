@@ -195,17 +195,18 @@ QUICKCONNECT_SENSOR_KEYS = {
     "humidity",
     "mode",
     "firmware_version",
-    "humidity_monitor",
+    "signal_strength_raw",
+    "verified_raw",
 }
 LEGACY_SENSOR_KEYS = {
     "temperature",
     "humidity",
     "mode",
-    "controller_fan_flag",
     "firmware_version",
     "automatic_temperature_threshold",
     "automatic_humidity_threshold",
     "timer_remaining",
+    "timer_original",
 }
 
 
@@ -246,7 +247,9 @@ def entity_keys(device: Mapping[str, Any]) -> dict[str, set[str]]:
             else set(QUICKCONNECT_SENSOR_KEYS)
         )
         if backend == "quick_connect":
-            entities["binary_sensor"] = {"running_estimate"}
+            entities["binary_sensor"] = {"running_estimate", "ota_in_progress", "automatic_mode", "timer_mode", "manual_mode", "humidity_monitor"}
+        else:
+            entities["binary_sensor"] = {"controller_fan_flag"}
     if not commands_owned:
         return entities
     if backend == "legacy_ble" and "legacy_preset" in command_kinds:
@@ -261,6 +264,8 @@ def entity_keys(device: Mapping[str, Any]) -> dict[str, set[str]]:
     if backend == "quick_connect":
         if "quick_connect_mode" in command_kinds:
             entities["select"] = {"mode"}
+            entities["switch"] = {"automatic_mode", "timer_mode", "manual_mode"}
+            entities.setdefault("button", set()).add("all_off")
         number_keys = {
             key
             for key, capability in (
@@ -364,6 +369,12 @@ def _valid_state(state: Mapping[str, Any], backend: str) -> bool:
         return False
     if diagnostics is not None and not isinstance(diagnostics, Mapping):
         return False
+    if diagnostics is not None and (
+        any(diagnostics.get(key) is not None and not isinstance(diagnostics[key], str)
+            for key in ("firmware_version", "signal_strength_raw", "verified_raw"))
+        or diagnostics.get("ota_in_progress") is not None and type(diagnostics["ota_in_progress"]) is not bool
+    ):
+        return False
     if state.get("estimated_running") is not None and not isinstance(
         state.get("estimated_running"), bool
     ):
@@ -435,7 +446,7 @@ def _home_assistant_values(state: Mapping[str, Any], backend: str) -> dict[str, 
         values.update(
             firmware_version=diagnostics.get("firmware_version"),
             mode=settings.get("mode"),
-            controller_fan_flag=("on" if fan_on else "off") if fan_on is not None else None,
+            controller_fan_flag=fan_on,
             automatic_temperature_threshold_f=_tenths(
                 settings.get("automatic_temperature_tenths_f")
             ),
@@ -452,20 +463,24 @@ def _home_assistant_values(state: Mapping[str, Any], backend: str) -> dict[str, 
             automatic_temperature_f=settings.get("automatic_temperature_f"),
             automatic_humidity_percent=settings.get("automatic_humidity_percent"),
             timer_duration_minutes=settings.get("timer_duration_minutes"),
-            humidity_monitor=(
-                "on"
-                if settings.get("humidity_monitor") is True
-                else "off"
-                if settings.get("humidity_monitor") is False
-                else None
-            ),
+            humidity_monitor=settings.get("humidity_monitor"),
+            automatic_mode=_mode_flag(settings["mode"], "automatic"),
+            timer_mode=_mode_flag(settings["mode"], "timer"),
+            manual_mode=_mode_flag(settings["mode"], "manual"),
             running_estimate=state.get("estimated_running"),
             running_estimate_provenance=(
                 "inferred" if state.get("estimated_running") is not None else None
             ),
             firmware_version=diagnostics.get("firmware_version"),
+            signal_strength_raw=diagnostics.get("signal_strength_raw"),
+            verified_raw=diagnostics.get("verified_raw"),
+            ota_in_progress=diagnostics.get("ota_in_progress"),
         )
     return values
+
+
+def _mode_flag(mode: str, expected: str) -> bool | None:
+    return mode == expected if mode in QUICKCONNECT_MODES else None
 
 
 def _optional_finite_number(value: Any) -> bool:

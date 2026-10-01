@@ -133,18 +133,22 @@ class UpdraftControlSelect(CoordinatorEntity[UpdraftCoordinator], SelectEntity):
         value = self._presets.get(option)
         if value is None:
             raise HomeAssistantError("Unsupported fan control option")
+        if self._key == "mode":
+            try:
+                await self.coordinator.async_set_mode(value)
+            except ApiError as error:
+                raise HomeAssistantError(str(error)) from error
+            return
+        await self._async_set_preset(value)
+
+    async def _async_set_preset(self, value: str) -> None:
         async with self.coordinator.command_lock:
             if not self.available:
                 raise HomeAssistantError("The selected device cannot accept this control")
             control_error = None
             try:
-                command = (
-                    {"kind": "quick_connect_mode", "mode": value}
-                    if self._key == "mode"
-                    else value
-                )
                 await self.coordinator.client.set_control(
-                    self.coordinator.device_id, command
+                    self.coordinator.device_id, value
                 )
             except ApiError as error:
                 control_error = error

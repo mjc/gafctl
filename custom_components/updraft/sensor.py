@@ -50,12 +50,6 @@ SENSORS = (
         entity_category=EntityCategory.DIAGNOSTIC,
     ),
     UpdraftSensorDescription(
-        key="controller_fan_flag",
-        name="Controller fan flag",
-        value_key="controller_fan_flag",
-        entity_category=EntityCategory.DIAGNOSTIC,
-    ),
-    UpdraftSensorDescription(
         key="firmware_version",
         name="Firmware version",
         value_key="firmware_version",
@@ -84,9 +78,22 @@ SENSORS = (
         entity_category=EntityCategory.DIAGNOSTIC,
     ),
     UpdraftSensorDescription(
-        key="humidity_monitor",
-        name="Humidity monitoring",
-        value_key="humidity_monitor",
+        key="timer_original",
+        name="Original timer setting",
+        value_key="timer_original_minutes",
+        native_unit_of_measurement=UnitOfTime.MINUTES,
+        entity_category=EntityCategory.DIAGNOSTIC,
+    ),
+    UpdraftSensorDescription(
+        key="signal_strength_raw",
+        name="Signal strength (reported)",
+        value_key="signal_strength_raw",
+        entity_category=EntityCategory.DIAGNOSTIC,
+    ),
+    UpdraftSensorDescription(
+        key="verified_raw",
+        name="Verification (reported)",
+        value_key="verified_raw",
         entity_category=EntityCategory.DIAGNOSTIC,
     ),
 )
