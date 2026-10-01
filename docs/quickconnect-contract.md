@@ -1,68 +1,109 @@
-# GAF Vent Control cloud contract notes
+# QuickConnect cloud API research
 
-This document records behavior in the pinned Python Home Assistant reference, synthetic examples for tests, and unresolved questions separately. It does not claim a live cloud capture or hardware validation.
+QuickConnect is the newer GAF Master Flow Wi-Fi controller, used in the ERV5QCT
+and EGV5QCT product families. It has a separate cloud API from the original
+ERV5SMT/EGV5SMT Bluetooth controller. See [fan models](hardware.md) for product
+sources and [deployment](deployment.md#quickconnect-experimental) for configuration.
 
-## Reference
+These notes record the API described by a community Home Assistant integration.
+All repository fixtures are synthetic. There is no live account capture or
+physical QuickConnect fan test in this repository.
 
-- Repository: [GAFVentControl-HA](https://github.com/hitchin999/GAFVentControl-HA)
-- Inspected revision: `336adfd8d8cc0a936b4585bd20301f74d585554c`
-- Integration manifest version: `1.1.0`
-- Protocol source described by the integration: Android app `com.gaf.quickconnectapp` 1.0.9
-- License: MIT; attribution and permission text is in [`LICENSE-QUICKCONNECT-REFERENCE.txt`](../LICENSE-QUICKCONNECT-REFERENCE.txt).
-- Fixture evidence: every JSON file under [`fixtures/quickconnect`](../fixtures/quickconnect/) is synthetic. None came from an account, live service, or physical device.
-- The integration describes a cloud API contract; source inspection alone does not prove any particular physical device is compatible.
+## Reference source
 
-## Endpoints and authentication described by the source
+- [GAFVentControl-HA](https://github.com/hitchin999/GAFVentControl-HA), revision
+  `336adfd8d8cc0a936b4585bd20301f74d585554c`.
+- Integration version: `1.1.0`.
+- Its stated protocol source: Android app `com.gaf.quickconnectapp` 1.0.9.
+- MIT attribution: [LICENSE-QUICKCONNECT-REFERENCE.txt](../LICENSE-QUICKCONNECT-REFERENCE.txt).
+- Fixture provenance: [manifest.json](../fixtures/quickconnect/manifest.json).
 
-The reference uses `https://gaf-coreservices.aurai.io/cognito/` for login and `https://gaf.keenhome.io/gaf/` for device requests. Its request timeout is 20 seconds.
+## Authentication and endpoints
 
-| Operation | Request | Behavior in the reference |
+The reference uses `https://gaf-coreservices.aurai.io/cognito/` for authentication
+and `https://gaf.keenhome.io/gaf/` for device requests, with a 20-second timeout.
+Updraft uses those roots too; their live compatibility is unverified.
+
+| Operation | Request | Reference behavior |
 | --- | --- | --- |
-| Login | POST `cognito/login`; `userName`, Base64 of UTF-8 `password`, `userPoolId`, `userRole` | Reads `responseData.idToken`. Username is trimmed. Pool is `us-east-2_F6aHzg32w`; role defaults to `contractor`, with `consumer` accepted in config flow. |
-| Inventory | GET `device/deviceList` | Accepts `responseData` as a list or an object with a `devices` list. Other shapes become an empty list in the reference; Updraft must retain the error/unknown distinction. |
-| Detail | GET `device?deviceId=<id>` | Reads `responseData`. List records are enriched by detail. The reference merges detail over list, retaining the list record after a detail error. |
-| Write settings | POST `deviceMode/<id>` | The body field names differ from state-read names; use only the typed bodies below. |
-| Firmware information | GET `fw/fwInfo?deviceId=<id>` | Reads firmware diagnostics. Firmware-update methods are out of scope; the reference's button triggers an update. |
+| Login | POST `cognito/login` | Sends `userName`, Base64-encoded UTF-8 `password`, `userPoolId`, and `userRole`; reads `responseData.idToken`. |
+| Inventory | GET `device/deviceList` | Accepts `responseData` as a list or an object containing a `devices` list. |
+| Detail | GET `device?deviceId=<id>` | Reads `responseData`; merges detail over the inventory record. |
+| Settings | POST `deviceMode/<id>` | Uses the write field names listed below. |
+| Firmware information | GET `fw/fwInfo?deviceId=<id>` | Reads firmware diagnostics. Updraft does not expose firmware updates. |
 
-Device requests pass the returned ID token literally as the `Authorization` header value, without `Bearer `. On 401/403, the reference logs in again and retries once. The source does not establish refresh-token grant behavior or proactive token renewal.
+The login pool is `us-east-2_F6aHzg32w`; roles are `contractor` (default) and
+`consumer`. The ID token is sent literally in `Authorization`, without a
+`Bearer ` prefix. The reference logs in again and retries once after a 401/403.
+It does not establish a refresh-token grant or proactive renewal flow.
 
-## Read values and write values
+Unlike the reference's fallback to an empty inventory, Updraft reports malformed
+inventory as an error. Read requests can retry transient failures and refresh
+authentication. Settings writes are submitted once and are not automatically
+retried after a timeout or authentication error.
 
-| Field | Meaning in the Python entity code |
+## State fields
+
+| Field | Interpretation in the reference |
 | --- | --- |
-| `deviceConfig.setTemperature` | Current temperature reading, °F |
-| `deviceConfig.setHumidity` | Current relative-humidity reading, % |
+| `deviceConfig.setTemperature` | Current temperature, °F |
+| `deviceConfig.setHumidity` | Current relative humidity, % |
 | `deviceSettings.setTemperature` | Temperature target, °F |
 | `deviceSettings.setHumidity` | Humidity target, % |
-| `deviceSettings.automaticMode`, `timerMode`, `fanMode` | Automatic, Timer, Manual mode flags |
-| `deviceSettings.timerValue` | Configured timer duration, minutes; not a remaining-time observation |
-| `deviceSettings.humidityMonitor` | Read by the integration; the reference says the settings endpoint rejects it in a write body |
+| `deviceSettings.automaticMode` | Automatic-mode flag |
+| `deviceSettings.timerMode` | Timer-mode flag |
+| `deviceSettings.fanMode` | Manual-mode flag |
+| `deviceSettings.timerValue` | Configured duration in minutes, not remaining time |
+| `deviceSettings.humidityMonitor` | Readable setting; the reference says writes reject it |
 
-Source call sites produce numeric JSON integers. The API method docstring says temperature/humidity values are floats, but the number platform says the service rejects float JSON with HTTP 417 and service `statusCode` 4444. Candidate app bounds are temperature 90–120 °F in 1-degree steps, humidity 30–80% in 1-point steps, timer duration 30–360 minutes in 30-minute steps. These are app UI limits, not verified model limits.
+The reference chooses a displayed mode by prioritizing truthy flags. Updraft
+keeps missing and conflicting mode flags explicit. Its Running value is inferred
+from mode and measurements and remains unknown when required data is missing.
+It is not direct motor feedback.
 
-| Write operation | Exact field set | Preservation rule |
+## Write bodies
+
+Read and write field names differ. The reference sends these field sets:
+
+| Operation | Body fields | Values retained from current settings |
 | --- | --- | --- |
-| Set mode | `{automaticMode, desiredTemp, desiredHumidity, timerMode, timerValue, fanMode}` | Use exclusive mode flags; preserve current validated thresholds and duration. |
-| Save automatic targets | `{automaticMode, desiredTemp, desiredHumidity}` | Preserve current mode and the unmodified target. |
-| Save timer duration | `{timerMode, timerValue}` | Preserve current timer-mode flag. Setting duration does not activate the timer. |
+| Set mode | `automaticMode`, `desiredTemp`, `desiredHumidity`, `timerMode`, `timerValue`, `fanMode` | Both targets and timer duration |
+| Set automatic targets | `automaticMode`, `desiredTemp`, `desiredHumidity` | Automatic-mode flag |
+| Set timer duration | `timerMode`, `timerValue` | Timer-mode flag |
 
-For `(automaticMode, timerMode, fanMode)`, the integration maps Off to `(false,false,false)`, Automatic to `(true,false,false)`, Timer to `(false,true,false)`, and Manual to `(false,false,true)`. Its display selection prioritizes truthy flags; Updraft should represent missing/conflicting flags as unknown instead of assuming that precedence is authoritative.
+For `(automaticMode, timerMode, fanMode)`, Off is `(false,false,false)`, Automatic
+is `(true,false,false)`, Timer is `(false,true,false)`, and Manual is
+`(false,false,true)`. Saving timer duration preserves whether timer mode is
+active; it does not activate it.
 
-The Python integration estimates “Running” from mode and threshold readings. It is not direct motor or airflow feedback. Updraft should mark such a state as an estimate and preserve unknown when required readings are absent or stale.
+The call sites send JSON integers. Although an API docstring mentions floats,
+the number platform says the service rejects floats with HTTP 417 and service
+status 4444. Updraft accepts integer temperature targets from 90–120 °F, humidity
+from 30–80%, and timer durations from 30–360 minutes in 30-minute steps. These
+bounds come from the reference UI, not tests of each physical model.
 
-## Synthetic fixture inventory
+Updraft reads settings before preparing a write and checks them again afterward.
+A submitted request with an ambiguous response is unconfirmed. A successful
+response needs matching readback before the service reports `confirmed`.
 
-[`manifest.json`](../fixtures/quickconnect/manifest.json) pins provenance, marks fixture data synthetic, and lists cases checked by `tests/quickconnect_contract.rs`. Request-body fixtures use a separate `body` object, so evidence metadata cannot be confused with fields sent on the wire. The settings-success envelope remains unknown; no fixture represents it.
+## Fixtures and unresolved behavior
 
-## Unresolved contract questions
+Every JSON file in [fixtures/quickconnect](../fixtures/quickconnect/) is generated
+test data. Request examples store the body under a separate `body` key so fixture
+metadata is not sent to the service. The fixtures cover login, inventory shapes,
+state fields, request bodies, malformed data, and a rejected settings response.
+No fixture records a real successful settings response.
 
-- Actual response envelope and application status fields for accepted settings writes.
-- Whether HTTP 200 with missing or nonstandard JSON can occur in production.
-- Which identifier aliases each model returns and which identifier the detail/write routes accept; synthetic IDs do not resolve this.
-- Actual temperature/RH/time encodings and model-specific write ranges.
-- Device observation timestamps, cloud cache age, `isVerified`, signal-strength units, and reliable offline semantics.
-- Whether partial writes preserve every omitted setting across supported firmware versions.
-- Timer countdown, activation, expiry, and readback behavior.
-- Whether the cloud endpoints still accept the contract at the pinned reference revision.
+Live account/device evidence is still needed for:
 
-Resolve these with authorized account/device evidence before enabling cloud writes. Never store credentials, real provider/account identifiers, tokens, or unredacted traffic in fixtures.
+- The accepted-write envelope and application status fields.
+- Whether the endpoints still accept the pinned reference's requests.
+- Identifier aliases returned by different models and accepted by write routes.
+- Model-specific units, ranges, and preservation of omitted settings.
+- Device timestamps, cache age, signal-strength units, offline behavior, and the
+  meaning of `isVerified`.
+- Timer activation, expiry, and readback timing.
+
+Cloud writes stay disabled by default because these questions are unresolved.
+Keep passwords, account/device identifiers, tokens, and unredacted traffic out
+of test fixtures.

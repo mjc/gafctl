@@ -1316,6 +1316,7 @@ mod tests {
 
     fn mqtt_device(id: &str) -> DeviceDescriptor {
         DeviceDescriptor {
+            proxy_id: crate::device::ProxyId::default(),
             id: DeviceId::parse(id.to_owned()).unwrap(),
             name: format!("Device {id}"),
             backend: DeviceBackend::QuickConnect,
@@ -1323,6 +1324,33 @@ mod tests {
             state_source: EntitySource::Mqtt,
             command_source: EntitySource::Mqtt,
         }
+    }
+
+    #[test]
+    fn discovery_topics_include_the_persisted_proxy_identity() {
+        let device = mqtt_device("configured");
+        let expected = format!("updraft/{}/configured/state", device.proxy_id);
+        let configs = device_discovery_configs(std::slice::from_ref(&device)).collect::<Vec<_>>();
+        assert!(
+            configs
+                .iter()
+                .any(|(_, config)| config["state_topic"] == expected)
+        );
+        assert!(
+            configs
+                .iter()
+                .all(|(topic, _)| topic.contains(&device.proxy_id.to_string()))
+        );
+    }
+
+    #[test]
+    fn ble_discovery_does_not_override_http_ownership() {
+        let device = DeviceDescriptor::configured_ble();
+        assert!(
+            discovery_configs(std::slice::from_ref(&device), true)
+                .next()
+                .is_none()
+        );
     }
 
     #[test]
@@ -1381,6 +1409,7 @@ mod tests {
     #[test]
     fn discovery_is_namespaced_and_respects_independent_entity_sources() {
         let mut device = DeviceDescriptor {
+            proxy_id: crate::device::ProxyId::default(),
             id: DeviceId::parse("qc-one".to_owned()).unwrap(),
             name: "Guest room vent".to_owned(),
             backend: DeviceBackend::QuickConnect,
@@ -1418,6 +1447,7 @@ mod tests {
     #[test]
     fn source_changes_tombstone_only_entities_that_are_no_longer_selected() {
         let device = DeviceDescriptor {
+            proxy_id: crate::device::ProxyId::default(),
             id: DeviceId::parse("qc-one".to_owned()).unwrap(),
             name: "Guest room vent".to_owned(),
             backend: DeviceBackend::QuickConnect,
@@ -1451,6 +1481,7 @@ mod tests {
     #[test]
     fn explicit_legacy_discovery_keeps_the_configured_ble_entities() {
         let ble = DeviceDescriptor {
+            proxy_id: crate::device::ProxyId::default(),
             id: DeviceId::configured_ble(),
             name: "Configured BLE".to_owned(),
             backend: DeviceBackend::LegacyBle,
@@ -1481,6 +1512,7 @@ mod tests {
 
     fn legacy_ble_mqtt_descriptor() -> Vec<DeviceDescriptor> {
         vec![DeviceDescriptor {
+            proxy_id: crate::device::ProxyId::default(),
             id: DeviceId::configured_ble(),
             name: "Configured BLE".to_owned(),
             backend: DeviceBackend::LegacyBle,

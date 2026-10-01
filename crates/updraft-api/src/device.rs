@@ -2,6 +2,55 @@ use serde::{Deserialize, Serialize};
 
 use crate::control::ControlPreset;
 
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(try_from = "uuid::Uuid", into = "uuid::Uuid")]
+pub struct ProxyId(uuid::Uuid);
+
+impl Default for ProxyId {
+    fn default() -> Self {
+        Self(uuid::Uuid::new_v4())
+    }
+}
+
+impl TryFrom<uuid::Uuid> for ProxyId {
+    type Error = &'static str;
+
+    fn try_from(value: uuid::Uuid) -> Result<Self, Self::Error> {
+        (value.get_version() == Some(uuid::Version::Random)
+            && value.get_variant() == uuid::Variant::RFC4122)
+            .then_some(Self(value))
+            .ok_or("invalid proxy identity")
+    }
+}
+
+impl From<ProxyId> for uuid::Uuid {
+    fn from(value: ProxyId) -> Self {
+        value.0
+    }
+}
+
+impl std::fmt::Display for ProxyId {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(formatter)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct EntitySources {
+    pub state_source: EntitySource,
+    pub command_source: EntitySource,
+}
+
+impl Default for EntitySources {
+    fn default() -> Self {
+        Self {
+            state_source: EntitySource::Http,
+            command_source: EntitySource::Http,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(try_from = "String")]
 pub struct DeviceId(String);
@@ -156,6 +205,7 @@ impl DeviceCapabilities {
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct DeviceDescriptor {
+    pub proxy_id: ProxyId,
     pub id: DeviceId,
     pub name: String,
     pub backend: DeviceBackend,
@@ -167,6 +217,7 @@ pub struct DeviceDescriptor {
 impl DeviceDescriptor {
     pub fn configured_ble() -> Self {
         Self {
+            proxy_id: ProxyId::default(),
             id: DeviceId::configured_ble(),
             name: "GAF Wi-Fi Vent".to_owned(),
             backend: DeviceBackend::LegacyBle,

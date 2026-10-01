@@ -1,82 +1,189 @@
-# Deployment
+# Run Updraft as a service
 
-Run Updraft on a Linux system. For the legacy controller, provide a BLE adapter that can reach it. Home Assistant must be able to reach the HTTP API or share an MQTT broker with Updraft.
+First build Updraft and confirm a direct state read using the
+[README](../README.md). The service computer needs Bluetooth within range of an
+original ERV5SMT or EGV5SMT. QuickConnect uses the Internet instead of Bluetooth.
 
-## Build
+## Listen for Home Assistant
+
+By default, `updraft serve` listens on `127.0.0.1:8787`. That works for clients
+on the same computer. For Home Assistant on another computer, use:
 
 ```sh
-devenv allow
-devenv shell -- cargo build --release --locked
+updraft serve --device-id 'PERIPHERAL_ID' \
+  --identity-store /absolute/path/to/updraft-identities.json \
+  --bind 0.0.0.0:8787 --allow-remote
 ```
 
-The executable is `target/release/updraft`.
+Replace the peripheral ID with the value from `updraft ble scan` and choose a
+private writable identity-store path. Keep the identity file across restarts.
+Restrict port
+8787 to your trusted network or Home Assistant host. The API has no built-in
+login. An authenticated reverse proxy can provide HTTPS for remote clients.
 
-## Configure
+`--device-id` configures one original Bluetooth fan. Without it, the service
+still starts, but no Bluetooth device is registered. Configuring any fan requires
+an identity store. QuickConnect can run alone
+or alongside that fan.
 
-To enable the BLE backend, set `UPDRAFT_DEVICE_ID` or pass `--device-id` in local service configuration. Keep the peripheral identifier out of tracked files. Without a BLE identifier the service starts with an empty inventory. The v2 state and control routes return 404 for unregistered local IDs. See the [HTTP API](http-api.md) for request and response schemas.
+## Linux with systemd
 
-Set `UPDRAFT_IDENTITY_STORE` to a private local path whenever QuickConnect is configured. QuickConnect startup requires this persistent identity store so cloud devices keep stable Home Assistant identities across restarts. Newly created identity files use owner-only permissions. This setting alone does not enable cloud authentication or polling. Cloud credentials and provider identifiers must remain in local configuration, not tracked files or public API payloads.
+These instructions are for a Linux distribution where you manage service files
+manually. On NixOS, manage the package, user, Bluetooth, firewall, and systemd
+unit declaratively. This repository does not yet export a NixOS package or
+service module; the current build workflow is devenv. Repository packaging and the
+module are tracked in [UPD-50](https://lific.mjc.lol/UPD/issues/UPD-50).
 
-QuickConnect is optional. Without `UPDRAFT_QUICKCONNECT_USERNAME` and exactly one of `UPDRAFT_QUICKCONNECT_PASSWORD` or `UPDRAFT_QUICKCONNECT_PASSWORD_FILE`, no cloud login or polling is started. The account role defaults to `contractor`; set `UPDRAFT_QUICKCONNECT_ROLE=consumer` for a consumer account. The username and role scope the private identity mapping, so keep the identity store writable only by the service account.
+Install the executable from the repository root:
 
-Prefer a service-manager credential file. The password file must be a regular file with no group or other permissions; systemd credentials with owner-only permissions are accepted. Direct `UPDRAFT_QUICKCONNECT_PASSWORD` is supported for secret managers that inject service environment variables. Never use a command-line password argument. Passwords are redacted from `Credentials` debug output, and account/provider identifiers stay out of API entities.
+```sh
+sudo install -m 0755 target/release/updraft /usr/local/bin/updraft
+sudo useradd --system --home-dir /var/lib/updraft --shell /usr/sbin/nologin updraft
+sudo install -d -m 0750 -o root -g updraft /etc/updraft
+sudo install -m 0640 -o root -g updraft /dev/null /etc/updraft/updraft.env
+```
 
-QuickConnect writes remain disabled unless `UPDRAFT_QUICKCONNECT_WRITES_ENABLED=true` or `--quickconnect-writes-enabled` is explicitly set. Keep that gate off until field acceptance authorizes cloud writes. Read-only inventory and state polling do not require the write gate. BLE device ID is optional for cloud-only mode; configure it for BLE-only or mixed mode.
+Create the user only if it does not already exist. Edit
+`/etc/updraft/updraft.env` and add your scan's peripheral ID:
 
-In a systemd service, load the username and password with `LoadCredential`, export the username from its credential path, and set `UPDRAFT_QUICKCONNECT_PASSWORD_FILE` to the systemd credential path for the password. Keep BLE and QuickConnect credential loading independently optional so cloud-only startup does not require `UPDRAFT_DEVICE_ID`. The shared NixOS service defaults QuickConnect off and its write gate off; its package uses the locked source revision and preserves the local identity store across restarts.
+```ini
+UPDRAFT_DEVICE_ID=PERIPHERAL_ID
+UPDRAFT_IDENTITY_STORE=/var/lib/updraft/identities.json
+```
 
-The HTTP API binds to loopback by default. Use `--allow-remote` only when the service is protected by appropriate network controls or an authenticated reverse proxy. The API has no built-in authentication.
+Create `/etc/systemd/system/updraft.service`:
 
-The broker must support MQTT 5. Updraft preserves the publisher's retain flag on control subscriptions so retained commands are rejected before device access.
+```ini
+[Unit]
+Description=Updraft GAF Master Flow attic fan service
+Wants=network-online.target
+After=network-online.target bluetooth.service
 
-Set these variables to enable MQTT:
+[Service]
+User=updraft
+Group=updraft
+StateDirectory=updraft
+StateDirectoryMode=0700
+EnvironmentFile=/etc/updraft/updraft.env
+ExecStart=/usr/local/bin/updraft serve --bind 0.0.0.0:8787 --allow-remote
+Restart=on-failure
+RestartSec=5
+UMask=0077
 
-- `UPDRAFT_MQTT_HOST`
-- `UPDRAFT_MQTT_PORT`
-- `UPDRAFT_MQTT_USERNAME`
-- `UPDRAFT_MQTT_PASSWORD`
-- `UPDRAFT_MQTT_DISCOVERY` (optional; defaults to disabled)
+[Install]
+WantedBy=multi-user.target
+```
 
-Load the password from a local secret store or service-manager credential. Do not pass it on the command line or commit it.
+Install and enable BlueZ using your distribution's tools. The `updraft` user
+must be allowed to access BlueZ through the system D-Bus; check your distribution's
+policy if the service gets a permission error. Then start Updraft:
 
-Give Updraft and Home Assistant separate MQTT accounts. Grant only the publish and subscribe directions each account needs:
+```sh
+sudo systemctl daemon-reload
+sudo systemctl enable --now updraft.service
+systemctl status updraft.service
+journalctl -u updraft.service -n 50 --no-pager
+```
 
-| Account | Operation | Topics |
-| --- | --- | --- |
-| Updraft | Publish | `updraft/availability`, `updraft/+/state`, `updraft/+/availability`, `updraft/+/control/result` |
-| Updraft | Publish discovery | `homeassistant/+/+/+/config` |
-| Updraft | Subscribe | `updraft/+/control/set` |
-| Home Assistant | Publish | `updraft/+/control/set` |
-| Home Assistant | Subscribe | `updraft/availability`, `updraft/+/state`, `updraft/+/availability`, `updraft/+/control/result`, `homeassistant/+/+/+/config` |
+Allow the required network access in your firewall, then check from the Home
+Assistant host:
 
-Updraft's account must not publish commands, and Home Assistant's account must not publish state, availability, results, or discovery. Avoid broad publish grants for `updraft/#`; they include both command and service-owned topics. Use broker authentication and transport encryption when the network is not trusted.
+```sh
+curl http://UPDRAFT_HOST:8787/health
+curl http://UPDRAFT_HOST:8787/api/v2/devices
+curl http://UPDRAFT_HOST:8787/api/v2/devices/configured/state
+```
 
-## Choose a Home Assistant source
+Replace `UPDRAFT_HOST` with the service computer's address. `/health` checks the
+process. The device state response should have `available: true` and current
+readings before you add the [Home Assistant integration](../README.md#add-it-to-home-assistant).
 
-`UPDRAFT_MQTT_DISCOVERY` enables discovery for the configured BLE device. QuickConnect discovery follows each device's state and command source; those sources default to HTTP and can be selected independently in the device model. MQTT can still publish state without discovery for manually configured consumers.
+## QuickConnect (experimental)
 
-HTTP v2 state includes availability, inventory status, optional measurements and settings, diagnostics, and state provenance. `/health` reports process health only; it does not confirm device availability.
+Use this only for a fan configured in the **GAF Master Flow QuickConnect** app.
+It does not connect an original ERV5SMT or EGV5SMT to the cloud. Live compatibility
+has not been verified; see [hardware](hardware.md#quickconnect) and
+[API research](quickconnect-contract.md).
 
-When QuickConnect is enabled, Updraft starts serving HTTP and MQTT immediately and polls the account independently at the normal state interval. A slow or failed cloud request does not delay BLE polling. Failed login or inventory reads leave the service running, mark that account's current devices unavailable, and retry on the next poll. Persist the identity map so a service restart or reordered cloud inventory does not assign an existing Home Assistant local ID to another device.
+The required settings are:
 
-MQTT publishes retained state and per-device availability at `updraft/{local-id}/state` and `updraft/{local-id}/availability`. Process availability has its own retained last-will topic, `updraft/availability`; it does not replace any device's availability. On reconnect, Updraft republishes discovery when enabled and the latest state for every registered device. The old `updraft/gaf_vent/...` topics remain aliases for the configured BLE device.
+| Variable | Value |
+| --- | --- |
+| `UPDRAFT_QUICKCONNECT_USERNAME` | Your QuickConnect account login |
+| `UPDRAFT_QUICKCONNECT_PASSWORD_FILE` | Absolute path to a private file containing the account password |
+| `UPDRAFT_QUICKCONNECT_ROLE` | `contractor` (default) or `consumer`, matching your account |
+| `UPDRAFT_IDENTITY_STORE` | Writable file path for persistent device identities |
 
-## Controls
+For a foreground run, create the password file outside the checkout using your
+editor, restrict it with `chmod 600`, then run:
 
-HTTP v2 and per-device MQTT accept the same strict tagged device commands listed by each device's capabilities. The legacy BLE topic remains an alias for its fixed presets. Neither transport accepts unsupported commands.
+```sh
+export UPDRAFT_QUICKCONNECT_USERNAME='YOUR_ACCOUNT_LOGIN'
+export UPDRAFT_QUICKCONNECT_PASSWORD_FILE='/absolute/path/to/quickconnect-password'
+export UPDRAFT_QUICKCONNECT_ROLE=consumer
+export UPDRAFT_IDENTITY_STORE='/absolute/path/to/updraft-identities.json'
+updraft serve
+```
 
-MQTT control requests use QoS 1 and must be non-retained JSON with a request ID, a Unix timestamp in milliseconds, and a typed command. Updraft rejects malformed, stale, future-dated, retained, and unsupported requests before device access. The request queue is bounded. Controls share the device transaction lock with state polling and report success only at the backend's confirmation level.
+Choose the role that matches your account. The identity file's location
+must be writable. Updraft creates its directory and a new file with owner-only
+permissions. Keep this file across upgrades and restarts: it preserves the IDs
+Home Assistant uses for cloud devices.
 
-Generate a unique request ID and the current Unix timestamp in milliseconds for each new command. Requests older than 30 seconds or more than five seconds in the future are rejected. Reuse an ID only when retrying the same command; replay protection is limited to the cached results described in [Home Assistant transports](home-assistant-entities.md#controls).
+For the systemd service above, store the password at
+`/etc/updraft/quickconnect-password` with root-only permissions. Add a credential
+to its `[Service]` section:
 
-Per-device MQTT results include the request ID and outcome and are non-retained. The legacy alias keeps its existing result shape. A missing result does not prove the device rejected the command; check current state before retrying.
+```ini
+LoadCredential=quickconnect-password:/etc/updraft/quickconnect-password
+Environment=UPDRAFT_QUICKCONNECT_PASSWORD_FILE=%d/quickconnect-password
+```
 
-## Verify and recover
+Add the username, role, and identity path to `/etc/updraft/updraft.env`:
 
-Run `devenv tasks run check:all` for formatting, Clippy, Rust tests, and doctests. Broker configuration checks and deployed-service checks are separate.
+```ini
+UPDRAFT_QUICKCONNECT_USERNAME=YOUR_ACCOUNT_LOGIN
+UPDRAFT_QUICKCONNECT_ROLE=consumer
+UPDRAFT_IDENTITY_STORE=/var/lib/updraft/identities.json
+```
 
-After deployment, verify the process health endpoint, fresh device state, broker availability, one selected Home Assistant entity source, reconnect behavior, and control acknowledgement/readback. Record deployment-specific values in a private operations log.
+Remove `UPDRAFT_DEVICE_ID` for cloud-only operation. After editing the unit, run
+`sudo systemctl daemon-reload` and `sudo systemctl restart updraft.service`.
 
-To rotate a QuickConnect credential, stop Updraft, replace the service-manager secret file, and restart it. A successful login and fresh device state confirm recovery. For a revoked account, restore account access with the provider, confirm the configured role, replace the secret, and restart; do not delete the identity map as a login-recovery step. If the cloud service or Internet is unavailable, keep the process running and treat the QuickConnect entities as unavailable. BLE polling and MQTT process availability remain independent. On recovery, Updraft polls fresh state; it does not queue or replay an old control request. To roll back a release, stop the service, restore the last known-good package, and restart without changing the identity map or device settings.
+`UPDRAFT_QUICKCONNECT_PASSWORD` can supply the password directly through an
+existing secret manager instead. Set exactly one password source. Never put
+passwords in command-line arguments or tracked configuration.
 
-To upgrade, stop the service, install a build from the selected revision, and restart it. To roll back, restore the last known-good build. Home Assistant keeps HTTP integration configuration; MQTT discovery, state, and availability are stored by the broker.
+Cloud controls are disabled by default. To opt into experimental mode, target,
+and timer-duration writes, set `UPDRAFT_QUICKCONNECT_WRITES_ENABLED=true` and
+restart. This advertises controls to Home Assistant and the CLI; enabling it
+does not establish that your model's cloud writes work. The CLI guide lists the
+[commands and limits](cli.md#quickconnect-controls).
+
+Cloud polling runs separately from Bluetooth polling. A login or Internet failure
+leaves the service running and cloud devices unavailable; it retries on the next
+poll. Check the login, account role, and password when authentication fails. Keep
+the identity file when changing a password or recovering account access.
+
+## MQTT
+
+See [Home Assistant and MQTT](home-assistant-entities.md#mqtt-setup) for broker
+settings, discovery, topics, and access rules. MQTT is optional; the HTTP
+integration does not need a broker.
+
+## Troubleshooting
+
+| Symptom | Check |
+| --- | --- |
+| Service rejects missing identity store | Set `UPDRAFT_IDENTITY_STORE` to a private writable path when configuring a fan. |
+| Empty device list | Set `UPDRAFT_DEVICE_ID` for Bluetooth, or configure QuickConnect credentials. The service does not automatically register scanned fans. |
+| Bluetooth fan unavailable | Check the adapter and BlueZ, service-user permissions, range, and the ID from a scan on this computer. Close the GAF app and retry a direct read. |
+| Home Assistant cannot connect | Check the host address, port 8787, listener address, `--allow-remote`, and firewall. `localhost` in Home Assistant refers to Home Assistant's own environment. |
+| QuickConnect fails at startup | Supply a username, exactly one password source, and a writable identity-store path. The password file must be a regular file with no group/other access. |
+| QuickConnect shows no controls | Writes are disabled by default. Read-only devices expose sensors. |
+| Control times out | Read the device state before retrying. The service may still be completing the command. |
+
+For upgrades, stop the service, replace the executable, and restart. Keep the
+identity store and local configuration. To roll back, restore the previous
+executable and restart. Home Assistant's integration configuration does not need
+to be recreated for a normal upgrade.

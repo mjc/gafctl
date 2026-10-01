@@ -1,72 +1,158 @@
 # Updraft
 
-Updraft is a Rust service for reading supported BLE and QuickConnect ventilation controllers and exposing state to Home Assistant over HTTP, MQTT, or both. Cloud account support is optional. Controls use capability-specific commands, and cloud writes are disabled by default.
+Updraft connects **GAF Master Flow Wi-Fi Attic Vent** fans to Home Assistant:
 
-## Workspace
+- **ERV5SMT** — roof mount.
+- **EGV5SMT** — gable mount.
 
-| Crate | Purpose |
-| --- | --- |
-| `updraft-api` | Shared v2 device, capability, state, and control contract. |
-| `updraft-client` | Reusable HTTP client for a running Updraft service. |
-| `updraft-protocol` | Typed commands, values, and frame parsing. |
-| `updraft-bluetooth` | BLE discovery, connection, and protocol transport. |
-| `updraft-quickconnect` | Optional QuickConnect authentication, HTTP client, and state model. |
-| `updraft` | CLI, HTTP API, and optional MQTT bridge. |
+These are the original models that use the **GAF Wi-Fi Vent** app. Updraft talks
+to their controller over Bluetooth, then provides temperature, humidity, fan
+settings, and controls through a service on your network. You can also use the
+command line without Home Assistant. No GAF account or Internet connection is
+needed for these models.
 
-The `updraft` executable lives in root `src/`. Libraries live under `crates/`.
-The executable depends on Bluetooth and protocol; Bluetooth depends on protocol.
-Protocol has no transport or application dependencies. The service client uses the
-shared API contract and reqwest without importing the BLE runtime or server.
+The newer **Master Flow QuickConnect** models use a different app and cloud
+service. Updraft includes an experimental backend for those; see
+[fan models and compatibility](docs/hardware.md) before choosing a setup.
 
-## Run
+## What you need
 
-Use the pinned development environment:
+- An installed ERV5SMT or EGV5SMT with Bluetooth firmware **3.0.0**. GAF added
+  Bluetooth in that firmware version; older firmware needs the manufacturer's
+  app to update it.
+- A computer with Bluetooth within range of the fan. For an always-on service,
+  use a Linux computer with BlueZ. macOS can run the Bluetooth command line too.
+- Home Assistant, if you want its dashboard and automations.
+
+Updraft connects directly over Bluetooth. You do not need to join the fan's
+`GAFVent_XXXX` Wi-Fi network. It does not install or update fan firmware.
+
+## Install
+
+Build on the computer that will connect to the fan. Install
+[Nix](https://nixos.org/download/) and [devenv](https://devenv.sh/getting-started/),
+then run:
 
 ```sh
+git clone https://github.com/mjc/updraft.git
+cd updraft
 devenv allow
-devenv shell -- cargo run -- serve
+devenv shell -- cargo build --release --locked
 ```
 
-For the BLE controller, add `--device-id <peripheral-id>` or set `UPDRAFT_DEVICE_ID`. Without BLE configured, the service starts with an empty device inventory. The API binds to loopback by default. Remote access requires `--allow-remote` and suitable access controls. The API does not provide authentication. See the [HTTP API](docs/http-api.md) for the v2 contract.
+The executable is `target/release/updraft`. The examples below use that path
+from the repository root. On Linux, install and start BlueZ using your
+distribution's package manager. On macOS, allow Bluetooth access if prompted.
 
-Set `UPDRAFT_IDENTITY_STORE` to a private local file path whenever QuickConnect is configured. QuickConnect startup requires this persistent identity store so cloud devices keep stable Home Assistant identities across restarts. New identity files are created with owner-only permissions. Provider and account identifiers stay in that file and do not appear in public device payloads. This path alone does not enable cloud authentication or polling.
-
-QuickConnect is enabled by setting `UPDRAFT_QUICKCONNECT_USERNAME` and exactly one of `UPDRAFT_QUICKCONNECT_PASSWORD` or `UPDRAFT_QUICKCONNECT_PASSWORD_FILE`. `UPDRAFT_QUICKCONNECT_ROLE` accepts `contractor` (default) or `consumer`. Prefer a service-manager credential file with owner-only permissions. QuickConnect works in cloud-only or mixed mode without a BLE device ID. Set `UPDRAFT_QUICKCONNECT_WRITES_ENABLED=true` only after field acceptance; otherwise QuickConnect remains read-only.
-
-Set `UPDRAFT_MQTT_HOST`, `UPDRAFT_MQTT_PORT`, `UPDRAFT_MQTT_USERNAME`, and `UPDRAFT_MQTT_PASSWORD` to enable MQTT. Supply the password through a service manager or another local secret store. Do not commit deployment credentials.
-
-The HTTP integration is the default Home Assistant entity source. MQTT discovery is optional. Use one entity source at a time to avoid duplicate entities. See [deployment](docs/deployment.md) and [Home Assistant transports](docs/home-assistant-entities.md).
-
-The controller's reported fan flag is diagnostic state. It does not prove motor operation or airflow.
-
-## CLI
-
-Read or control devices through a running service:
+## Find your fan
 
 ```sh
-updraft devices
-updraft state configured --format json
-updraft control configured preset timer-clear
-updraft devices --server https://fan.example/updraft
+./target/release/updraft ble scan
 ```
 
-Access a fan directly over BLE:
+Copy the fan's peripheral ID from the output, then read its state:
 
 ```sh
-updraft ble scan
-updraft ble state --device-id <peripheral-id> --format json
-updraft ble control --device-id <peripheral-id> preset automatic-105-f-30-percent
+./target/release/updraft ble state --device-id 'PERIPHERAL_ID'
 ```
 
-During development, run these commands with `devenv shell -- cargo run --` in place
-of `updraft`. See the [CLI guide](docs/cli.md) for commands, controls, JSON output,
-timeouts, and exit codes. Existing `serve` and diagnostic `probe ble` commands
-remain available.
+Replace `PERIPHERAL_ID` with the ID from the scan. It is a platform-specific
+Bluetooth identifier, not the fan's model number. A successful read shows
+temperature, humidity, mode, thresholds, and timer values. If no fan appears,
+check Bluetooth, move the computer closer, and close the GAF app before retrying.
 
-## Development
+## Start the service
 
-The repository uses devenv and pins Rust in `rust-toolchain.toml`. Run the workspace checks with:
+To let Home Assistant on another computer reach Updraft:
 
 ```sh
-devenv tasks run check:all
+./target/release/updraft serve \
+  --device-id 'PERIPHERAL_ID' \
+  --identity-store /absolute/path/to/updraft-identities.json \
+  --bind 0.0.0.0:8787 \
+  --allow-remote
 ```
+
+Replace the identity-store path with a private writable location outside the
+checkout. Keep that file across restarts and upgrades; it stores the service
+identity and device configuration.
+
+Keep this process running. Allow port 8787 only from trusted computers; the HTTP
+API has no login. For access beyond your trusted network, put it behind an
+authenticated reverse proxy or a private network connection.
+
+From the Home Assistant computer or another computer on the same network, check:
+
+```sh
+curl http://UPDRAFT_HOST:8787/api/v2/devices
+curl http://UPDRAFT_HOST:8787/api/v2/devices/configured/state
+```
+
+Replace `UPDRAFT_HOST` with the address of the computer running Updraft. The
+Bluetooth fan has the service device ID `configured`. Look for `available: true`
+and current readings in the state response. The service polls every 30 seconds.
+
+For automatic startup and logs, follow the [service setup guide](docs/deployment.md).
+
+## Add it to Home Assistant
+
+1. Copy this repository's `custom_components/updraft` directory into
+   Home Assistant's configuration directory as `custom_components/updraft`.
+   The resulting path should include `custom_components/updraft/manifest.json`.
+2. Restart Home Assistant.
+3. Open **Settings → Devices & services → Add integration** and search for
+   **Updraft GAF Vent**.
+4. Enter `http://UPDRAFT_HOST:8787`, replacing the host with your service's address.
+   Use the base address without `/api/v2`. Replace any prefilled address.
+5. Select your fan.
+
+Home Assistant gets temperature and humidity sensors, diagnostic sensors, and
+two setting selectors: **Automatic thresholds** and **Fan timer**. The supported
+Bluetooth controls are:
+
+| Setting | Choices |
+| --- | --- |
+| Automatic thresholds | 105.0 °F / 30.0% or 105.1 °F / 30.1% |
+| Fan timer | Clear timer or run a one-minute timer |
+
+These are the settings tested with the original controller. Arbitrary thresholds,
+longer timers, and a separate on/off switch are not exposed by the normal controls.
+Selecting automatic thresholds also switches the controller to automatic mode.
+Clearing the timer leaves it in timer mode; select an automatic preset to resume
+automatic operation. The controller's fan flag reports its setting, not measured
+airflow.
+
+MQTT discovery is an alternative to the HTTP integration. Use the
+[Home Assistant and MQTT guide](docs/home-assistant-entities.md) if you prefer it.
+
+## Use the command line
+
+With the service running:
+
+```sh
+./target/release/updraft devices
+./target/release/updraft state configured
+./target/release/updraft control configured preset automatic-105-f-30-percent
+```
+
+For a remote service, add `--server http://UPDRAFT_HOST:8787`. To control the fan
+directly over Bluetooth:
+
+```sh
+./target/release/updraft ble control --device-id 'PERIPHERAL_ID' preset timer-one-minute
+```
+
+Add `--format json` for scripts. See the [command line guide](docs/cli.md) for
+all presets, QuickConnect commands, timeouts, and exit codes.
+
+## More documentation
+
+- [Fan models and compatibility](docs/hardware.md)
+- [Run as a service; configure QuickConnect](docs/deployment.md)
+- [Home Assistant entities and MQTT](docs/home-assistant-entities.md)
+- [Command line reference](docs/cli.md)
+- [HTTP API](docs/http-api.md)
+- [Development and checks](docs/development.md)
+- [Bluetooth protocol and captured device replies](docs/protocol-findings.md)
+- [Bluetooth protocol contract](docs/protocol-contract-v1.md)
+- [QuickConnect API research](docs/quickconnect-contract.md)

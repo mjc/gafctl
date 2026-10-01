@@ -15,7 +15,8 @@ use tokio::sync::{Mutex, OwnedMutexGuard, OwnedSemaphorePermit, RwLock, Semaphor
 
 use crate::device::{
     DeviceBackend, DeviceCapabilities, DeviceCommand, DeviceDescriptor, DeviceDiagnostics,
-    DeviceId, DeviceSettings, DeviceState, EntitySource, QuickConnectModeStatus, StateProvenance,
+    DeviceId, DeviceSettings, DeviceState, EntitySource, ProxyId, QuickConnectModeStatus,
+    StateProvenance,
 };
 use updraft_quickconnect::QuickConnectCommand;
 
@@ -40,10 +41,20 @@ struct IdentityBinding {
     local_id: DeviceId,
 }
 
-#[derive(Deserialize, Serialize)]
+#[derive(Deserialize)]
 struct IdentityFile {
     version: u8,
+    proxy_id: ProxyId,
+    sources: BTreeMap<DeviceId, EntitySource>,
     bindings: Vec<IdentityBinding>,
+}
+
+#[derive(Serialize)]
+struct IdentityFileContents<'a> {
+    version: u8,
+    proxy_id: ProxyId,
+    sources: &'a BTreeMap<DeviceId, EntitySource>,
+    bindings: &'a [IdentityBinding],
 }
 
 pub struct CloudDeviceInput {
@@ -69,6 +80,8 @@ pub enum DeviceRegistryError {
     PersistenceUnavailable,
     #[error("device is not registered")]
     UnknownDevice,
+    #[error("a device must have one Home Assistant entity source")]
+    MixedSources,
     #[error("command is not supported by this device backend")]
     UnsupportedCommand,
     #[error("could not access the device identity store")]
@@ -336,6 +349,24 @@ impl DeviceRegistry {
         })
     }
 
+    pub fn proxy_id(&self) -> ProxyId {
+        self.identities.proxy_id
+    }
+
+    pub fn mqtt_ownership_required(&self, ble_enabled: bool, account_id: Option<&str>) -> bool {
+        self.identities.sources.iter().any(|(id, source)| {
+            *source == EntitySource::Mqtt
+                && if *id == DeviceId::configured_ble() {
+                    ble_enabled
+                } else {
+                    self.identities.bindings.iter().any(|binding| {
+                        binding.local_id == *id
+                            && Some(binding.identity.account_id.as_str()) == account_id
+                    })
+                }
+        })
+    }
+
     pub fn register_configured_ble(&mut self) -> Arc<DeviceRuntime> {
         let descriptor = DeviceDescriptor::configured_ble();
         self.register(descriptor)
@@ -561,6 +592,13 @@ impl DeviceRegistry {
         state: EntitySource,
         command: EntitySource,
     ) -> Result<(), DeviceRegistryError> {
+        if state != command {
+            return Err(DeviceRegistryError::MixedSources);
+        }
+        if !self.devices.contains_key(id) {
+            return Err(DeviceRegistryError::UnknownDevice);
+        }
+        self.identities.set_sources(id, state)?;
         let descriptor = self
             .devices
             .get_mut(id)
@@ -596,16 +634,19 @@ impl DeviceRegistry {
     }
 
     fn register(&mut self, mut descriptor: DeviceDescriptor) -> Arc<DeviceRuntime> {
+        descriptor.proxy_id = self.identities.proxy_id;
         if self.quickconnect_writes_enabled && descriptor.backend == DeviceBackend::QuickConnect {
             descriptor.capabilities = DeviceCapabilities::quickconnect_with_controls();
         }
         let id = descriptor.id.clone();
-        if let Some(existing) = self.devices.get(&id)
-            && existing.backend == descriptor.backend
-        {
-            descriptor.state_source = existing.state_source;
-            descriptor.command_source = existing.command_source;
-        }
+        let source = self
+            .identities
+            .sources
+            .get(&id)
+            .copied()
+            .unwrap_or(EntitySource::Http);
+        descriptor.state_source = source;
+        descriptor.command_source = source;
         self.devices.insert(id.clone(), descriptor);
         Arc::clone(
             self.runtimes
@@ -657,29 +698,42 @@ pub(crate) fn common_state(state: updraft_quickconnect::QuickConnectDeviceState)
 
 struct IdentityStore {
     path: Option<PathBuf>,
+    proxy_id: ProxyId,
+    sources: BTreeMap<DeviceId, EntitySource>,
     bindings: Vec<IdentityBinding>,
 }
 
 impl IdentityStore {
     fn load(path: PathBuf) -> Result<Self, DeviceRegistryError> {
-        let bindings = match fs::read(&path) {
+        match fs::read(&path) {
             Ok(bytes) => {
                 let stored: IdentityFile = serde_json::from_slice(&bytes)
                     .map_err(|_| DeviceRegistryError::InvalidStore)?;
-                validate_identity_file(stored)?
+                let stored = validate_identity_file(stored)?;
+                Ok(Self {
+                    path: Some(path),
+                    proxy_id: stored.proxy_id,
+                    sources: stored.sources,
+                    bindings: stored.bindings,
+                })
             }
-            Err(error) if error.kind() == io::ErrorKind::NotFound => Vec::new(),
-            Err(error) => return Err(DeviceRegistryError::Io(error)),
-        };
-        Ok(Self {
-            path: Some(path),
-            bindings,
-        })
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                let store = Self {
+                    path: Some(path),
+                    ..Self::in_memory()
+                };
+                store.save(&store.bindings, &store.sources)?;
+                Ok(store)
+            }
+            Err(error) => Err(DeviceRegistryError::Io(error)),
+        }
     }
 
     fn in_memory() -> Self {
         Self {
             path: None,
+            proxy_id: ProxyId::default(),
+            sources: BTreeMap::new(),
             bindings: Vec::new(),
         }
     }
@@ -711,6 +765,7 @@ impl IdentityStore {
                     }
                 };
                 descriptors.push(DeviceDescriptor {
+                    proxy_id: self.proxy_id,
                     id: local_id,
                     name: device.name.clone(),
                     backend: DeviceBackend::QuickConnect,
@@ -722,13 +777,42 @@ impl IdentityStore {
             },
         )?;
         if changed {
-            self.save(&bindings)?;
+            self.save(&bindings, &self.sources)?;
             self.bindings = bindings;
         }
         Ok(descriptors)
     }
 
-    fn save(&self, bindings: &[IdentityBinding]) -> Result<(), DeviceRegistryError> {
+    fn set_sources(
+        &mut self,
+        id: &DeviceId,
+        value: EntitySource,
+    ) -> Result<(), DeviceRegistryError> {
+        if self.sources.get(id) == Some(&value) {
+            return Ok(());
+        }
+        let previous = self.sources.insert(id.clone(), value);
+        if self.path.is_some()
+            && let Err(error) = self.save(&self.bindings, &self.sources)
+        {
+            match previous {
+                Some(source) => {
+                    self.sources.insert(id.clone(), source);
+                }
+                None => {
+                    self.sources.remove(id);
+                }
+            }
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    fn save(
+        &self,
+        bindings: &[IdentityBinding],
+        sources: &BTreeMap<DeviceId, EntitySource>,
+    ) -> Result<(), DeviceRegistryError> {
         let path = self
             .path
             .as_deref()
@@ -738,9 +822,11 @@ impl IdentityStore {
             .filter(|parent| !parent.as_os_str().is_empty())
             .unwrap_or_else(|| Path::new("."));
         fs::create_dir_all(parent).map_err(DeviceRegistryError::Io)?;
-        let contents = serde_json::to_vec(&IdentityFile {
-            version: 1,
-            bindings: bindings.to_vec(),
+        let contents = serde_json::to_vec(&IdentityFileContents {
+            version: 2,
+            proxy_id: self.proxy_id,
+            sources,
+            bindings,
         })
         .map_err(DeviceRegistryError::Encoding)?;
         let temporary_path = temporary_path(path);
@@ -783,15 +869,14 @@ fn validate_inventory(
         .map(|_| ())
 }
 
-fn validate_identity_file(file: IdentityFile) -> Result<Vec<IdentityBinding>, DeviceRegistryError> {
-    let IdentityFile { version, bindings } = file;
-    if version != 1 {
+fn validate_identity_file(file: IdentityFile) -> Result<IdentityFile, DeviceRegistryError> {
+    if file.version != 2 {
         return Err(DeviceRegistryError::InvalidStore);
     }
-    let valid = bindings.iter().try_fold(
+    let valid = file.bindings.iter().try_fold(
         (
-            HashSet::with_capacity(bindings.len()),
-            HashSet::with_capacity(bindings.len()),
+            HashSet::with_capacity(file.bindings.len()),
+            HashSet::with_capacity(file.bindings.len()),
         ),
         |(mut identities, mut local_ids), binding| {
             if !valid_identity(&binding.identity.account_id)
@@ -806,7 +891,15 @@ fn validate_identity_file(file: IdentityFile) -> Result<Vec<IdentityBinding>, De
             Ok((identities, local_ids))
         },
     );
-    valid.map(|_| bindings)
+    let (_, local_ids) = valid?;
+    if file
+        .sources
+        .keys()
+        .any(|id| *id != DeviceId::configured_ble() && !local_ids.contains(id))
+    {
+        return Err(DeviceRegistryError::InvalidStore);
+    }
+    Ok(file)
 }
 
 fn valid_identity(value: &str) -> bool {
@@ -823,6 +916,169 @@ use std::os::unix::fs::OpenOptionsExt;
 #[cfg(test)]
 mod tests {
     use std::{collections::BTreeMap, fs, path::PathBuf};
+
+    #[test]
+    fn identity_store_rejects_dangling_sources_and_invalid_proxy_ids() {
+        let path = registry_path();
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        for (proxy_id, sources) in [
+            (
+                ProxyId::default().to_string(),
+                json!({"unbound-id": "mqtt"}),
+            ),
+            ("not-a-uuid".to_owned(), json!({})),
+            (uuid::Uuid::nil().to_string(), json!({})),
+            ("550e8400-e29b-11d4-a716-446655440000".to_owned(), json!({})),
+        ] {
+            fs::write(
+                &path,
+                serde_json::to_vec(&json!({
+                    "version": 2, "proxy_id": proxy_id, "sources": sources, "bindings": []
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+            assert!(DeviceRegistry::load(&path).is_err_and(is_invalid_store));
+        }
+        fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn failed_source_persistence_preserves_live_and_saved_ownership() {
+        let path = registry_path();
+        let mut registry = DeviceRegistry::load(&path).unwrap();
+        registry.register_configured_ble();
+        let parent = path.parent().unwrap();
+        let backup = parent.with_extension("backup");
+        fs::rename(parent, &backup).unwrap();
+        fs::write(parent, b"block directory creation").unwrap();
+        assert!(
+            registry
+                .set_entity_sources(
+                    &DeviceId::configured_ble(),
+                    EntitySource::Mqtt,
+                    EntitySource::Mqtt
+                )
+                .is_err()
+        );
+        assert_eq!(
+            registry.descriptors().next().unwrap().state_source,
+            EntitySource::Http
+        );
+        assert!(
+            !registry
+                .identities
+                .sources
+                .contains_key(&DeviceId::configured_ble())
+        );
+        fs::remove_file(parent).unwrap();
+        fs::rename(backup, parent).unwrap();
+        let mut restored = DeviceRegistry::load(&path).unwrap();
+        restored.register_configured_ble();
+        assert_eq!(
+            restored.descriptors().next().unwrap().state_source,
+            EntitySource::Http
+        );
+        fs::remove_dir_all(parent).unwrap();
+    }
+
+    #[test]
+    fn inactive_backend_ownership_does_not_require_mqtt() {
+        let path = registry_path();
+        let mut registry = DeviceRegistry::load(&path).unwrap();
+        registry.register_configured_ble();
+        let cloud = registry
+            .reconcile_quickconnect("account-a", &[cloud_device("provider-a", "Fan")])
+            .unwrap()
+            .pop()
+            .unwrap();
+        registry
+            .set_entity_sources(&cloud, EntitySource::Mqtt, EntitySource::Mqtt)
+            .unwrap();
+        assert!(!registry.mqtt_ownership_required(true, None));
+        assert!(!registry.mqtt_ownership_required(false, Some("account-b")));
+        assert!(registry.mqtt_ownership_required(false, Some("account-a")));
+        registry
+            .set_entity_sources(
+                &DeviceId::configured_ble(),
+                EntitySource::Mqtt,
+                EntitySource::Mqtt,
+            )
+            .unwrap();
+        assert!(!registry.mqtt_ownership_required(false, None));
+        assert!(registry.mqtt_ownership_required(true, None));
+        fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn entity_sources_survive_restart_for_ble_and_cloud() {
+        let path = registry_path();
+        let mut registry = DeviceRegistry::load(&path).unwrap();
+        registry.register_configured_ble();
+        let cloud = registry
+            .reconcile_quickconnect(
+                "test-account",
+                &[CloudDeviceInput::new(
+                    "private-provider".to_owned(),
+                    "Cloud fan".to_owned(),
+                )],
+            )
+            .unwrap()
+            .pop()
+            .unwrap();
+        registry
+            .set_entity_sources(
+                &DeviceId::configured_ble(),
+                EntitySource::Mqtt,
+                EntitySource::Mqtt,
+            )
+            .unwrap();
+        registry
+            .set_entity_sources(&cloud, EntitySource::Http, EntitySource::Http)
+            .unwrap();
+        drop(registry);
+        let mut restored = DeviceRegistry::load(&path).unwrap();
+        restored.register_configured_ble();
+        restored
+            .reconcile_quickconnect(
+                "test-account",
+                &[CloudDeviceInput::new(
+                    "private-provider".to_owned(),
+                    "Renamed cloud fan".to_owned(),
+                )],
+            )
+            .unwrap();
+        let ble = restored
+            .descriptors()
+            .find(|d| d.id == DeviceId::configured_ble())
+            .unwrap();
+        assert_eq!(ble.state_source, EntitySource::Mqtt);
+        assert_eq!(ble.command_source, EntitySource::Mqtt);
+        let cloud = restored.descriptors().find(|d| d.id == cloud).unwrap();
+        assert_eq!(cloud.command_source, EntitySource::Http);
+        fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn proxy_identity_is_persisted_before_devices_are_registered() {
+        let path = registry_path();
+        let mut registry = DeviceRegistry::load(&path).unwrap();
+        let first: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        registry.register_configured_ble();
+        let descriptor = serde_json::to_value(registry.descriptors().next().unwrap()).unwrap();
+        assert_eq!(descriptor["proxy_id"], first["proxy_id"]);
+        assert!(
+            first["proxy_id"]
+                .as_str()
+                .is_some_and(|id| uuid::Uuid::parse_str(id).is_ok())
+        );
+        drop(registry);
+        let mut restored = DeviceRegistry::load(&path).unwrap();
+        restored.register_configured_ble();
+        let restored = serde_json::to_value(restored.descriptors().next().unwrap()).unwrap();
+        assert_eq!(restored["proxy_id"], descriptor["proxy_id"]);
+        fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    }
 
     use super::*;
     use crate::device::{DeviceBackend, DeviceSettings, StateProvenance};
@@ -1125,8 +1381,13 @@ mod tests {
             .reconcile_quickconnect("account-a", &[cloud_device("provider-a", "Cloud fan")])
             .unwrap()[0]
             .clone();
+        assert!(
+            registry
+                .set_entity_sources(&cloud_id, EntitySource::Mqtt, EntitySource::Http)
+                .is_err()
+        );
         registry
-            .set_entity_sources(&cloud_id, EntitySource::Mqtt, EntitySource::Http)
+            .set_entity_sources(&cloud_id, EntitySource::Mqtt, EntitySource::Mqtt)
             .unwrap();
         registry
             .reconcile_quickconnect("account-a", &[cloud_device("provider-a", "Cloud fan")])
@@ -1136,7 +1397,7 @@ mod tests {
             .find(|descriptor| descriptor.id == cloud_id)
             .unwrap();
         assert_eq!(cloud.state_source, EntitySource::Mqtt);
-        assert_eq!(cloud.command_source, EntitySource::Http);
+        assert_eq!(cloud.command_source, EntitySource::Mqtt);
         assert_eq!(
             registry
                 .descriptors()
@@ -1154,7 +1415,7 @@ mod tests {
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(
             &path,
-            r#"{"version":1,"bindings":[{"identity":{"account_id":"account-a","provider_id":"provider-a"},"local_id":"configured"}]}"#,
+            serde_json::to_vec(&json!({"version": 2, "proxy_id": ProxyId::default(), "sources": {}, "bindings": [{"identity": {"account_id": "account-a", "provider_id": "provider-a"}, "local_id": "configured"}]})).unwrap(),
         )
         .unwrap();
 
@@ -1169,6 +1430,7 @@ mod tests {
             | DeviceRegistryError::DuplicateProviderId
             | DeviceRegistryError::PersistenceUnavailable
             | DeviceRegistryError::UnknownDevice
+            | DeviceRegistryError::MixedSources
             | DeviceRegistryError::UnsupportedCommand
             | DeviceRegistryError::Io(_)
             | DeviceRegistryError::Encoding(_) => false,
@@ -1288,7 +1550,8 @@ mod tests {
         );
         assert!(result.err().is_some_and(is_duplicate_provider_id));
         assert_eq!(registry.identity_count(), 0);
-        assert!(!path.exists());
+        let stored: IdentityFile = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        assert!(stored.bindings.is_empty());
         fs::remove_dir_all(path.parent().unwrap()).ok();
     }
 
@@ -1299,6 +1562,7 @@ mod tests {
             | DeviceRegistryError::InvalidStore
             | DeviceRegistryError::PersistenceUnavailable
             | DeviceRegistryError::UnknownDevice
+            | DeviceRegistryError::MixedSources
             | DeviceRegistryError::UnsupportedCommand
             | DeviceRegistryError::Io(_)
             | DeviceRegistryError::Encoding(_) => false,

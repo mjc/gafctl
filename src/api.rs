@@ -8,15 +8,15 @@ use std::{
 use crate::backend::{DeviceRegistry, DeviceRuntime};
 use crate::control::{CommandId, ControlPreset, is_fresh_at, unix_millis};
 use crate::device::{
-    DeviceBackend, DeviceCommand, DeviceId, DeviceSettings, DeviceState, LegacyMode,
-    StateProvenance,
+    DeviceBackend, DeviceCommand, DeviceDescriptor, DeviceId, DeviceSettings, DeviceState,
+    EntitySource, EntitySources, LegacyMode, StateProvenance,
 };
 use anyhow::{Context, Result};
 use axum::{
     Json, Router,
     extract::{Path, State},
     http::StatusCode,
-    routing::{get, post},
+    routing::{get, post, put},
 };
 use futures_util::{Stream, StreamExt, TryStreamExt, stream};
 use serde::Serialize;
@@ -483,11 +483,26 @@ pub(crate) async fn serve(
     quickconnect_config: Option<crate::cli::QuickConnectRuntimeConfig>,
 ) -> Result<()> {
     validate_bind_address(address, allow_remote)?;
+    anyhow::ensure!(
+        identity_store.is_some() || (device_id.is_none() && quickconnect_config.is_none()),
+        "configured devices require --identity-store"
+    );
     let listener = TcpListener::bind(address)
         .await
         .context("could not bind HTTP listener")?;
     let registry = DeviceRegistry::load_optional(identity_store)
         .context("could not load local device identity mappings")?;
+    anyhow::ensure!(
+        !registry.mqtt_ownership_required(
+            device_id.is_some(),
+            quickconnect_config
+                .as_ref()
+                .map(|config| config.account_id.as_str())
+        ) || mqtt_config
+            .as_ref()
+            .is_some_and(|config| config.discovery_enabled),
+        "persisted MQTT ownership requires a configured broker and --mqtt-discovery"
+    );
     let mut state = match device_id {
         Some(device_id) => ApiState::with_ble_device(DEFAULT_FRESHNESS_LIMIT, device_id, registry),
         None => ApiState::with_registry(registry),
@@ -536,6 +551,7 @@ fn router(state: ApiState) -> Router {
         .route("/api/v2/devices", get(devices_v2))
         .route("/api/v2/devices/{id}/state", get(device_state_v2))
         .route("/api/v2/devices/{id}/control", post(control_device_v2))
+        .route("/api/v2/devices/{id}/sources", put(set_device_sources_v2))
         .with_state(state)
 }
 
@@ -543,6 +559,41 @@ async fn devices_v2(State(state): State<ApiState>) -> Json<DeviceListV2Response>
     Json(DeviceListV2Response {
         devices: state.registry.read().await.descriptors().cloned().collect(),
     })
+}
+
+async fn set_device_sources_v2(
+    State(state): State<ApiState>,
+    Path(id): Path<String>,
+    Json(sources): Json<EntitySources>,
+) -> Result<Json<DeviceDescriptor>, StatusCode> {
+    let id = DeviceId::parse(id).ok_or(StatusCode::NOT_FOUND)?;
+    if sources.state_source != sources.command_source {
+        return Err(StatusCode::UNPROCESSABLE_ENTITY);
+    }
+    let descriptor = {
+        let mut registry = state.registry.write().await;
+        if registry.runtime(&id).is_none() {
+            return Err(StatusCode::NOT_FOUND);
+        }
+        if sources.state_source == EntitySource::Mqtt
+            && !(state.mqtt_discovery_enabled && state.mqtt_updates.is_some())
+        {
+            return Err(StatusCode::CONFLICT);
+        }
+        registry
+            .set_entity_sources(&id, sources.state_source, sources.command_source)
+            .map_err(|error| {
+                tracing::error!(%error, "could not persist entity ownership");
+                StatusCode::INTERNAL_SERVER_ERROR
+            })?;
+        registry
+            .descriptors()
+            .find(|descriptor| descriptor.id == id)
+            .cloned()
+            .ok_or(StatusCode::NOT_FOUND)?
+    };
+    state.publish_state().await;
+    Ok(Json(descriptor))
 }
 
 async fn device_state_v2(
@@ -1251,6 +1302,99 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn source_route_persists_owner_and_rejects_split_or_unconfigured_mqtt() {
+        let path = identity_store_path();
+        let state = ApiState::with_ble_device(
+            DEFAULT_FRESHNESS_LIMIT,
+            "no-physical-device".to_owned(),
+            DeviceRegistry::load(&path).unwrap(),
+        );
+        let request = || {
+            Request::builder()
+                .method("PUT")
+                .uri("/api/v2/devices/configured/sources")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"state_source":"http","command_source":"http"}"#,
+                ))
+                .unwrap()
+        };
+        let response = router(state.clone()).oneshot(request()).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let descriptor: crate::device::DeviceDescriptor = serde_json::from_slice(&body).unwrap();
+        assert_eq!(descriptor.id, DeviceId::configured_ble());
+        for (sources, expected) in [
+            (
+                r#"{"state_source":"mqtt","command_source":"http"}"#,
+                StatusCode::UNPROCESSABLE_ENTITY,
+            ),
+            (
+                r#"{"state_source":"mqtt","command_source":"mqtt"}"#,
+                StatusCode::CONFLICT,
+            ),
+        ] {
+            let response = router(state.clone())
+                .oneshot(
+                    Request::builder()
+                        .method("PUT")
+                        .uri("/api/v2/devices/configured/sources")
+                        .header("content-type", "application/json")
+                        .body(Body::from(sources))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), expected);
+        }
+        fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    }
+
+    #[tokio::test]
+    async fn source_route_accepts_persistent_mqtt_owner_with_offline_broker() {
+        let path = identity_store_path();
+        let mut state = ApiState::with_ble_device(
+            DEFAULT_FRESHNESS_LIMIT,
+            "no-physical-device".to_owned(),
+            DeviceRegistry::load(&path).unwrap(),
+        );
+        state
+            .start_mqtt(crate::mqtt::MqttConfig {
+                host: "127.0.0.1".to_owned(),
+                port: 1,
+                username: "test-user".to_owned(),
+                password: "test-password".to_owned(),
+                discovery_enabled: true,
+            })
+            .await
+            .unwrap();
+        let mut updates = state.mqtt_updates.as_ref().unwrap().subscribe();
+        let response = router(state.clone())
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/api/v2/devices/configured/sources")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"state_source":"mqtt","command_source":"mqtt"}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        updates.changed().await.unwrap();
+        assert_eq!(updates.borrow().devices[0].state_source, EntitySource::Mqtt);
+        let mut restored = DeviceRegistry::load(&path).unwrap();
+        restored.register_configured_ble();
+        assert_eq!(
+            restored.descriptors().next().unwrap().command_source,
+            EntitySource::Mqtt
+        );
+        fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    }
+
     #[test]
     fn cloud_only_mqtt_state_is_scheduled_without_ble() {
         let mut state = ApiState::with_registry(DeviceRegistry::new());
@@ -1284,7 +1428,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn mqtt_discovery_start_preserves_mixed_per_device_sources() {
+    async fn mqtt_discovery_start_preserves_per_device_ownership() {
         let path = identity_store_path();
         let mut registry = DeviceRegistry::load(&path).unwrap();
         let ids = registry
@@ -1303,7 +1447,7 @@ mod tests {
             )
             .unwrap();
         registry
-            .set_entity_sources(&ids[0], EntitySource::Mqtt, EntitySource::Http)
+            .set_entity_sources(&ids[0], EntitySource::Mqtt, EntitySource::Mqtt)
             .unwrap();
         let mut state = ApiState::with_registry(registry);
 
@@ -1323,7 +1467,7 @@ mod tests {
         assert!(descriptors.iter().any(|device| {
             device.id == ids[0]
                 && device.state_source == EntitySource::Mqtt
-                && device.command_source == EntitySource::Http
+                && device.command_source == EntitySource::Mqtt
         }));
         assert!(descriptors.iter().any(|device| {
             device.id == ids[1]

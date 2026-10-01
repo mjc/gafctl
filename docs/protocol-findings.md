@@ -1,4 +1,9 @@
-# GAF Wi-Fi Vent protocol
+# Original Master Flow controller: protocol findings
+
+The original **GAF Master Flow Wi-Fi Attic Vent** models are **ERV5SMT**
+(roof mount) and **EGV5SMT** (gable mount). These notes describe their original
+controller and the GAF Wi-Fi Vent app. QuickConnect uses a separate controller
+and API; see [fan models](hardware.md) for manufacturer sources.
 
 App: GAF Wi-Fi Vent 2.1 (`com.gaf.wifivent`). Firmware: `GAFVent_030000.bin`. BLE reads and controls were tested against one device; its identifier is redacted. No OTA command was sent.
 
@@ -58,6 +63,7 @@ On 2026-09-29, Updraft scanned for service `00FF`, connected to characteristic `
 
 ## Remaining work
 
-- Confirm the model and firmware revision from a product label or other source.
+- Check additional controllers and firmware revisions. The captured device reports
+  3.0.0; its identity reply does not establish the roof/gable model.
 - Capture the Wi-Fi TLS exchange if implementing Wi-Fi support. Keep certificate and private-key contents out of the repository.
 - Test other controls after identifying their command ranges. Measure airflow separately from controller state.
