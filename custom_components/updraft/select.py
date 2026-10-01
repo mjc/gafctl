@@ -10,7 +10,7 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from . import UpdraftCoordinator
-from .client import ApiError
+from .client import ApiError, timer_control_preset
 from .const import DOMAIN
 
 THRESHOLD_PRESETS = {
@@ -87,13 +87,12 @@ class UpdraftControlSelect(CoordinatorEntity[UpdraftCoordinator], SelectEntity):
                 ),
                 None,
             )
-        minutes = state.get("timer_original_minutes")
+        current_preset = timer_control_preset(state)
         return next(
             (
                 label
                 for label, preset in self._presets.items()
-                if (preset == "timer_clear" and minutes == 0)
-                or (preset == "timer_one_minute" and minutes == 1)
+                if preset == current_preset
             ),
             None,
         )

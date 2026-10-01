@@ -53,6 +53,24 @@ class FailedSession:
 
 
 class ApiClientTests(unittest.TestCase):
+    def test_timer_preset_requires_matching_remaining_and_original_duration(self):
+        for remaining, original, expected in (
+            (0, 0, "timer_clear"),
+            (1, 1, "timer_one_minute"),
+            (0, 1, None),
+            (2, 1, None),
+            (1, 2, None),
+            (0, 2, None),
+        ):
+            with self.subTest(remaining=remaining, original=original):
+                self.assertEqual(
+                    CLIENT.timer_control_preset({
+                        "timer_remaining_minutes": remaining,
+                        "timer_original_minutes": original,
+                    }),
+                    expected,
+                )
+
     def test_normalizes_proxy_url_and_rejects_embedded_credentials(self):
         self.assertEqual(
             normalize_api_url(" http://127.0.0.1:8787/ "),

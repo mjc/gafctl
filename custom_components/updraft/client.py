@@ -176,6 +176,12 @@ def _control_error(payload: Any, status: int) -> str:
     return f"proxy returned HTTP {status} for control"
 
 
+def timer_control_preset(state: Mapping[str, Any]) -> str | None:
+    return {(0, 0): "timer_clear", (1, 1): "timer_one_minute"}.get(
+        (state.get("timer_remaining_minutes"), state.get("timer_original_minutes"))
+    )
+
+
 def _valid_identifier(value: str) -> bool:
     return bool(value) and all(
         character.isascii() and (character.isalnum() or character in "_-")
