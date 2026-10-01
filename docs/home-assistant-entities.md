@@ -21,6 +21,7 @@ For an original **GAF Master Flow Wi-Fi Attic Vent** (ERV5SMT or EGV5SMT):
 | Timer remaining | Remaining timer minutes |
 | Automatic thresholds | Select 105.0 °F / 30.0% or 105.1 °F / 30.1% |
 | Fan timer | Select Clear timer or 1 minute |
+| Refresh readings | Request a new device reading through the service |
 
 The automatic selector sets both thresholds and automatic mode. Clearing the
 timer leaves the controller in timer mode; use an automatic preset to return to
@@ -29,6 +30,7 @@ match an available choice. An expired timer does not show as an active one-minut
 timer. These thresholds are tested presets, not recommendations for your attic.
 
 QuickConnect devices expose temperature, humidity, and available diagnostics.
+They include the Refresh readings button without enabling cloud writes.
 When experimental cloud writes are enabled, they also expose:
 
 | Entity | Choices or range |
@@ -46,8 +48,11 @@ controller's fan flag measures airflow.
 ## Availability and updates
 
 The service polls every 30 seconds. The HTTP integration also updates every 30
-seconds and reads the service's cached state. A manual refresh in Home Assistant
-does not force a new Bluetooth query. Original-controller snapshots become
+seconds and reads the service's cached state. The **Refresh readings** button
+requests a device read, sharing any refresh already in progress for that device.
+It reports failed or superseded reads and checks current identity and ownership
+before updating HA. It can refresh a configured device whose readings are
+unavailable. Original-controller snapshots become
 unavailable after 90 seconds without a complete successful reading.
 
 `/health` checks whether the service responds. To check the fan, use

@@ -27,7 +27,8 @@ use serde::de::DeserializeOwned;
 use thiserror::Error;
 use updraft_api::{
     CommandId, ContractError, DeviceCommand, DeviceControlV2Request, DeviceControlV2Response,
-    DeviceDescriptor, DeviceId, DeviceListV2Response, DeviceStateV2Response, unix_millis,
+    DeviceDescriptor, DeviceId, DeviceListV2Response, DeviceRefreshStatus, DeviceRefreshV2Response,
+    DeviceStateV2Response, unix_millis,
 };
 
 const MAX_RESPONSE_BYTES: usize = 2 * 1024 * 1024;
@@ -115,6 +116,8 @@ pub enum ClientError {
     Contract(#[from] ContractError),
     #[error("service returned a different device or backend")]
     Identity,
+    #[error("service HTTP status does not match the refresh outcome")]
+    RefreshStatus,
     #[error("service returned a different control request ID")]
     Correlation,
     #[error("device is not in the service inventory")]
@@ -165,7 +168,7 @@ impl ClientError {
             Self::Http(_) => "http",
             Self::ResponseTooLarge => "response_too_large",
             Self::Decoding(_) => "decoding",
-            Self::Contract(_) | Self::Identity => "contract",
+            Self::Contract(_) | Self::Identity | Self::RefreshStatus => "contract",
             Self::Correlation => "correlation",
             Self::UnknownDevice => "unknown_device",
             Self::Unsupported => "unsupported_command",
@@ -251,6 +254,41 @@ impl Client {
             return Err(response_error(status, ClientError::Identity));
         }
         Ok(result)
+    }
+
+    /// Read through the service's existing device owner. Concurrent requests share
+    /// one worker; failed and superseded reads retain their explicit outcomes.
+    pub async fn refresh(&self, id: &DeviceId) -> Result<DeviceRefreshV2Response, ClientError> {
+        let descriptor = self.descriptor(id).await?;
+        if !descriptor.capabilities.read_state {
+            return Err(ClientError::Unsupported);
+        }
+        let (status, body) = bounded_response(
+            self.http
+                .post(self.server.endpoint(Some(id), Some("refresh")))
+                .timeout(self.options.control_timeout),
+        )
+        .await?;
+        if ![200, 409, 502].contains(&status) {
+            return Err(ClientError::Http(status));
+        }
+        let response: DeviceRefreshV2Response = serde_json::from_slice(&body)
+            .map_err(|error| response_error(status, ClientError::Decoding(error)))?;
+        response
+            .validate()
+            .map_err(|error| response_error(status, ClientError::Contract(error)))?;
+        if &response.device.id != id || response.device.backend != descriptor.backend {
+            return Err(response_error(status, ClientError::Identity));
+        }
+        let expected_status = match response.status {
+            DeviceRefreshStatus::Fresh => 200,
+            DeviceRefreshStatus::Failed => 502,
+            DeviceRefreshStatus::Superseded => 409,
+        };
+        if status != expected_status {
+            return Err(response_error(status, ClientError::RefreshStatus));
+        }
+        Ok(response)
     }
 
     /// Resolve inventory and capabilities before a control can be submitted.

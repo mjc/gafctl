@@ -42,20 +42,46 @@ class UpdraftCoordinator(DataUpdateCoordinator[dict]):
 
     async def _async_update_data(self) -> dict:
         try:
-            devices = await self.client.fetch_devices()
-            current = next(
-                (device for device in devices
-                 if device["id"] == self.device_id
-                 and device["proxy_id"] == self.entry.data[CONF_PROXY_ID]),
-                None,
-            )
-            self.device = current or unavailable_device(self.entry)
-            self._reload_changed_entities()
+            current = await self._async_resolve_device()
             if current is None:
                 raise UpdateFailed("configured device is absent from this proxy")
             return await self.client.fetch_state(self.device_id)
         except ApiError as error:
             raise UpdateFailed(str(error)) from error
+
+    async def _async_resolve_device(self) -> dict | None:
+        devices = await self.client.fetch_devices()
+        current = next(
+            (device for device in devices
+             if device["id"] == self.device_id
+             and device["proxy_id"] == self.entry.data[CONF_PROXY_ID]),
+            None,
+        )
+        self.device = current or unavailable_device(self.entry)
+        self._reload_changed_entities()
+        return current
+
+    async def async_refresh_device(self) -> None:
+        async with self.command_lock:
+            current = await self._async_http_state_device()
+            await self.client.refresh(self.device_id, current["backend"])
+            await self._async_http_state_device()
+            await self.async_refresh()
+            if not (
+                self.last_update_success
+                and self.http_state_owned
+                and self.device["state"]
+                and self.data
+                and self.data.get("available") is True
+                and self.data.get("freshness") == "fresh"
+            ):
+                raise ApiError("device was refreshed, but current HTTP readings are unavailable")
+
+    async def _async_http_state_device(self) -> dict:
+        current = await self._async_resolve_device()
+        if current is None or not current["state"] or not self.http_state_owned:
+            raise ApiError("this device does not own HTTP readings")
+        return current
 
     def _reload_changed_entities(self) -> None:
         if (

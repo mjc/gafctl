@@ -90,53 +90,34 @@ class ApiClient:
         if not _valid_identifier(device_id):
             raise ApiError("invalid configured device")
         payload = await self._get_json(f"api/v2/devices/{device_id}/state")
-        if not isinstance(payload, Mapping):
-            raise ApiError("proxy returned invalid device state")
-        available = payload.get("available")
-        state = payload.get("state")
-        last_error = payload.get("last_error")
-        backend = payload.get("backend")
-        inventory_status = payload.get("inventory_status")
-        if not isinstance(backend, str) or backend not in {
-            "legacy_ble",
-            "quick_connect",
-        }:
-            raise ApiError("proxy returned invalid device state")
-        if not isinstance(inventory_status, str) or inventory_status not in {
-            "unknown",
-            "present",
-            "missing",
-            "unavailable",
-        }:
-            raise ApiError("proxy returned invalid device state")
-        if not isinstance(available, bool):
-            raise ApiError("proxy returned invalid device state")
-        if state is not None and not isinstance(state, Mapping):
-            raise ApiError("proxy returned invalid device state")
-        if last_error is not None and not isinstance(last_error, str):
-            raise ApiError("proxy returned invalid device state")
-        if payload.get("id") != device_id:
-            raise ApiError("proxy returned mismatched device state")
-        if available != (state is not None):
-            raise ApiError("proxy returned inconsistent device state")
-        observed_at = None
-        values = None
-        if state is not None:
-            if not _valid_state(state, backend):
-                raise ApiError("proxy returned invalid device values")
-            observed_at = state["provenance"].get("observed_at_unix_ms")
-            values = _home_assistant_values(state, backend)
-        freshness = "fresh" if available else (
-            "unknown" if inventory_status == "unknown" else "stale"
-        )
-        return {
-            "device_id": device_id,
-            "available": available,
-            "freshness": freshness,
-            "observed_at_unix_ms": observed_at,
-            "last_error": last_error,
-            "state": values,
-        }
+        return _state_response(payload, device_id)
+
+    async def refresh(self, device_id: str, backend: str) -> dict[str, Any]:
+        if not _valid_identifier(device_id):
+            raise ApiError("invalid configured device")
+        url = urljoin(self._base_url, f"api/v2/devices/{device_id}/refresh")
+        try:
+            async with self._session.post(url, timeout=300) as response:
+                payload = await response.json()
+                if not isinstance(payload, Mapping):
+                    raise ApiError("proxy returned invalid refresh outcome")
+                status = payload.get("status")
+                if response.status != 200 or status != "fresh":
+                    if status == "superseded":
+                        raise ApiError("device refresh was superseded by another operation")
+                    raise ApiError("device refresh did not complete")
+                result = _state_response(payload, device_id)
+                if payload["backend"] != backend:
+                    raise ApiError("proxy returned a refresh for a different backend")
+                if not result["available"] or payload["inventory_status"] != "present":
+                    raise ApiError("proxy returned a refresh without current readings")
+                return result
+        except asyncio.CancelledError:
+            raise
+        except ApiError:
+            raise
+        except Exception as error:
+            raise ApiError("cannot refresh readings from the local proxy") from error
 
     async def set_control(self, device_id: str, command: str | Mapping[str, Any]) -> None:
         """Send one typed command and require a matching confirmed response."""
@@ -248,6 +229,7 @@ def entity_keys(device: Mapping[str, Any]) -> dict[str, set[str]]:
     commands_owned = device.get("command_source", "http") == "http"
     entities: dict[str, set[str]] = {}
     if state_owned and has_state:
+        entities["button"] = {"refresh"}
         entities["sensor"] = (
             set(LEGACY_SENSOR_KEYS)
             if backend == "legacy_ble"
@@ -491,3 +473,53 @@ def _is_finite_number(value: Any) -> bool:
         return math.isfinite(value)
     except OverflowError:
         return False
+
+
+def _state_response(payload: Any, device_id: str) -> dict[str, Any]:
+    if not isinstance(payload, Mapping):
+        raise ApiError("proxy returned invalid device state")
+    available = payload.get("available")
+    state = payload.get("state")
+    last_error = payload.get("last_error")
+    backend = payload.get("backend")
+    inventory_status = payload.get("inventory_status")
+    if not isinstance(backend, str) or backend not in {
+        "legacy_ble",
+        "quick_connect",
+    }:
+        raise ApiError("proxy returned invalid device state")
+    if not isinstance(inventory_status, str) or inventory_status not in {
+        "unknown",
+        "present",
+        "missing",
+        "unavailable",
+    }:
+        raise ApiError("proxy returned invalid device state")
+    if not isinstance(available, bool):
+        raise ApiError("proxy returned invalid device state")
+    if state is not None and not isinstance(state, Mapping):
+        raise ApiError("proxy returned invalid device state")
+    if last_error is not None and not isinstance(last_error, str):
+        raise ApiError("proxy returned invalid device state")
+    if payload.get("id") != device_id:
+        raise ApiError("proxy returned mismatched device state")
+    if available != (state is not None):
+        raise ApiError("proxy returned inconsistent device state")
+    observed_at = None
+    values = None
+    if state is not None:
+        if not _valid_state(state, backend):
+            raise ApiError("proxy returned invalid device values")
+        observed_at = state["provenance"].get("observed_at_unix_ms")
+        values = _home_assistant_values(state, backend)
+    freshness = "fresh" if available else (
+        "unknown" if inventory_status == "unknown" else "stale"
+    )
+    return {
+        "device_id": device_id,
+        "available": available,
+        "freshness": freshness,
+        "observed_at_unix_ms": observed_at,
+        "last_error": last_error,
+        "state": values,
+    }

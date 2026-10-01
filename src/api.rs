@@ -5,7 +5,7 @@ use std::{
     time::{Duration, SystemTime},
 };
 
-use crate::backend::{DeviceRegistry, DeviceRuntime};
+use crate::backend::{DeviceRegistry, DeviceRuntime, RefreshReceiver, RefreshReservation};
 use crate::control::{CommandId, ControlPreset, is_fresh_at, unix_millis};
 use crate::device::{
     DeviceBackend, DeviceCommand, DeviceDescriptor, DeviceId, DeviceSettings, DeviceState,
@@ -16,6 +16,7 @@ use axum::{
     Json, Router,
     extract::{Path, State},
     http::StatusCode,
+    response::{IntoResponse, Response},
     routing::{get, post, put},
 };
 #[cfg(feature = "mqtt")]
@@ -29,7 +30,10 @@ use tokio::{
     sync::RwLock,
     time::{Interval, MissedTickBehavior, interval},
 };
-use updraft_api::{ControlStatus as V2ControlStatus, DeviceListV2Response, DeviceStateV2Response};
+use updraft_api::{
+    ControlStatus as V2ControlStatus, DeviceListV2Response, DeviceRefreshStatus,
+    DeviceRefreshV2Response, DeviceStateV2Response,
+};
 pub(crate) use updraft_api::{DeviceControlV2Request, DeviceControlV2Response};
 use updraft_bluetooth::{
     DisconnectOutcome, ProbeClient, ProbeError, ProbeErrorKind, ProbeMode, ProbeOptions,
@@ -47,6 +51,7 @@ use crate::quickconnect_control::{
 #[cfg(test)]
 const DEVICE_ID: &str = "configured";
 const DEFAULT_POLL_INTERVAL: Duration = Duration::from_secs(30);
+const DEVICE_REFRESH_TIMEOUT: Duration = Duration::from_secs(270);
 
 #[derive(Clone)]
 struct ApiState {
@@ -136,10 +141,151 @@ impl ApiState {
     }
 
     async fn poll_and_publish_state(&self) {
-        if let Some(device) = &self.ble_device {
-            device.poll_and_publish_state(self).await;
+        if self.ble_device.is_some() {
+            if let Err(status) = self.refresh_device(&DeviceId::configured_ble()).await {
+                tracing::warn!(%status, "device refresh worker failed");
+            }
         } else {
             self.publish_state().await;
+        }
+    }
+
+    async fn refresh_device(
+        &self,
+        id: &DeviceId,
+    ) -> Result<Arc<DeviceRefreshV2Response>, StatusCode> {
+        let (backend, runtime) = self.refresh_target(id).await?;
+        let receiver = match runtime.reserve_refresh().await {
+            RefreshReservation::Join(receiver) => receiver,
+            RefreshReservation::Execute {
+                receiver,
+                completion,
+            } => {
+                let state = self.clone();
+                let id = id.clone();
+                tokio::spawn(async move {
+                    if let Ok(response) = state.execute_device_refresh(&id, backend, &runtime).await
+                    {
+                        completion.send_replace(Some(Arc::new(response)));
+                    }
+                });
+                receiver
+            }
+        };
+        wait_for_device_refresh(receiver).await
+    }
+
+    async fn refresh_target(
+        &self,
+        id: &DeviceId,
+    ) -> Result<(DeviceBackend, Arc<DeviceRuntime>), StatusCode> {
+        let registry = self.registry.read().await;
+        let descriptor = registry
+            .descriptors()
+            .find(|device| &device.id == id)
+            .ok_or(StatusCode::NOT_FOUND)?;
+        if !descriptor.capabilities.read_state {
+            return Err(StatusCode::UNPROCESSABLE_ENTITY);
+        }
+        let configured = match descriptor.backend {
+            DeviceBackend::LegacyBle => self.ble_device.is_some(),
+            DeviceBackend::QuickConnect => self.quickconnect_runtime.is_some(),
+        };
+        if !configured {
+            return Err(StatusCode::SERVICE_UNAVAILABLE);
+        }
+        Ok((
+            descriptor.backend,
+            registry.runtime(id).ok_or(StatusCode::NOT_FOUND)?,
+        ))
+    }
+
+    async fn execute_device_refresh(
+        &self,
+        id: &DeviceId,
+        backend: DeviceBackend,
+        runtime: &DeviceRuntime,
+    ) -> Result<DeviceRefreshV2Response, StatusCode> {
+        let response = match tokio::time::timeout(
+            DEVICE_REFRESH_TIMEOUT,
+            self.read_device_locked(id, backend, runtime),
+        )
+        .await
+        {
+            Ok(response) => response?,
+            Err(_) => {
+                let mut device = device_state_v2_data(self, id).await?;
+                device.last_error = Some("device refresh deadline exceeded".to_owned());
+                DeviceRefreshV2Response {
+                    status: DeviceRefreshStatus::Failed,
+                    device,
+                }
+            }
+        };
+        self.publish_state().await;
+        Ok(response)
+    }
+
+    async fn read_device_locked(
+        &self,
+        id: &DeviceId,
+        backend: DeviceBackend,
+        runtime: &DeviceRuntime,
+    ) -> Result<DeviceRefreshV2Response, StatusCode> {
+        let _transaction = runtime.acquire_transaction().await;
+        let status = match backend {
+            DeviceBackend::LegacyBle => {
+                self.ble_device
+                    .as_ref()
+                    .ok_or(StatusCode::SERVICE_UNAVAILABLE)?
+                    .read_state_locked()
+                    .await
+            }
+            DeviceBackend::QuickConnect => self.read_quickconnect_state_locked(id, runtime).await?,
+        };
+        Ok(DeviceRefreshV2Response {
+            status,
+            device: device_state_v2_data(self, id).await?,
+        })
+    }
+
+    async fn read_quickconnect_state_locked(
+        &self,
+        id: &DeviceId,
+        runtime: &DeviceRuntime,
+    ) -> Result<DeviceRefreshStatus, StatusCode> {
+        let cloud = self
+            .quickconnect_runtime
+            .as_ref()
+            .ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
+        let (_, provider_id) = self
+            .registry
+            .read()
+            .await
+            .quickconnect_read_target(&cloud.account_id, id)
+            .map_err(|_| StatusCode::NOT_FOUND)?;
+        let generation = runtime.begin_state_read();
+        match cloud.client.read_device_state(&provider_id).await {
+            Ok(state) => Ok(
+                if runtime
+                    .set_state_if_current(generation, crate::backend::common_state(state))
+                    .await
+                {
+                    DeviceRefreshStatus::Fresh
+                } else {
+                    DeviceRefreshStatus::Superseded
+                },
+            ),
+            Err(error) => {
+                tracing::warn!(%error, "QuickConnect device refresh failed");
+                Ok(
+                    if runtime.mark_detail_unavailable_if_current(generation).await {
+                        DeviceRefreshStatus::Failed
+                    } else {
+                        DeviceRefreshStatus::Superseded
+                    },
+                )
+            }
         }
     }
 
@@ -359,18 +505,20 @@ impl LegacyBleRuntime {
         }
     }
 
-    async fn poll_and_publish_state(&self, state: &ApiState) {
-        let _transaction = self.device.acquire_transaction().await;
+    async fn read_state_locked(&self) -> DeviceRefreshStatus {
         let poll_id = self.reconciler.write().await.begin_poll();
         let result = self.probe(None).await;
-        if let Ok(ProbeResult::Queried { result, .. }) = &result
+        let status = if let Ok(ProbeResult::Queried { result, .. }) = &result
             && let Some(snapshot) = &result.snapshot
             && let Some(projection) = project_legacy_snapshot(snapshot)
         {
             self.device.set_state(projection.device_state).await;
-        }
+            DeviceRefreshStatus::Fresh
+        } else {
+            DeviceRefreshStatus::Failed
+        };
         self.reconcile_poll_result(poll_id, result).await;
-        state.publish_state().await;
+        status
     }
 
     async fn reconcile_poll_result(&self, poll_id: u64, result: Result<ProbeResult, ProbeError>) {
@@ -565,6 +713,7 @@ fn router(state: ApiState) -> Router {
         .route("/health", get(health))
         .route("/api/v2/devices", get(devices_v2))
         .route("/api/v2/devices/{id}/state", get(device_state_v2))
+        .route("/api/v2/devices/{id}/refresh", post(refresh_device_v2))
         .route("/api/v2/devices/{id}/control", post(control_device_v2))
         .route("/api/v2/devices/{id}/sources", put(set_device_sources_v2))
         .with_state(state)
@@ -625,6 +774,32 @@ async fn device_state_v2(
 ) -> Result<Json<DeviceStateV2Response>, StatusCode> {
     let id = DeviceId::parse(id).ok_or(StatusCode::NOT_FOUND)?;
     device_state_v2_data(&state, &id).await.map(Json)
+}
+
+async fn refresh_device_v2(
+    State(state): State<ApiState>,
+    Path(id): Path<String>,
+) -> Result<Response, StatusCode> {
+    let id = DeviceId::parse(id).ok_or(StatusCode::NOT_FOUND)?;
+    let response = state.refresh_device(&id).await?;
+    let status = match response.status {
+        DeviceRefreshStatus::Fresh => StatusCode::OK,
+        DeviceRefreshStatus::Failed => StatusCode::BAD_GATEWAY,
+        DeviceRefreshStatus::Superseded => StatusCode::CONFLICT,
+    };
+    Ok((status, Json(response.as_ref())).into_response())
+}
+
+async fn wait_for_device_refresh(
+    mut receiver: RefreshReceiver,
+) -> Result<Arc<DeviceRefreshV2Response>, StatusCode> {
+    receiver
+        .wait_for(|result| result.is_some())
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .as_ref()
+        .cloned()
+        .ok_or(StatusCode::INTERNAL_SERVER_ERROR)
 }
 
 async fn device_state_v2_data(
@@ -1258,6 +1433,240 @@ mod tests {
     use tower::ServiceExt;
 
     use super::*;
+
+    #[tokio::test(start_paused = true)]
+    async fn refresh_deadline_releases_worker_without_starting_a_second_ble_owner() {
+        let state =
+            ApiState::with_ble_device("no-physical-device".to_owned(), DeviceRegistry::new());
+        let runtime = state
+            .registry
+            .read()
+            .await
+            .runtime(&DeviceId::configured_ble())
+            .unwrap();
+        let transaction = runtime.acquire_transaction().await;
+        let first = state
+            .refresh_device(&DeviceId::configured_ble())
+            .await
+            .unwrap();
+        assert_eq!(first.status, DeviceRefreshStatus::Failed);
+        assert_eq!(
+            first.device.last_error.as_deref(),
+            Some("device refresh deadline exceeded")
+        );
+        let second = state
+            .refresh_device(&DeviceId::configured_ble())
+            .await
+            .unwrap();
+        assert_eq!(second.status, DeviceRefreshStatus::Failed);
+        assert!(!Arc::ptr_eq(&first, &second));
+        drop(transaction);
+        assert!(runtime.try_acquire_transaction().is_some());
+    }
+
+    #[tokio::test]
+    async fn refresh_waiter_reports_closed_worker_without_hanging() {
+        let (sender, receiver) = tokio::sync::watch::channel(None);
+        drop(sender);
+        assert_eq!(
+            wait_for_device_refresh(receiver).await.unwrap_err(),
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
+    }
+
+    #[derive(Default)]
+    struct RefreshFixture {
+        reads: std::sync::atomic::AtomicUsize,
+        entered: tokio::sync::Notify,
+        release: tokio::sync::Notify,
+        fail: std::sync::atomic::AtomicBool,
+    }
+
+    async fn refresh_fixture() -> (
+        ApiState,
+        DeviceId,
+        Arc<RefreshFixture>,
+        tokio::task::JoinHandle<()>,
+        PathBuf,
+    ) {
+        let path = identity_store_path();
+        let mut registry = DeviceRegistry::load(&path).unwrap();
+        let id = registry
+            .reconcile_quickconnect(
+                "synthetic-account",
+                &[crate::backend::CloudDeviceInput::new(
+                    "private-fixture-id".to_owned(),
+                    "Vent".to_owned(),
+                )],
+            )
+            .unwrap()
+            .pop()
+            .unwrap();
+        let fixture = Arc::new(RefreshFixture::default());
+        let app = Router::new()
+            .route(
+                "/cognito/login",
+                post(|| async {
+                    Json(serde_json::json!({"responseData": {"idToken": "synthetic-token"}}))
+                }),
+            )
+            .route("/gaf/device", get(refresh_fixture_detail))
+            .with_state(Arc::clone(&fixture));
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}/", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let client = QuickConnectClient::new(
+            updraft_quickconnect::Credentials::new(
+                "synthetic-user",
+                "synthetic-password",
+                updraft_quickconnect::AccountRole::Contractor,
+            ),
+            QuickConnectConfig::new(
+                format!("{base}cognito/").parse().unwrap(),
+                format!("{base}gaf/").parse().unwrap(),
+            ),
+        )
+        .unwrap();
+        let mut state = ApiState::with_registry(registry);
+        state.quickconnect_runtime = Some(QuickConnectRuntime {
+            account_id: "synthetic-account".to_owned(),
+            client,
+        });
+        (state, id, fixture, server, path)
+    }
+
+    async fn refresh_fixture_detail(
+        State(fixture): State<Arc<RefreshFixture>>,
+    ) -> (StatusCode, Json<serde_json::Value>) {
+        fixture
+            .reads
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        fixture.entered.notify_one();
+        fixture.release.notified().await;
+        if fixture.fail.load(std::sync::atomic::Ordering::SeqCst) {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"message":"synthetic failure"})),
+            );
+        }
+        (
+            StatusCode::OK,
+            Json(serde_json::json!({"responseData": {
+                "deviceConfig": {"setTemperature": 78, "setHumidity": 44},
+                "deviceSettings": {"automaticMode":true,"timerMode":false,"fanMode":false,
+                    "setTemperature":105,"setHumidity":40,"humidityMonitor":true}
+            }})),
+        )
+    }
+
+    #[tokio::test]
+    async fn refresh_survives_cancelled_caller_and_coalesces_overlapping_reads() {
+        let (state, id, fixture, server, path) = refresh_fixture().await;
+        let first_state = state.clone();
+        let first_id = id.clone();
+        let first = tokio::spawn(async move { first_state.refresh_device(&first_id).await });
+        fixture.entered.notified().await;
+        first.abort();
+        let second = state.refresh_device(&id);
+        tokio::pin!(second);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(10), &mut second)
+                .await
+                .is_err()
+        );
+        fixture.release.notify_one();
+        let response = second.await.unwrap();
+        assert_eq!(response.status, DeviceRefreshStatus::Fresh);
+        assert!(response.device.available);
+        assert_eq!(fixture.reads.load(std::sync::atomic::Ordering::SeqCst), 1);
+        fixture.release.notify_one();
+        let response = state.refresh_device(&id).await.unwrap();
+        assert_eq!(response.status, DeviceRefreshStatus::Fresh);
+        assert_eq!(fixture.reads.load(std::sync::atomic::Ordering::SeqCst), 2);
+        server.abort();
+        fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    }
+
+    #[tokio::test]
+    async fn refresh_uses_transaction_lock_and_does_not_publish_superseded_read() {
+        let (state, id, fixture, server, path) = refresh_fixture().await;
+        let runtime = state.registry.read().await.runtime(&id).unwrap();
+        let transaction = runtime.acquire_transaction().await;
+        let request = state.refresh_device(&id);
+        tokio::pin!(request);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(10), &mut request)
+                .await
+                .is_err()
+        );
+        assert_eq!(fixture.reads.load(std::sync::atomic::Ordering::SeqCst), 0);
+        drop(transaction);
+        fixture.entered.notified().await;
+        runtime.begin_control_intent();
+        fixture.release.notify_one();
+        let response = request.await.unwrap();
+        assert_eq!(response.status, DeviceRefreshStatus::Superseded);
+        assert!(runtime.state().await.is_none());
+        server.abort();
+        fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    }
+
+    #[tokio::test]
+    async fn refresh_route_reports_failed_read_instead_of_reusing_success() {
+        let (state, id, fixture, server, path) = refresh_fixture().await;
+        fixture.release.notify_one();
+        assert_eq!(
+            state.refresh_device(&id).await.unwrap().status,
+            DeviceRefreshStatus::Fresh
+        );
+        fixture
+            .fail
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        fixture.release.notify_one();
+        let response = router(state)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/v2/devices/{}/refresh", id.as_str()))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+        let response: DeviceRefreshV2Response =
+            serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
+                .unwrap();
+        assert_eq!(response.status, DeviceRefreshStatus::Failed);
+        assert!(!response.device.available);
+        assert!(response.device.last_error.is_some());
+        server.abort();
+        fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    }
+
+    #[tokio::test]
+    async fn refresh_distinguishes_unknown_device_from_unconfigured_backend() {
+        let mut registry = DeviceRegistry::new();
+        registry.register_configured_ble();
+        let app = router(ApiState::with_registry(registry));
+        for (id, expected) in [
+            ("not-registered", StatusCode::NOT_FOUND),
+            ("configured", StatusCode::SERVICE_UNAVAILABLE),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri(format!("/api/v2/devices/{id}/refresh"))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), expected);
+        }
+    }
 
     #[tokio::test]
     #[cfg(feature = "mqtt")]

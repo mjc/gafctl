@@ -35,6 +35,34 @@ pub struct DeviceStateV2Response {
     pub state: Option<DeviceState>,
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DeviceRefreshStatus {
+    Fresh,
+    Failed,
+    Superseded,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct DeviceRefreshV2Response {
+    pub status: DeviceRefreshStatus,
+    #[serde(flatten)]
+    pub device: DeviceStateV2Response,
+}
+
+impl DeviceRefreshV2Response {
+    pub fn validate(&self) -> Result<(), ContractError> {
+        self.device.validate()?;
+        if self.status == DeviceRefreshStatus::Fresh
+            && (!self.device.available
+                || self.device.inventory_status != DeviceInventoryStatus::Present)
+        {
+            return Err(ContractError::Refresh);
+        }
+        Ok(())
+    }
+}
+
 pub(crate) fn required_option<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
 where
     D: Deserializer<'de>,
@@ -45,6 +73,8 @@ where
 
 #[derive(Clone, Copy, Debug, Error, Eq, PartialEq)]
 pub enum ContractError {
+    #[error("fresh refresh requires an available current device snapshot")]
+    Refresh,
     #[error("device inventory contains inconsistent proxy identities")]
     ProxyIdentity,
     #[error("a device must have one Home Assistant entity source")]
@@ -221,6 +251,27 @@ impl std::fmt::Display for ControlStatus {
 mod tests {
     use super::*;
     use crate::EntitySource;
+
+    #[test]
+    fn fresh_refresh_requires_an_available_present_snapshot() {
+        let response = DeviceRefreshV2Response {
+            status: DeviceRefreshStatus::Fresh,
+            device: DeviceStateV2Response {
+                id: DeviceId::configured_ble(),
+                backend: DeviceBackend::LegacyBle,
+                available: false,
+                inventory_status: DeviceInventoryStatus::Unknown,
+                last_error: None,
+                state: None,
+            },
+        };
+        assert!(response.validate().is_err());
+        let failed = DeviceRefreshV2Response {
+            status: DeviceRefreshStatus::Failed,
+            ..response
+        };
+        assert!(failed.validate().is_ok());
+    }
 
     #[test]
     fn inventory_rejects_mixed_proxy_identity_and_split_ownership() {

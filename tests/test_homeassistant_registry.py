@@ -19,6 +19,9 @@ from homeassistant.helpers.template import Template
 from homeassistant.components.mqtt import sensor as mqtt_sensor, select as mqtt_select
 
 from custom_components.updraft import UpdraftCoordinator
+from custom_components.updraft.button import UpdraftRefreshButton
+from custom_components.updraft.client import ApiError
+from homeassistant.exceptions import HomeAssistantError
 
 
 PROXY_ID = "550e8400-e29b-41d4-a716-446655440000"
@@ -52,6 +55,82 @@ class RegistryTests(unittest.IsolatedAsyncioTestCase):
     async def asyncTearDown(self):
         await self.hass.async_stop()
         self.directory.cleanup()
+
+    async def test_refresh_button_reads_unavailable_device_and_applies_returned_state(self):
+        entry = await self.entry()
+        client = AsyncMock()
+        client.fetch_devices.return_value = [device()]
+        client.refresh.return_value = {"available": True, "freshness": "fresh", "state": {"temperature_f": 100}}
+        client.fetch_state.return_value = client.refresh.return_value
+        coordinator = UpdraftCoordinator(self.hass, client, device(), entry)
+        coordinator.async_set_updated_data({"available": False, "state": None})
+        button = UpdraftRefreshButton(coordinator, entry)
+        self.assertTrue(button.available)
+        await button.async_press()
+        client.refresh.assert_awaited_once_with("configured", "legacy_ble")
+        client.fetch_state.assert_awaited_once_with("configured")
+        self.assertEqual(coordinator.data["state"]["temperature_f"], 100)
+
+    async def test_refresh_failure_preserves_current_data_and_reports_failure(self):
+        entry = await self.entry()
+        client = AsyncMock()
+        client.fetch_devices.return_value = [device()]
+        client.refresh.side_effect = ApiError("device refresh did not complete")
+        coordinator = UpdraftCoordinator(self.hass, client, device(), entry)
+        old = {"available": True, "state": {"temperature_f": 99}}
+        coordinator.async_set_updated_data(old)
+        with self.assertRaises(HomeAssistantError):
+            await UpdraftRefreshButton(coordinator, entry).async_press()
+        self.assertEqual(coordinator.data, old)
+        client.refresh.assert_awaited_once()
+
+    async def test_refresh_rechecks_proxy_identity_and_http_ownership(self):
+        entry = await self.entry()
+        for current in (device(owner="mqtt"), device("650e8400-e29b-41d4-a716-446655440000")):
+            client = AsyncMock()
+            client.fetch_devices.return_value = [current]
+            coordinator = UpdraftCoordinator(self.hass, client, device(), entry)
+            with self.assertRaises(HomeAssistantError):
+                await UpdraftRefreshButton(coordinator, entry).async_press()
+            client.refresh.assert_not_called()
+
+    async def test_refresh_reports_failure_if_followup_cannot_get_current_readings(self):
+        entry = await self.entry()
+        client = AsyncMock()
+        client.fetch_devices.return_value = [device()]
+        client.refresh.return_value = {"available": True, "state": {"temperature_f": 100}}
+        client.fetch_state.return_value = {"available": False, "state": None}
+        coordinator = UpdraftCoordinator(self.hass, client, device(), entry)
+        with self.assertRaises(HomeAssistantError):
+            await UpdraftRefreshButton(coordinator, entry).async_press()
+
+    async def test_refresh_completion_rejects_owner_or_proxy_changed_during_read(self):
+        entry = await self.entry()
+        for changed in (device(owner="mqtt"), device("650e8400-e29b-41d4-a716-446655440000")):
+            client = AsyncMock()
+            client.fetch_devices.side_effect = [[device()], [changed]]
+            client.refresh.return_value = {"available": True, "state": {"temperature_f": 99}}
+            coordinator = UpdraftCoordinator(self.hass, client, device(), entry)
+            old = {"available": False, "state": None}
+            coordinator.async_set_updated_data(old)
+            with self.assertRaises(HomeAssistantError):
+                await UpdraftRefreshButton(coordinator, entry).async_press()
+            self.assertEqual(coordinator.data, old)
+
+    async def test_late_refresh_response_does_not_replace_newer_periodic_data(self):
+        entry = await self.entry()
+        client = AsyncMock()
+        client.fetch_devices.return_value = [device()]
+        newer = {"available": True, "freshness": "fresh", "state": {"temperature_f": 110}}
+        older = {"available": True, "freshness": "fresh", "state": {"temperature_f": 100}}
+        coordinator = UpdraftCoordinator(self.hass, client, device(), entry)
+        async def delayed_response(*_):
+            coordinator.async_set_updated_data(newer)
+            return older
+        client.refresh.side_effect = delayed_response
+        client.fetch_state.return_value = newer
+        await UpdraftRefreshButton(coordinator, entry).async_press()
+        self.assertEqual(coordinator.data, newer)
 
     async def entry(self, proxy_id=PROXY_ID, domain="updraft"):
         entry = ConfigEntry(

@@ -23,6 +23,9 @@ struct Service {
     status: StatusCode,
     supported: bool,
     mismatched_id: bool,
+    read_supported: bool,
+    refresh_outcome: &'static str,
+    refresh_status: StatusCode,
 }
 
 impl Default for Service {
@@ -33,6 +36,9 @@ impl Default for Service {
             status: StatusCode::OK,
             supported: true,
             mismatched_id: false,
+            read_supported: true,
+            refresh_outcome: "failed",
+            refresh_status: StatusCode::BAD_GATEWAY,
         }
     }
 }
@@ -40,7 +46,7 @@ impl Default for Service {
 async fn devices(State(service): State<Service>) -> Json<Value> {
     Json(
         json!({"devices":[{"id":"configured","name":"Attic fan","backend":"legacy_ble",
-        "proxy_id":"550e8400-e29b-41d4-a716-446655440000","capabilities":{"read_state":true,"commands":if service.supported { json!([{"kind":"legacy_preset","value":"timer_clear"}]) } else { json!([]) }},
+        "proxy_id":"550e8400-e29b-41d4-a716-446655440000","capabilities":{"read_state":service.read_supported,"commands":if service.supported { json!([{"kind":"legacy_preset","value":"timer_clear"}]) } else { json!([]) }},
         "state_source":"mqtt","command_source":"mqtt"}]}),
     )
 }
@@ -48,6 +54,21 @@ async fn devices(State(service): State<Service>) -> Json<Value> {
 async fn state(Path(id): Path<String>) -> Json<Value> {
     Json(
         json!({"id":id,"backend":"legacy_ble","available":false,"inventory_status":"unknown","last_error":null,"state":null}),
+    )
+}
+
+async fn refresh(
+    State(service): State<Service>,
+    Path(id): Path<String>,
+) -> (StatusCode, Json<Value>) {
+    service.posts.fetch_add(1, Ordering::SeqCst);
+    (
+        service.refresh_status,
+        Json(
+            json!({"status":service.refresh_outcome, "id":if service.mismatched_id { "other" } else { &id },
+        "backend":"legacy_ble","available":false,"inventory_status":"unavailable",
+        "last_error":"read failed","state":null}),
+        ),
     )
 }
 
@@ -96,6 +117,7 @@ async fn start(service: Service) -> Running {
     let app = Router::new()
         .route("/prefix/api/v2/devices", get(devices))
         .route("/prefix/api/v2/devices/{id}/state", get(state))
+        .route("/prefix/api/v2/devices/{id}/refresh", post(refresh))
         .route("/prefix/api/v2/devices/{id}/control", post(control))
         .with_state(service);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -136,6 +158,73 @@ async fn client_preserves_path_prefix_and_reads_unavailable_state() {
     let state = client.state(&device_id()).await.unwrap();
     assert!(!state.available);
     assert!(state.state.is_none());
+}
+
+#[tokio::test]
+async fn refresh_posts_once_and_preserves_failed_read_outcome() {
+    let service = Service::default();
+    let server = start(service.clone()).await;
+    let client = Client::new(server.url.parse().unwrap(), ClientOptions::default()).unwrap();
+    let response = client.refresh(&device_id()).await.unwrap();
+    assert_eq!(response.status, updraft_api::DeviceRefreshStatus::Failed);
+    assert_eq!(service.posts.load(Ordering::SeqCst), 1);
+    assert_eq!(response.device.last_error.as_deref(), Some("read failed"));
+}
+
+#[tokio::test]
+async fn refresh_validates_identity_outcome_and_read_capability_without_retrying() {
+    for (service, expected_kind, posts) in [
+        (
+            Service {
+                mismatched_id: true,
+                ..Service::default()
+            },
+            "contract",
+            1,
+        ),
+        (
+            Service {
+                refresh_outcome: "fresh",
+                refresh_status: StatusCode::OK,
+                ..Service::default()
+            },
+            "contract",
+            1,
+        ),
+        (
+            Service {
+                refresh_outcome: "future_outcome",
+                refresh_status: StatusCode::OK,
+                ..Service::default()
+            },
+            "decoding",
+            1,
+        ),
+        (
+            Service {
+                refresh_status: StatusCode::OK,
+                ..Service::default()
+            },
+            "contract",
+            1,
+        ),
+        (
+            Service {
+                read_supported: false,
+                ..Service::default()
+            },
+            "unsupported_command",
+            0,
+        ),
+    ] {
+        let server = start(service.clone()).await;
+        let client = Client::new(server.url.parse().unwrap(), ClientOptions::default()).unwrap();
+        assert_eq!(
+            client.refresh(&device_id()).await.unwrap_err().kind(),
+            expected_kind
+        );
+        assert_eq!(service.posts.load(Ordering::SeqCst), posts);
+    }
 }
 
 #[tokio::test]

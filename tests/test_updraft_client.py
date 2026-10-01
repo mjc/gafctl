@@ -126,7 +126,7 @@ class FakeSession:
         self.urls.append(url)
         self.posts.append(kwargs)
         response = self.responses.pop(0)
-        response.request_id = kwargs["json"]["request_id"]
+        response.request_id = kwargs.get("json", {}).get("request_id")
         return response
 
 
@@ -136,6 +136,20 @@ class FailedSession:
 
 
 class ApiClientTests(unittest.TestCase):
+    def test_refresh_reads_device_once_and_rejects_cached_failed_outcome(self):
+        payload = v2_state_payload(legacy_state(), status="fresh")
+        session = FakeSession([FakeResponse(payload)])
+        result = asyncio.run(ApiClient("http://proxy/prefix", session).refresh("configured", "legacy_ble"))
+        self.assertTrue(result["available"])
+        self.assertEqual(session.urls, ["http://proxy/prefix/api/v2/devices/configured/refresh"])
+        self.assertEqual(len(session.posts), 1)
+        self.assertEqual(session.posts[0]["timeout"], 300)
+        self.assertNotIn("json", session.posts[0])
+        for status, http_status in (("failed", 502), ("superseded", 409), ("fresh", 502), (None, 200)):
+            session = FakeSession([FakeResponse(payload | {"status": status}, http_status)])
+            with self.assertRaises(ApiError):
+                asyncio.run(ApiClient("http://proxy", session).refresh("configured", "legacy_ble"))
+
     def test_inventory_requires_proxy_identity_and_one_owner(self):
         for fields in (
             {"proxy_id": None},
@@ -272,7 +286,7 @@ class ApiClientTests(unittest.TestCase):
         )
         self.assertEqual(
             CLIENT.entity_platforms(devices[1]),
-            {"sensor", "binary_sensor", "select", "number"},
+            {"sensor", "binary_sensor", "select", "number", "button"},
         )
         self.assertEqual(
             CLIENT.entity_keys(devices[1]),
@@ -285,6 +299,7 @@ class ApiClientTests(unittest.TestCase):
                     "humidity_monitor",
                 },
                 "binary_sensor": {"running_estimate"},
+                "button": {"refresh"},
                 "select": {"mode"},
                 "number": {
                     "automatic_temperature",
@@ -369,7 +384,7 @@ class ApiClientTests(unittest.TestCase):
         )
         self.assertEqual(
             CLIENT.entity_platforms(device | {"command_source": "mqtt"}),
-            {"sensor", "binary_sensor"},
+            {"sensor", "binary_sensor", "button"},
         )
 
     def test_accepts_an_empty_device_inventory(self):

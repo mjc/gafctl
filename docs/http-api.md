@@ -13,8 +13,33 @@ The default listener is `127.0.0.1:8787`. Remote listeners require
 | GET | `/health` | Check that the process responds |
 | GET | `/api/v2/devices` | List configured devices and capabilities |
 | GET | `/api/v2/devices/{id}/state` | Read a device's cached state |
+| POST | `/api/v2/devices/{id}/refresh` | Read the device through its existing backend |
 | POST | `/api/v2/devices/{id}/control` | Submit a supported command |
 | PUT | `/api/v2/devices/{id}/sources` | Select HTTP or MQTT Home Assistant entities |
+
+## Refresh
+
+```sh
+curl -X POST http://127.0.0.1:8787/api/v2/devices/configured/refresh
+```
+
+Overlapping refreshes for one device share one read. The read uses the same
+backend owner and transaction lock as controls; it does not start a second BLE
+connection owner. Cancelling an HTTP request leaves the shared worker running.
+Periodic BLE reads use this operation too.
+
+The response contains the state fields shown below plus `status`: `fresh`
+(`200`), `failed` (`502`), or `superseded` (`409`). A failed refresh can contain
+previous cached readings; its status still records that the new read failed.
+A superseded read was displaced by another state or control generation and
+was not published. Unknown devices return `404`, and unconfigured backends
+return `503`. A worker that closes without a result returns `500` and can be
+replaced by the next request.
+
+The shared worker has a 270-second deadline, including time waiting for the
+device lock. The Rust client and HA refresh button allow 300 seconds. HA checks
+identity and HTTP ownership again after the read, then obtains the coordinator's
+current state so a delayed response cannot replace newer readings.
 
 ## Discovery
 

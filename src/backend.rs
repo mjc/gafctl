@@ -118,6 +118,18 @@ pub struct DeviceRuntime {
     control_generation: AtomicU64,
     control_changed: watch::Sender<u64>,
     control_slots: Arc<Semaphore>,
+    refresh: Mutex<Option<RefreshReceiver>>,
+}
+
+pub(crate) type RefreshReceiver =
+    watch::Receiver<Option<Arc<updraft_api::DeviceRefreshV2Response>>>;
+
+pub(crate) enum RefreshReservation {
+    Join(RefreshReceiver),
+    Execute {
+        receiver: RefreshReceiver,
+        completion: watch::Sender<Option<Arc<updraft_api::DeviceRefreshV2Response>>>,
+    },
 }
 
 pub use updraft_api::DeviceInventoryStatus;
@@ -140,6 +152,23 @@ impl DeviceRuntime {
             control_generation: AtomicU64::new(0),
             control_changed,
             control_slots: Arc::new(Semaphore::new(CONTROL_QUEUE_CAPACITY)),
+            refresh: Mutex::new(None),
+        }
+    }
+
+    pub(crate) async fn reserve_refresh(&self) -> RefreshReservation {
+        let mut pending = self.refresh.lock().await;
+        if let Some(receiver) = pending.as_ref()
+            && receiver.borrow().is_none()
+            && receiver.has_changed().is_ok()
+        {
+            return RefreshReservation::Join(receiver.clone());
+        }
+        let (completion, receiver) = watch::channel(None);
+        *pending = Some(receiver.clone());
+        RefreshReservation::Execute {
+            receiver,
+            completion,
         }
     }
 
@@ -434,6 +463,22 @@ impl DeviceRegistry {
         };
         if descriptor.backend != DeviceBackend::QuickConnect
             || !descriptor.capabilities.commands.contains(&capability)
+        {
+            return Err(DeviceRegistryError::UnsupportedCommand);
+        }
+        self.quickconnect_read_target(account_id, id)
+    }
+
+    pub(crate) fn quickconnect_read_target(
+        &self,
+        account_id: &str,
+        id: &DeviceId,
+    ) -> Result<(Arc<DeviceRuntime>, String), DeviceRegistryError> {
+        let descriptor = self
+            .devices
+            .get(id)
+            .ok_or(DeviceRegistryError::UnknownDevice)?;
+        if descriptor.backend != DeviceBackend::QuickConnect || !descriptor.capabilities.read_state
         {
             return Err(DeviceRegistryError::UnsupportedCommand);
         }
@@ -925,6 +970,27 @@ use std::os::unix::fs::OpenOptionsExt;
 #[cfg(test)]
 mod tests {
     use std::{collections::BTreeMap, fs, path::PathBuf};
+
+    #[tokio::test]
+    async fn overlapping_refreshes_share_one_worker_and_abandoned_workers_are_replaced() {
+        let runtime = DeviceRuntime::new();
+        let first = runtime.reserve_refresh().await;
+        let completion = match first {
+            RefreshReservation::Execute { completion, .. } => Some(completion),
+            RefreshReservation::Join(_) => None,
+        }
+        .expect("first request starts a worker");
+        assert!(refresh_joins(runtime.reserve_refresh().await));
+        drop(completion);
+        assert!(!refresh_joins(runtime.reserve_refresh().await));
+    }
+
+    fn refresh_joins(reservation: RefreshReservation) -> bool {
+        match reservation {
+            RefreshReservation::Join(_) => true,
+            RefreshReservation::Execute { .. } => false,
+        }
+    }
 
     #[test]
     fn identity_store_rejects_dangling_sources_and_invalid_proxy_ids() {

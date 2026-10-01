@@ -117,6 +117,7 @@ path = "tests/cli.rs"
 required-features = ["http", "cli"]
 
 [dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
 assert_cmd.workspace = true
 bytes.workspace = true
 http-body-util.workspace = true
