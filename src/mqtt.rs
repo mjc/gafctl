@@ -1,11 +1,13 @@
-use std::{
-    sync::Arc,
-    time::{Duration, SystemTime},
-};
+use std::{collections::HashSet, sync::Arc, time::Duration};
 
 use crate::{
-    api::ControlResponse,
-    control::{CommandId, ControlPreset, ControlRequest, FreshControlRequest, unix_millis},
+    api::{
+        CachedV2ControlResult, ControlResponse, DeviceControlV2Request, DeviceControlV2Response,
+    },
+    control::{CommandId, ControlPreset, ControlRequest},
+    device::{
+        CommandCapability, DeviceBackend, DeviceCommand, DeviceDescriptor, DeviceId, EntitySource,
+    },
 };
 use futures_util::{Stream, StreamExt, future, stream};
 use rumqttc::v5::{
@@ -25,13 +27,15 @@ use tokio::{
 
 pub(crate) const STATE_TOPIC: &str = "updraft/gaf_vent/state";
 const AVAILABILITY_TOPIC: &str = "updraft/gaf_vent/availability";
+const PROCESS_AVAILABILITY_TOPIC: &str = "updraft/availability";
 const CONTROL_REQUEST_TOPIC: &str = "updraft/gaf_vent/control/set";
 const CONTROL_RESULT_TOPIC: &str = "updraft/gaf_vent/control/result";
 const DEVICE_IDENTIFIER: &str = "updraft_gaf_vent";
-const CONTROL_QUEUE_CAPACITY: usize = 8;
+pub(crate) const CONTROL_QUEUE_CAPACITY: usize = 8;
 const MAX_PENDING_CONTROL_RESULTS: usize = 32;
 const CONTROL_RESPONSE_TIMEOUT: Duration = Duration::from_secs(120);
 const MAX_CONTROL_REQUEST_BYTES: usize = 1024;
+const DEVICE_CONTROL_SUFFIX: &str = "/control/set";
 const DISCOVERY_TOPICS: [&str; 13] = [
     "homeassistant/sensor/updraft/temperature/config",
     "homeassistant/sensor/updraft/humidity/config",
@@ -49,13 +53,74 @@ const DISCOVERY_TOPICS: [&str; 13] = [
 ];
 
 pub(crate) struct MqttControlWork {
-    pub(crate) request: FreshControlRequest,
-    pub(crate) reply: oneshot::Sender<Arc<ControlResponse>>,
+    pub(crate) device_id: DeviceId,
+    pub(crate) request: DeviceControlV2Request,
+    pub(crate) reply: oneshot::Sender<CachedV2ControlResult>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum ControlTopic {
+    LegacyAlias,
+    Device(DeviceId),
+}
+
+#[derive(Clone, Copy)]
+enum Rejection {
+    Stale,
+    Retained,
+    ResultsBusy,
+    QueueFull,
+    WorkerUnavailable,
+}
+
+fn rejection_status(rejection: Rejection) -> &'static str {
+    match rejection {
+        Rejection::Stale => "stale_request",
+        Rejection::Retained => "retained_request",
+        Rejection::ResultsBusy => "control_results_busy",
+        Rejection::QueueFull => "queue_full",
+        Rejection::WorkerUnavailable => "control_worker_unavailable",
+    }
+}
+
+fn rejection_message(rejection: Rejection) -> &'static str {
+    match rejection {
+        Rejection::Stale => "stale or future-dated control request",
+        Rejection::Retained => "retained control requests are rejected",
+        Rejection::ResultsBusy => "control results are busy",
+        Rejection::QueueFull => "control queue is full",
+        Rejection::WorkerUnavailable => "control worker is unavailable",
+    }
+}
+
+fn parse_control_topic(topic: &str) -> Option<ControlTopic> {
+    if topic == CONTROL_REQUEST_TOPIC {
+        return Some(ControlTopic::LegacyAlias);
+    }
+    topic
+        .strip_prefix("updraft/")
+        .and_then(|topic| topic.strip_suffix(DEVICE_CONTROL_SUFFIX))
+        .and_then(|id| DeviceId::parse(id.to_owned()))
+        .map(ControlTopic::Device)
 }
 
 pub(crate) struct MqttBridge {
-    pub(crate) state_updates: watch::Sender<Arc<String>>,
+    pub(crate) state_updates: watch::Sender<Arc<MqttStateSnapshot>>,
     pub(crate) control_requests: mpsc::Receiver<MqttControlWork>,
+}
+
+pub(crate) struct MqttStateSnapshot {
+    pub(crate) devices: Vec<DeviceDescriptor>,
+    pub(crate) publications: Vec<MqttStatePublication>,
+    pub(crate) legacy_discovery_enabled: bool,
+}
+
+#[derive(Clone)]
+pub(crate) struct MqttStatePublication {
+    pub(crate) id: DeviceId,
+    pub(crate) payload: String,
+    pub(crate) available: bool,
+    pub(crate) legacy_payload: Option<String>,
 }
 
 #[derive(Debug, Error)]
@@ -82,24 +147,25 @@ pub(crate) struct MqttConfig {
     pub(crate) discovery_enabled: bool,
 }
 
-pub(crate) fn start(config: MqttConfig, initial_state: String) -> MqttBridge {
+pub(crate) fn start(config: MqttConfig, initial_state: MqttStateSnapshot) -> MqttBridge {
     let discovery_enabled = config.discovery_enabled;
     let (client, eventloop) = AsyncClient::new(mqtt_options(config), 32);
     let (state_tx, state_rx) = watch::channel(Arc::new(initial_state));
     let (connected_tx, connected_rx) = watch::channel(false);
     let (control_tx, control_rx) = mpsc::channel(CONTROL_QUEUE_CAPACITY);
-    tokio::spawn(setup_connection(
-        client.clone(),
-        connected_rx.clone(),
-        discovery_enabled,
-    ));
+    tokio::spawn(setup_connection(client.clone(), connected_rx.clone()));
     tokio::spawn(run_event_loop(
         eventloop,
         client.clone(),
         connected_tx,
         control_tx,
     ));
-    tokio::spawn(publish_state_updates(client, state_rx, connected_rx));
+    tokio::spawn(publish_state_updates(
+        client,
+        state_rx,
+        connected_rx,
+        discovery_enabled,
+    ));
 
     MqttBridge {
         state_updates: state_tx,
@@ -112,7 +178,7 @@ fn mqtt_options(config: MqttConfig) -> MqttOptions {
     options.set_keep_alive(Duration::from_secs(30));
     options.set_credentials(config.username, config.password);
     options.set_last_will(LastWill::new(
-        AVAILABILITY_TOPIC,
+        PROCESS_AVAILABILITY_TOPIC,
         "offline",
         QoS::AtLeastOnce,
         true,
@@ -121,14 +187,10 @@ fn mqtt_options(config: MqttConfig) -> MqttOptions {
     options
 }
 
-async fn setup_connection(
-    client: AsyncClient,
-    connected: watch::Receiver<bool>,
-    discovery_enabled: bool,
-) {
+async fn setup_connection(client: AsyncClient, connected: watch::Receiver<bool>) {
     connection_changes(connected)
         .filter(|active| future::ready(*active))
-        .for_each(|_| initialize_connection(&client, discovery_enabled))
+        .for_each(|_| initialize_connection(&client))
         .await;
 }
 
@@ -144,14 +206,16 @@ async fn receive_connection_change(
     Some((active, connected))
 }
 
-async fn initialize_connection(client: &AsyncClient, discovery_enabled: bool) {
+async fn initialize_connection(client: &AsyncClient) {
     subscribe_to_controls(client).await;
-    configure_discovery(client, discovery_enabled).await;
-    publish(client, AVAILABILITY_TOPIC, "online").await;
+    publish(client, PROCESS_AVAILABILITY_TOPIC, "online").await;
 }
 
 async fn subscribe_to_controls(client: &AsyncClient) {
-    if let Err(error) = client.subscribe_many([control_subscription()]).await {
+    if let Err(error) = client
+        .subscribe_many([control_subscription(), device_control_subscription()])
+        .await
+    {
         tracing::warn!(%error, "could not subscribe to MQTT controls");
     }
 }
@@ -163,11 +227,10 @@ fn control_subscription() -> Filter {
     }
 }
 
-async fn configure_discovery(client: &AsyncClient, discovery_enabled: bool) {
-    if discovery_enabled {
-        publish_discovery(client).await;
-    } else {
-        clear_discovery(client).await;
+fn device_control_subscription() -> Filter {
+    Filter {
+        preserve_retain: true,
+        ..Filter::new("updraft/+/control/set", QoS::AtLeastOnce)
     }
 }
 
@@ -207,10 +270,12 @@ async fn handle_mqtt_event(
         Ok(Event::Incoming(Packet::ConnAck(_))) => {
             connected.send_replace(true);
         }
-        Ok(Event::Incoming(Packet::Publish(message)))
-            if message.topic.as_ref() == CONTROL_REQUEST_TOPIC.as_bytes() =>
-        {
-            dispatch_control(client, controls, pending_results, message);
+        Ok(Event::Incoming(Packet::Publish(message))) => {
+            if let Ok(topic_name) = std::str::from_utf8(message.topic.as_ref())
+                && let Some(topic) = parse_control_topic(topic_name)
+            {
+                dispatch_control(client, controls, pending_results, topic, message);
+            }
         }
         Ok(_) => {}
         Err(error) => wait_to_reconnect(connected, &error).await,
@@ -225,23 +290,32 @@ async fn wait_to_reconnect(connected: &watch::Sender<bool>, error: &ConnectionEr
 
 async fn publish_state_updates(
     client: AsyncClient,
-    state: watch::Receiver<Arc<String>>,
+    state: watch::Receiver<Arc<MqttStateSnapshot>>,
     connected: watch::Receiver<bool>,
+    discovery_enabled: bool,
 ) {
     state_payloads(state, connected)
-        .for_each(|payload| publish_state_payload(&client, payload))
+        .fold(HashSet::new(), |mut previous_topics, snapshot| async {
+            if !discovery_enabled {
+                clear_discovery(&client, &snapshot, &mut previous_topics).await;
+            } else {
+                publish_discovery(&client, &snapshot, &mut previous_topics).await;
+            }
+            publish_state_payload(&client, snapshot).await;
+            previous_topics
+        })
         .await;
 }
 
 struct StateSubscriptions {
-    state: watch::Receiver<Arc<String>>,
+    state: watch::Receiver<Arc<MqttStateSnapshot>>,
     connected: watch::Receiver<bool>,
 }
 
 fn state_payloads(
-    state: watch::Receiver<Arc<String>>,
+    state: watch::Receiver<Arc<MqttStateSnapshot>>,
     connected: watch::Receiver<bool>,
-) -> impl Stream<Item = Arc<String>> {
+) -> impl Stream<Item = Arc<MqttStateSnapshot>> {
     stream::unfold(
         StateSubscriptions { state, connected },
         receive_state_update,
@@ -251,7 +325,7 @@ fn state_payloads(
 
 async fn receive_state_update(
     mut subscriptions: StateSubscriptions,
-) -> Option<(Option<Arc<String>>, StateSubscriptions)> {
+) -> Option<(Option<Arc<MqttStateSnapshot>>, StateSubscriptions)> {
     tokio::select! {
         changed = subscriptions.state.changed() => changed,
         changed = subscriptions.connected.changed() => changed,
@@ -262,72 +336,142 @@ async fn receive_state_update(
     Some((payload, subscriptions))
 }
 
-async fn publish_state_payload(client: &AsyncClient, payload: Arc<String>) {
-    publish(client, STATE_TOPIC, &payload).await;
+async fn publish_state_payload(client: &AsyncClient, snapshot: Arc<MqttStateSnapshot>) {
+    stream::iter(snapshot.publications.iter())
+        .for_each(|publication| publish_device_state(client, publication))
+        .await;
+}
+
+async fn publish_device_state(client: &AsyncClient, publication: &MqttStatePublication) {
+    stream::iter(state_messages(publication))
+        .for_each(|(topic, payload)| async move { publish(client, &topic, &payload).await })
+        .await;
+}
+
+fn state_messages(publication: &MqttStatePublication) -> impl Iterator<Item = (String, String)> {
+    let id = publication.id.as_str();
+    let availability = if publication.available {
+        "online"
+    } else {
+        "offline"
+    };
+    std::iter::once((format!("updraft/{id}/state"), publication.payload.clone()))
+        .chain(std::iter::once((
+            format!("updraft/{id}/availability"),
+            availability.to_owned(),
+        )))
+        .chain(publication.legacy_payload.iter().flat_map(move |payload| {
+            [
+                (STATE_TOPIC.to_owned(), payload.clone()),
+                (AVAILABILITY_TOPIC.to_owned(), availability.to_owned()),
+            ]
+        }))
 }
 
 fn dispatch_control(
     client: &AsyncClient,
     controls: &mpsc::Sender<MqttControlWork>,
     pending_results: &Arc<Semaphore>,
+    topic: ControlTopic,
     message: Publish,
 ) {
-    let Some(request) = prepare_control_request(client, &message) else {
+    let Some((device_id, request, legacy_alias, legacy_preset)) =
+        prepare_control_request(client, topic, &message)
+    else {
         return;
     };
-    let Some(permit) = reserve_control_result(client, pending_results, &request) else {
+    let Some(permit) = reserve_control_result(
+        client,
+        pending_results,
+        &device_id,
+        &request,
+        legacy_alias,
+        legacy_preset,
+    ) else {
         return;
     };
-    enqueue_control(client, controls, request, permit);
+    enqueue_control(
+        client,
+        controls,
+        device_id,
+        request,
+        legacy_alias,
+        legacy_preset,
+        permit,
+    );
 }
 
-fn prepare_control_request(client: &AsyncClient, message: &Publish) -> Option<FreshControlRequest> {
-    let request = parse_incoming_control(&message.payload)?;
-    let request = validate_control_clock(client, request)?;
+fn prepare_control_request(
+    client: &AsyncClient,
+    topic: ControlTopic,
+    message: &Publish,
+) -> Option<(
+    DeviceId,
+    DeviceControlV2Request,
+    bool,
+    Option<ControlPreset>,
+)> {
+    let (device_id, request, legacy_alias, legacy_preset) =
+        parse_incoming_control(topic, &message.payload)?;
     if message.retain {
-        reject_control(
+        reject_device_control(
             client,
-            request.request_id(),
-            request.preset(),
-            "retained control requests are rejected",
+            &device_id,
+            &request,
+            legacy_alias,
+            legacy_preset,
+            Rejection::Retained,
         );
         return None;
     }
-    Some(request)
+    if !crate::api::v2_request_is_fresh(request.issued_at_unix_ms) {
+        reject_device_control(
+            client,
+            &device_id,
+            &request,
+            legacy_alias,
+            legacy_preset,
+            Rejection::Stale,
+        );
+        return None;
+    }
+    Some((device_id, request, legacy_alias, legacy_preset))
 }
 
-fn parse_incoming_control(payload: &[u8]) -> Option<ControlRequest> {
-    match parse_control_request(payload) {
-        Ok(request) => Some(request),
+fn parse_incoming_control(
+    topic: ControlTopic,
+    payload: &[u8],
+) -> Option<(
+    DeviceId,
+    DeviceControlV2Request,
+    bool,
+    Option<ControlPreset>,
+)> {
+    if let ControlTopic::LegacyAlias = topic {
+        let legacy = parse_control_request(payload).ok()?;
+        let preset = legacy.preset();
+        return Some((
+            DeviceId::configured_ble(),
+            DeviceControlV2Request {
+                request_id: legacy.request_id().clone(),
+                issued_at_unix_ms: legacy.issued_at_unix_ms(),
+                command: DeviceCommand::LegacyPreset { preset },
+            },
+            true,
+            Some(preset),
+        ));
+    }
+    let ControlTopic::Device(topic_device) = topic else {
+        return None;
+    };
+    if payload.len() > MAX_CONTROL_REQUEST_BYTES {
+        tracing::warn!("rejected oversized MQTT control request");
+        return None;
+    }
+    match serde_json::from_slice::<DeviceControlV2Request>(payload) {
+        Ok(request) => Some((topic_device, request, false, None)),
         Err(error) => {
             tracing::warn!(%error, "rejected malformed MQTT control request");
-            None
-        }
-    }
-}
-
-fn validate_control_clock(
-    client: &AsyncClient,
-    request: ControlRequest,
-) -> Option<FreshControlRequest> {
-    let Some(now) = unix_millis(SystemTime::now()) else {
-        reject_control(
-            client,
-            request.request_id(),
-            request.preset(),
-            "system clock is unavailable",
-        );
-        return None;
-    };
-    match request.validate_fresh_at(now) {
-        Ok(request) => Some(request),
-        Err(request) => {
-            reject_control(
-                client,
-                request.request_id(),
-                request.preset(),
-                "stale or future-dated control request",
-            );
             None
         }
     }
@@ -336,71 +480,122 @@ fn validate_control_clock(
 fn reserve_control_result(
     client: &AsyncClient,
     pending_results: &Arc<Semaphore>,
-    request: &FreshControlRequest,
+    device_id: &DeviceId,
+    request: &DeviceControlV2Request,
+    legacy_alias: bool,
+    legacy_preset: Option<ControlPreset>,
 ) -> Option<OwnedSemaphorePermit> {
     match Arc::clone(pending_results).try_acquire_owned() {
         Ok(permit) => Some(permit),
         Err(_) => {
-            reject_control(
+            reject_device_control(
                 client,
-                request.request_id(),
-                request.preset(),
-                "control results are busy",
+                device_id,
+                request,
+                legacy_alias,
+                legacy_preset,
+                Rejection::ResultsBusy,
             );
             None
         }
     }
 }
 
-fn reject_control(
+fn reject_device_control(
     client: &AsyncClient,
-    request_id: &CommandId,
-    preset: ControlPreset,
-    message: &'static str,
+    device_id: &DeviceId,
+    request: &DeviceControlV2Request,
+    legacy_alias: bool,
+    legacy_preset: Option<ControlPreset>,
+    rejection: Rejection,
 ) {
-    try_publish_ack(
+    let legacy_response = legacy_alias.then(|| {
+        ControlResponse::rejected(
+            legacy_preset.unwrap_or(ControlPreset::TimerClear),
+            rejection_message(rejection),
+        )
+    });
+    publish_result_without_wait(
         client,
-        request_id,
-        ControlResponse::rejected(preset, message),
+        &request.request_id,
+        device_id.clone(),
+        legacy_alias,
+        legacy_preset,
+        CachedV2ControlResult {
+            response: DeviceControlV2Response {
+                request_id: request.request_id.as_str().to_owned(),
+                status: rejection_status(rejection),
+            },
+            legacy_response,
+        },
     );
 }
 
 fn enqueue_control(
     client: &AsyncClient,
     controls: &mpsc::Sender<MqttControlWork>,
-    request: FreshControlRequest,
+    device_id: DeviceId,
+    request: DeviceControlV2Request,
+    legacy_alias: bool,
+    legacy_preset: Option<ControlPreset>,
     permit: OwnedSemaphorePermit,
 ) {
-    let request_id = request.request_id().clone();
-    let preset = request.preset();
+    let request_id = request.request_id.clone();
     let (reply, response) = oneshot::channel();
-    match controls.try_send(MqttControlWork { request, reply }) {
+    match controls.try_send(MqttControlWork {
+        device_id: device_id.clone(),
+        request: request.clone(),
+        reply,
+    }) {
         Ok(()) => {
             tokio::spawn(publish_control_reply(
                 client.clone(),
+                device_id,
+                legacy_alias,
+                legacy_preset,
                 request_id,
                 response,
                 permit,
             ));
         }
-        Err(mpsc::error::TrySendError::Full(_)) => {
-            reject_control(client, &request_id, preset, "control queue is full")
-        }
-        Err(mpsc::error::TrySendError::Closed(_)) => {
-            reject_control(client, &request_id, preset, "control worker is unavailable")
-        }
+        Err(mpsc::error::TrySendError::Full(work)) => reject_device_control(
+            client,
+            &work.device_id,
+            &work.request,
+            legacy_alias,
+            legacy_preset,
+            Rejection::QueueFull,
+        ),
+        Err(mpsc::error::TrySendError::Closed(work)) => reject_device_control(
+            client,
+            &work.device_id,
+            &work.request,
+            legacy_alias,
+            legacy_preset,
+            Rejection::WorkerUnavailable,
+        ),
     }
 }
 
 async fn publish_control_reply(
     client: AsyncClient,
+    device_id: DeviceId,
+    legacy_alias: bool,
+    legacy_preset: Option<ControlPreset>,
     request_id: CommandId,
-    response: oneshot::Receiver<Arc<ControlResponse>>,
+    response: oneshot::Receiver<CachedV2ControlResult>,
     _permit: OwnedSemaphorePermit,
 ) {
     if timeout(
         CONTROL_RESPONSE_TIMEOUT,
-        wait_and_publish_reply(&client, &request_id, response),
+        wait_and_publish_reply(
+            &client,
+            &device_id,
+            legacy_alias,
+            legacy_preset,
+            &request_id,
+            response,
+        ),
     )
     .await
     .is_err()
@@ -411,39 +606,100 @@ async fn publish_control_reply(
 
 async fn wait_and_publish_reply(
     client: &AsyncClient,
+    device_id: &DeviceId,
+    legacy_alias: bool,
+    legacy_preset: Option<ControlPreset>,
     request_id: &CommandId,
-    response: oneshot::Receiver<Arc<ControlResponse>>,
+    response: oneshot::Receiver<CachedV2ControlResult>,
 ) {
     match response.await {
-        Ok(response) => publish_ack(client, request_id, &response).await,
+        Ok(response) => {
+            publish_ack(
+                client,
+                device_id,
+                legacy_alias,
+                legacy_preset,
+                request_id,
+                &response,
+            )
+            .await
+        }
         Err(_) => tracing::warn!("MQTT control worker ended before returning a result"),
     }
 }
 
-async fn publish_ack(client: &AsyncClient, request_id: &CommandId, result: &ControlResponse) {
-    match control_acknowledgement_payload(request_id, result) {
-        Ok(payload) => {
+async fn publish_ack(
+    client: &AsyncClient,
+    device_id: &DeviceId,
+    legacy_alias: bool,
+    legacy_preset: Option<ControlPreset>,
+    request_id: &CommandId,
+    result: &CachedV2ControlResult,
+) {
+    let payload = control_result_payload(request_id, legacy_alias, legacy_preset, result);
+    let topic = result_topic(device_id, legacy_alias);
+    match payload {
+        Ok(Some(payload)) => {
             if let Err(error) = client
-                .publish(CONTROL_RESULT_TOPIC, QoS::AtLeastOnce, false, payload)
+                .publish(topic, QoS::AtLeastOnce, false, payload)
                 .await
             {
                 tracing::warn!(%error, "could not publish MQTT control result");
             }
         }
+        Ok(None) => tracing::warn!("legacy control result is unavailable"),
         Err(error) => tracing::error!(%error, "could not serialize MQTT control result"),
     }
 }
 
-fn try_publish_ack(client: &AsyncClient, request_id: &CommandId, result: ControlResponse) {
-    match control_acknowledgement_payload(request_id, &result) {
-        Ok(payload) => {
-            if let Err(error) =
-                client.try_publish(CONTROL_RESULT_TOPIC, QoS::AtLeastOnce, false, payload)
-            {
+fn result_topic(device_id: &DeviceId, legacy_alias: bool) -> String {
+    if legacy_alias {
+        CONTROL_RESULT_TOPIC.to_owned()
+    } else {
+        format!("updraft/{}/control/result", device_id.as_str())
+    }
+}
+
+fn publish_result_without_wait(
+    client: &AsyncClient,
+    request_id: &CommandId,
+    device_id: DeviceId,
+    legacy_alias: bool,
+    legacy_preset: Option<ControlPreset>,
+    result: CachedV2ControlResult,
+) {
+    let payload = control_result_payload(request_id, legacy_alias, legacy_preset, &result);
+    let topic = result_topic(&device_id, legacy_alias);
+    match payload {
+        Ok(Some(payload)) => {
+            if let Err(error) = client.try_publish(topic, QoS::AtLeastOnce, false, payload) {
                 tracing::warn!(%error, "could not enqueue MQTT control rejection");
             }
         }
+        Ok(None) => tracing::warn!("legacy control result is unavailable"),
         Err(error) => tracing::error!(%error, "could not serialize MQTT control result"),
+    }
+}
+
+fn control_result_payload(
+    request_id: &CommandId,
+    legacy_alias: bool,
+    legacy_preset: Option<ControlPreset>,
+    result: &CachedV2ControlResult,
+) -> Result<Option<Vec<u8>>, serde_json::Error> {
+    match legacy_alias {
+        true => match &result.legacy_response {
+            Some(legacy) => control_acknowledgement_payload(request_id, legacy).map(Some),
+            None => control_acknowledgement_payload(
+                request_id,
+                &ControlResponse::rejected(
+                    legacy_preset.unwrap_or(ControlPreset::TimerClear),
+                    result.response.status,
+                ),
+            )
+            .map(Some),
+        },
+        false => serde_json::to_vec(&result.response).map(Some),
     }
 }
 
@@ -464,13 +720,34 @@ fn control_acknowledgement_payload(
     })
 }
 
-async fn publish_discovery(client: &AsyncClient) {
-    stream::iter(discovery_configs())
+async fn publish_discovery(
+    client: &AsyncClient,
+    snapshot: &MqttStateSnapshot,
+    previous_topics: &mut HashSet<String>,
+) {
+    let configs = discovery_configs(&snapshot.devices, snapshot.legacy_discovery_enabled)
+        .chain(device_discovery_configs(&snapshot.devices))
+        .collect::<Vec<_>>();
+    let active_topics = configs
+        .iter()
+        .map(|(topic, _)| topic.clone())
+        .collect::<HashSet<_>>();
+    let inactive_topics =
+        inactive_discovery_topics(&snapshot.devices, previous_topics, &active_topics);
+    clear_device_discovery_topics(client, inactive_topics.into_iter()).await;
+    stream::iter(configs)
         .for_each(|(topic, config)| publish_discovery_config(client, topic, config))
+        .await;
+    *previous_topics = active_topics;
+}
+
+async fn clear_device_discovery_topics(client: &AsyncClient, topics: impl Iterator<Item = String>) {
+    stream::iter(topics)
+        .for_each(|topic| clear_discovery_topic(client, topic))
         .await;
 }
 
-async fn publish_discovery_config(client: &AsyncClient, topic: &'static str, config: Value) {
+async fn publish_discovery_config(client: &AsyncClient, topic: String, config: Value) {
     let payload = serde_json::to_vec(&config);
     drop(config);
     match payload {
@@ -483,13 +760,43 @@ async fn publish_discovery_config(client: &AsyncClient, topic: &'static str, con
     }
 }
 
-async fn clear_discovery(client: &AsyncClient) {
-    stream::iter(discovery_tombstones())
-        .for_each(|topic| clear_discovery_topic(client, topic))
-        .await;
+async fn clear_discovery(
+    client: &AsyncClient,
+    snapshot: &MqttStateSnapshot,
+    previous_topics: &mut HashSet<String>,
+) {
+    stream::iter(
+        previous_topics
+            .iter()
+            .cloned()
+            .chain(discovery_topic_candidates(&snapshot.devices))
+            .collect::<HashSet<_>>(),
+    )
+    .for_each(|topic| clear_discovery_topic(client, topic))
+    .await;
+    previous_topics.clear();
 }
 
-async fn clear_discovery_topic(client: &AsyncClient, topic: &'static str) {
+fn discovery_topic_candidates(devices: &[DeviceDescriptor]) -> impl Iterator<Item = String> + '_ {
+    discovery_tombstones()
+        .map(str::to_owned)
+        .chain(device_discovery_topics(devices))
+}
+
+fn inactive_discovery_topics(
+    devices: &[DeviceDescriptor],
+    previous_topics: &HashSet<String>,
+    active_topics: &HashSet<String>,
+) -> HashSet<String> {
+    previous_topics
+        .iter()
+        .cloned()
+        .chain(discovery_topic_candidates(devices))
+        .filter(|topic| !active_topics.contains(topic))
+        .collect()
+}
+
+async fn clear_discovery_topic(client: &AsyncClient, topic: String) {
     if let Err(error) = client
         .publish(topic, QoS::AtLeastOnce, true, Vec::new())
         .await
@@ -502,6 +809,30 @@ fn discovery_tombstones() -> impl Iterator<Item = &'static str> {
     DISCOVERY_TOPICS.into_iter()
 }
 
+fn device_discovery_topics(devices: &[DeviceDescriptor]) -> impl Iterator<Item = String> + '_ {
+    devices.iter().flat_map(|device| {
+        [
+            format!(
+                "homeassistant/sensor/updraft_{}/temperature_v2/config",
+                device.id.as_str()
+            ),
+            format!(
+                "homeassistant/sensor/updraft_{}/humidity_v2/config",
+                device.id.as_str()
+            ),
+            format!(
+                "homeassistant/select/updraft_{}/mode_v2/config",
+                device.id.as_str()
+            ),
+            format!(
+                "homeassistant/sensor/updraft_{}/control_result_v2/config",
+                device.id.as_str()
+            ),
+        ]
+        .into_iter()
+    })
+}
+
 async fn publish(client: &AsyncClient, topic: &str, payload: &str) {
     if let Err(error) = client
         .publish(topic, QoS::AtLeastOnce, true, payload.as_bytes().to_owned())
@@ -511,12 +842,123 @@ async fn publish(client: &AsyncClient, topic: &str, payload: &str) {
     }
 }
 
-fn discovery_configs() -> impl Iterator<Item = (&'static str, Value)> {
-    DISCOVERY_TOPICS.into_iter().zip(
-        sensor_discovery_configs()
-            .chain(std::iter::once_with(control_discovery_config))
-            .chain(std::iter::once_with(result_discovery_config)),
-    )
+fn discovery_configs(
+    devices: &[DeviceDescriptor],
+    legacy_discovery_enabled: bool,
+) -> impl Iterator<Item = (String, Value)> + '_ {
+    let legacy = devices.iter().find(|device| {
+        device.id == DeviceId::configured_ble()
+            && match device.backend {
+                DeviceBackend::LegacyBle => true,
+                DeviceBackend::QuickConnect => false,
+            }
+    });
+    DISCOVERY_TOPICS
+        .into_iter()
+        .zip(
+            sensor_discovery_configs()
+                .chain(std::iter::once_with(control_discovery_config))
+                .chain(std::iter::once_with(result_discovery_config)),
+        )
+        .filter(move |(_, _)| legacy.is_some() && legacy_discovery_enabled)
+        .map(|(topic, config)| (topic.to_owned(), config))
+}
+
+fn device_discovery_configs(
+    devices: &[DeviceDescriptor],
+) -> impl Iterator<Item = (String, Value)> + '_ {
+    devices
+        .iter()
+        .filter(|device| match device.backend {
+            DeviceBackend::QuickConnect => true,
+            DeviceBackend::LegacyBle => false,
+        })
+        .flat_map(|device| {
+        let id = device.id.as_str();
+        let identifier = format!("updraft_{id}");
+        let state_topic = format!("updraft/{id}/state");
+        let availability_topic = format!("updraft/{id}/availability");
+        let base = |entity: &str, name: String, value_template: String| {
+            json!({
+                "name": name,
+                "unique_id": format!("{identifier}_{entity}"),
+                "state_topic": state_topic.clone(),
+                "availability": [
+                    {"topic": PROCESS_AVAILABILITY_TOPIC},
+                    {"topic": availability_topic.clone()}
+                ],
+                "availability_mode": "all",
+                "payload_available": "online",
+                "payload_not_available": "offline",
+                "value_template": value_template,
+                "device": { "identifiers": [identifier.clone()], "name": device.name },
+            })
+        };
+        let state_entities = if device.capabilities.read_state
+            && device.state_source == EntitySource::Mqtt
+        {
+            [
+                ("temperature", "Temperature", "{{ value_json.state.temperature_f }}", Some("°F")),
+                ("humidity", "Humidity", "{{ value_json.state.humidity_percent }}", Some("%")),
+            ]
+            .into_iter()
+            .map(|(key, name, value_template, unit)| {
+                let mut config = base(key, format!("{} {name}", device.name), value_template.to_owned());
+                config["unit_of_measurement"] = json!(unit);
+                (format!("homeassistant/sensor/{identifier}/{key}_v2/config"), config)
+            })
+            .collect::<Vec<_>>()
+        } else {
+            Vec::new()
+        };
+        let has_mode_command = device.command_source == EntitySource::Mqtt
+            && device.capabilities.commands.iter().any(is_quickconnect_mode_capability);
+        let command_entities = if has_mode_command {
+                let mut config = base(
+                    "mode",
+                    format!("{} mode", device.name),
+                    "{{ value_json.state.settings.mode }}".to_owned(),
+                );
+                config["command_topic"] = json!(format!("updraft/{id}/control/set"));
+                config["qos"] = json!(1);
+                config["command_template"] = json!("{% set issued = (as_timestamp(now()) * 1000) | int %}{\"request_id\":\"{{ issued }}\",\"issued_at_unix_ms\":{{ issued }},\"command\":{\"kind\":\"quick_connect_mode\",\"mode\":\"{{ value }}\"}}");
+                config["options"] = json!(["off", "automatic", "timer", "manual"]);
+                config["entity_category"] = json!("config");
+                vec![
+                    (format!("homeassistant/select/{identifier}/mode_v2/config"), config),
+                    (
+                        format!("homeassistant/sensor/{identifier}/control_result_v2/config"),
+                        json!({
+                            "name": format!("{} control result", device.name),
+                            "unique_id": format!("{identifier}_control_result"),
+                            "state_topic": format!("updraft/{id}/control/result"),
+                            "availability": [
+                                {"topic": PROCESS_AVAILABILITY_TOPIC},
+                                {"topic": availability_topic}
+                            ],
+                            "availability_mode": "all",
+                            "payload_available": "online",
+                            "payload_not_available": "offline",
+                            "value_template": "{{ value_json.status }}",
+                            "device": { "identifiers": [identifier], "name": device.name },
+                            "entity_category": "diagnostic"
+                        }),
+                    ),
+                ]
+        } else {
+            Vec::new()
+        };
+        state_entities.into_iter().chain(command_entities)
+    })
+}
+
+fn is_quickconnect_mode_capability(capability: &CommandCapability) -> bool {
+    match capability {
+        CommandCapability::QuickConnectMode => true,
+        CommandCapability::LegacyPreset(_)
+        | CommandCapability::QuickConnectTargets
+        | CommandCapability::QuickConnectTimerDuration => false,
+    }
 }
 
 struct SensorDiscovery {
@@ -666,9 +1108,12 @@ impl SensorDiscovery {
 
     fn availability(&self) -> Value {
         if self.is_snapshot_field() {
-            state_availability()
+            state_availability(STATE_TOPIC, AVAILABILITY_TOPIC)
         } else {
-            json!([{"topic": AVAILABILITY_TOPIC}])
+            json!([
+                {"topic": PROCESS_AVAILABILITY_TOPIC},
+                {"topic": AVAILABILITY_TOPIC}
+            ])
         }
     }
 
@@ -689,11 +1134,12 @@ impl SensorDiscovery {
     }
 }
 
-fn state_availability() -> Value {
+fn state_availability(state_topic: &str, device_availability_topic: &str) -> Value {
     json!([
-        {"topic": AVAILABILITY_TOPIC},
+        {"topic": PROCESS_AVAILABILITY_TOPIC},
+        {"topic": device_availability_topic},
         {
-            "topic": STATE_TOPIC,
+            "topic": state_topic,
             "value_template": "{{ 'online' if value_json.available else 'offline' }}"
         }
     ])
@@ -714,7 +1160,7 @@ fn control_discovery_config() -> Value {
                 ControlPreset::TimerClear.as_str(),
                 ControlPreset::TimerOneMinute.as_str()
             ],
-            "availability": state_availability(),
+            "availability": state_availability(STATE_TOPIC, AVAILABILITY_TOPIC),
             "availability_mode": "all",
             "payload_available": "online",
             "payload_not_available": "offline",
@@ -729,7 +1175,11 @@ fn result_discovery_config() -> Value {
             "unique_id": format!("{DEVICE_IDENTIFIER}_control_result"),
             "state_topic": CONTROL_RESULT_TOPIC,
             "value_template": "{{ value_json.message }}",
-            "availability_topic": AVAILABILITY_TOPIC,
+            "availability": [
+                {"topic": PROCESS_AVAILABILITY_TOPIC},
+                {"topic": AVAILABILITY_TOPIC}
+            ],
+            "availability_mode": "all",
             "payload_available": "online",
             "payload_not_available": "offline",
             "device": discovery_device(),
@@ -748,7 +1198,215 @@ fn discovery_device() -> Value {
 
 #[cfg(test)]
 mod tests {
+    use std::time::SystemTime;
+
     use super::*;
+    use crate::control::unix_millis;
+
+    #[test]
+    fn control_topics_route_by_local_device_id_and_accept_the_legacy_alias() {
+        assert_eq!(
+            parse_control_topic("updraft/device-a/control/set"),
+            Some(ControlTopic::Device(
+                DeviceId::parse("device-a".to_owned()).unwrap()
+            ))
+        );
+        assert_eq!(
+            parse_control_topic(CONTROL_REQUEST_TOPIC),
+            Some(ControlTopic::LegacyAlias)
+        );
+        assert_eq!(parse_control_topic("updraft/device/a/control/set"), None);
+        assert_eq!(parse_control_topic("updraft/device-a/state"), None);
+    }
+
+    #[test]
+    fn namespaced_controls_parse_the_full_typed_request() {
+        let id = DeviceId::parse("qc-one".to_owned()).unwrap();
+        let payload = br#"{"request_id":"same-id","issued_at_unix_ms":1000000,"command":{"kind":"quick_connect_mode","mode":"automatic"}}"#;
+        let (routed_id, request, legacy_alias, legacy_preset) =
+            parse_incoming_control(ControlTopic::Device(id.clone()), payload).unwrap();
+
+        assert_eq!(routed_id, id);
+        assert!(!legacy_alias);
+        assert_eq!(legacy_preset, None);
+        assert_eq!(request.request_id.as_str(), "same-id");
+        assert_eq!(
+            request.command,
+            DeviceCommand::QuickConnectMode {
+                mode: crate::device::QuickConnectMode::Automatic
+            }
+        );
+    }
+
+    #[test]
+    fn the_legacy_control_alias_routes_only_to_configured_ble() {
+        let payload =
+            br#"{"request_id":"legacy-id","issued_at_unix_ms":1000000,"preset":"timer_clear"}"#;
+        let (id, request, legacy_alias, preset) =
+            parse_incoming_control(ControlTopic::LegacyAlias, payload).unwrap();
+
+        assert_eq!(id, DeviceId::configured_ble());
+        assert!(legacy_alias);
+        assert_eq!(preset, Some(ControlPreset::TimerClear));
+        assert_eq!(
+            request.command,
+            DeviceCommand::LegacyPreset {
+                preset: ControlPreset::TimerClear
+            }
+        );
+    }
+
+    #[test]
+    fn discovery_is_namespaced_and_respects_independent_entity_sources() {
+        let mut device = DeviceDescriptor {
+            id: DeviceId::parse("qc-one".to_owned()).unwrap(),
+            name: "Guest room vent".to_owned(),
+            backend: DeviceBackend::QuickConnect,
+            capabilities: crate::device::DeviceCapabilities::quickconnect_with_controls(),
+            state_source: EntitySource::Mqtt,
+            command_source: EntitySource::Http,
+        };
+        let configs = device_discovery_configs(std::slice::from_ref(&device)).collect::<Vec<_>>();
+        assert_eq!(configs.len(), 2);
+        assert!(configs.iter().all(|(topic, config)| {
+            topic.contains("qc-one") && config["unique_id"].as_str().unwrap().contains("qc-one")
+        }));
+        assert!(
+            configs
+                .iter()
+                .all(|(_, config)| config.get("command_topic").is_none())
+        );
+
+        device.state_source = EntitySource::Http;
+        device.command_source = EntitySource::Mqtt;
+        let configs = device_discovery_configs(&[device]).collect::<Vec<_>>();
+        assert_eq!(configs.len(), 2);
+        let mode = configs
+            .iter()
+            .find(|(topic, _)| topic.contains("select"))
+            .unwrap();
+        assert_eq!(mode.1["command_topic"], "updraft/qc-one/control/set");
+        assert_eq!(mode.1["qos"], 1);
+        assert!(configs.iter().any(|(topic, config)| {
+            topic.contains("control_result")
+                && config["state_topic"] == "updraft/qc-one/control/result"
+        }));
+    }
+
+    #[test]
+    fn source_changes_tombstone_only_entities_that_are_no_longer_selected() {
+        let device = DeviceDescriptor {
+            id: DeviceId::parse("qc-one".to_owned()).unwrap(),
+            name: "Guest room vent".to_owned(),
+            backend: DeviceBackend::QuickConnect,
+            capabilities: crate::device::DeviceCapabilities::quickconnect_with_controls(),
+            state_source: EntitySource::Mqtt,
+            command_source: EntitySource::Http,
+        };
+        let active = device_discovery_configs(std::slice::from_ref(&device))
+            .map(|(topic, _)| topic)
+            .collect::<HashSet<_>>();
+        let tombstones =
+            inactive_discovery_topics(std::slice::from_ref(&device), &HashSet::new(), &active);
+        assert!(tombstones.iter().any(|topic| topic.contains("mode_v2")));
+        assert!(
+            tombstones
+                .iter()
+                .any(|topic| topic.contains("control_result_v2"))
+        );
+        assert!(
+            tombstones
+                .iter()
+                .all(|topic| !topic.contains("temperature_v2"))
+        );
+        assert!(
+            tombstones
+                .iter()
+                .all(|topic| !topic.contains("humidity_v2"))
+        );
+    }
+
+    #[test]
+    fn explicit_legacy_discovery_keeps_the_configured_ble_entities() {
+        let ble = DeviceDescriptor {
+            id: DeviceId::configured_ble(),
+            name: "Configured BLE".to_owned(),
+            backend: DeviceBackend::LegacyBle,
+            capabilities: crate::device::DeviceCapabilities::legacy_ble(),
+            state_source: EntitySource::Http,
+            command_source: EntitySource::Http,
+        };
+        let configs = discovery_configs(std::slice::from_ref(&ble), true).collect::<Vec<_>>();
+        assert_eq!(configs.len(), DISCOVERY_TOPICS.len());
+        assert!(discovery_configs(&[ble], false).next().is_none());
+    }
+
+    #[test]
+    fn every_discovered_entity_uses_process_and_device_availability() {
+        let configs = discovery_configs(&legacy_ble_mqtt_descriptor(), true).collect::<Vec<_>>();
+        assert!(configs.iter().all(|(_, config)| {
+            config["availability_mode"] == "all"
+                && config["availability"]
+                    .as_array()
+                    .is_some_and(|availability| {
+                        availability.len() >= 2
+                            && availability
+                                .iter()
+                                .any(|item| item["topic"] == PROCESS_AVAILABILITY_TOPIC)
+                    })
+        }));
+    }
+
+    fn legacy_ble_mqtt_descriptor() -> Vec<DeviceDescriptor> {
+        vec![DeviceDescriptor {
+            id: DeviceId::configured_ble(),
+            name: "Configured BLE".to_owned(),
+            backend: DeviceBackend::LegacyBle,
+            capabilities: crate::device::DeviceCapabilities::legacy_ble(),
+            state_source: EntitySource::Mqtt,
+            command_source: EntitySource::Mqtt,
+        }]
+    }
+
+    #[test]
+    fn rejection_status_distinguishes_stale_and_retained_commands() {
+        assert_eq!(rejection_status(Rejection::Stale), "stale_request");
+        assert_eq!(rejection_status(Rejection::Retained), "retained_request");
+        assert_eq!(rejection_status(Rejection::QueueFull), "queue_full");
+    }
+
+    #[test]
+    fn device_availability_is_independent_and_preserves_the_legacy_alias() {
+        let available = MqttStatePublication {
+            id: DeviceId::configured_ble(),
+            payload: r#"{"available":true}"#.to_owned(),
+            available: true,
+            legacy_payload: Some(r#"{"available":true}"#.to_owned()),
+        };
+        let unavailable = MqttStatePublication {
+            id: DeviceId::parse("qc-one".to_owned()).unwrap(),
+            payload: r#"{"available":false}"#.to_owned(),
+            available: false,
+            legacy_payload: None,
+        };
+        let available_messages = state_messages(&available).collect::<Vec<_>>();
+        let unavailable_messages = state_messages(&unavailable).collect::<Vec<_>>();
+
+        assert!(available_messages.contains(&(
+            "updraft/configured/availability".to_owned(),
+            "online".to_owned()
+        )));
+        assert!(available_messages.contains(&(AVAILABILITY_TOPIC.to_owned(), "online".to_owned())));
+        assert!(unavailable_messages.contains(&(
+            "updraft/qc-one/availability".to_owned(),
+            "offline".to_owned()
+        )));
+        assert!(
+            available_messages
+                .iter()
+                .all(|(_, value)| value != "offline")
+        );
+    }
 
     #[test]
     fn control_subscription_preserves_the_publishers_retain_flag_on_the_wire() {
@@ -757,11 +1415,71 @@ mod tests {
         subscription.write(&mut encoded).unwrap();
 
         assert_eq!(encoded.last(), Some(&0x09));
+
+        let device_subscription =
+            rumqttc::v5::mqttbytes::v5::Subscribe::new(device_control_subscription(), None);
+        let mut encoded = bytes::BytesMut::new();
+        device_subscription.write(&mut encoded).unwrap();
+        assert_eq!(encoded.last(), Some(&0x09));
+    }
+
+    #[test]
+    fn device_results_are_correlated_and_publish_to_the_device_namespace() {
+        let request_id = CommandId::parse("qc-command-1").unwrap();
+        let result = CachedV2ControlResult {
+            response: DeviceControlV2Response {
+                request_id: request_id.as_str().to_owned(),
+                status: "confirmed",
+            },
+            legacy_response: None,
+        };
+        let payload = control_result_payload(&request_id, false, None, &result)
+            .unwrap()
+            .unwrap();
+        let payload: Value = serde_json::from_slice(&payload).unwrap();
+        let device_id = DeviceId::parse("qc-one".to_owned()).unwrap();
+
+        assert_eq!(
+            result_topic(&device_id, false),
+            "updraft/qc-one/control/result"
+        );
+        assert_eq!(payload["request_id"], "qc-command-1");
+        assert_eq!(payload["status"], "confirmed");
+    }
+
+    #[test]
+    fn legacy_alias_rejections_keep_the_legacy_correlated_result_shape() {
+        let request_id = CommandId::parse("legacy-command-1").unwrap();
+        let result = CachedV2ControlResult {
+            response: DeviceControlV2Response {
+                request_id: request_id.as_str().to_owned(),
+                status: "unknown_device",
+            },
+            legacy_response: None,
+        };
+        let payload = control_result_payload(
+            &request_id,
+            true,
+            Some(ControlPreset::TimerOneMinute),
+            &result,
+        )
+        .unwrap()
+        .unwrap();
+        let payload: Value = serde_json::from_slice(&payload).unwrap();
+
+        assert_eq!(
+            result_topic(&DeviceId::configured_ble(), true),
+            CONTROL_RESULT_TOPIC
+        );
+        assert_eq!(payload["request_id"], "legacy-command-1");
+        assert_eq!(payload["success"], false);
+        assert_eq!(payload["preset"], "timer_one_minute");
+        assert_eq!(payload["message"], "unknown_device");
     }
 
     #[test]
     fn discovery_configs_use_stable_topics_and_the_shared_device() {
-        let configs = discovery_configs().collect::<Vec<_>>();
+        let configs = discovery_configs(&legacy_ble_mqtt_descriptor(), true).collect::<Vec<_>>();
 
         assert_eq!(configs.len(), 13);
         assert!(configs.iter().all(|(topic, payload)| {
@@ -773,18 +1491,21 @@ mod tests {
             *topic == "homeassistant/sensor/updraft/temperature/config"
                 && payload["value_template"] == "{{ value_json.state.temperature_f }}"
                 && payload["unit_of_measurement"] == "°F"
-                && payload["availability"].as_array().unwrap().len() == 2
+                && payload["availability"].as_array().unwrap().len() == 3
         }));
         assert!(configs.iter().any(|(topic, payload)| {
             *topic == "homeassistant/sensor/updraft/freshness/config"
                 && payload["value_template"] == "{{ value_json.freshness }}"
-                && payload["availability"].as_array().unwrap().len() == 1
+                && payload["availability"].as_array().unwrap().len() == 2
         }));
     }
 
     #[test]
     fn discovery_payloads_do_not_include_the_ble_device_identifier() {
-        let encoded = serde_json::to_string(&discovery_configs().collect::<Vec<_>>()).unwrap();
+        let encoded = serde_json::to_string(
+            &discovery_configs(&legacy_ble_mqtt_descriptor(), true).collect::<Vec<_>>(),
+        )
+        .unwrap();
 
         assert!(!encoded.contains("private-peripheral-id"));
     }
@@ -846,14 +1567,26 @@ mod tests {
             .fold(queued, |mut queued, index| {
                 let (client, controls, pending, request) = (&client, &controls, &pending, &request);
                 async move {
-                    dispatch_control(client, controls, pending, request(index));
+                    dispatch_control(
+                        client,
+                        controls,
+                        pending,
+                        ControlTopic::LegacyAlias,
+                        request(index),
+                    );
                     let work = queued.try_recv().expect("control should be accepted");
                     assert!(
                         work.reply
-                            .send(Arc::new(ControlResponse::rejected(
-                                work.request.preset(),
-                                "test result",
-                            )))
+                            .send(CachedV2ControlResult {
+                                response: DeviceControlV2Response {
+                                    request_id: work.request.request_id.as_str().to_owned(),
+                                    status: "rejected",
+                                },
+                                legacy_response: Some(ControlResponse::rejected(
+                                    ControlPreset::TimerClear,
+                                    "test result"
+                                )),
+                            })
                             .is_ok()
                     );
                     tokio::task::yield_now().await;
@@ -862,7 +1595,13 @@ mod tests {
                 }
             })
             .await;
-        dispatch_control(&client, &controls, &pending, request(3));
+        dispatch_control(
+            &client,
+            &controls,
+            &pending,
+            ControlTopic::LegacyAlias,
+            request(3),
+        );
         assert!(
             queued.try_recv().is_err(),
             "stalled results must bound new device work"
@@ -872,7 +1611,7 @@ mod tests {
 
     #[test]
     fn discovery_exposes_one_correlated_control_select_on_the_updraft_device() {
-        let configs = discovery_configs().collect::<Vec<_>>();
+        let configs = discovery_configs(&legacy_ble_mqtt_descriptor(), true).collect::<Vec<_>>();
         let (topic, control) = configs
             .iter()
             .find(|(topic, _)| *topic == "homeassistant/select/updraft/control/config")
@@ -888,9 +1627,9 @@ mod tests {
             "{{ value_json.state.control_preset | default('None', true) if value_json.state else 'None' }}"
         );
         assert_eq!(control["availability_mode"], "all");
-        assert_eq!(control["availability"].as_array().unwrap().len(), 2);
+        assert_eq!(control["availability"].as_array().unwrap().len(), 3);
         assert_eq!(
-            control["availability"][1]["value_template"],
+            control["availability"][2]["value_template"],
             "{{ 'online' if value_json.available else 'offline' }}"
         );
         assert!(
@@ -947,7 +1686,7 @@ mod tests {
     #[test]
     fn disabling_discovery_clears_only_updraft_retained_config_topics() {
         let topics = discovery_tombstones().collect::<Vec<_>>();
-        let configs = discovery_configs().collect::<Vec<_>>();
+        let configs = discovery_configs(&legacy_ble_mqtt_descriptor(), true).collect::<Vec<_>>();
 
         assert_eq!(topics.len(), configs.len());
         assert!(

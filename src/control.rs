@@ -79,9 +79,6 @@ impl<'de> Deserialize<'de> for CommandId {
     }
 }
 
-const MAX_COMMAND_AGE_MS: u64 = 30_000;
-const MAX_COMMAND_CLOCK_SKEW_MS: u64 = 5_000;
-
 pub(crate) fn unix_millis(timestamp: SystemTime) -> Option<u64> {
     timestamp
         .duration_since(UNIX_EPOCH)
@@ -97,9 +94,6 @@ pub(crate) struct ControlRequest {
     issued_at_unix_ms: u64,
 }
 
-#[derive(Debug, Eq, PartialEq)]
-pub(crate) struct FreshControlRequest(ControlRequest);
-
 impl ControlRequest {
     pub(crate) fn request_id(&self) -> &CommandId {
         &self.request_id
@@ -109,21 +103,8 @@ impl ControlRequest {
         self.preset
     }
 
-    pub(crate) fn validate_fresh_at(self, now_unix_ms: u64) -> Result<FreshControlRequest, Self> {
-        if self.is_fresh_at(now_unix_ms) {
-            Ok(FreshControlRequest(self))
-        } else {
-            Err(self)
-        }
-    }
-
-    fn is_fresh_at(&self, now_unix_ms: u64) -> bool {
-        is_fresh_at(
-            self.issued_at_unix_ms,
-            now_unix_ms,
-            Duration::from_millis(MAX_COMMAND_AGE_MS),
-            Duration::from_millis(MAX_COMMAND_CLOCK_SKEW_MS),
-        )
+    pub(crate) const fn issued_at_unix_ms(&self) -> u64 {
+        self.issued_at_unix_ms
     }
 }
 
@@ -138,24 +119,6 @@ pub(crate) fn is_fresh_at(
     match issued_at_unix_ms.checked_sub(now_unix_ms) {
         Some(future_ms) => future_ms <= max_future_skew_ms,
         None => now_unix_ms - issued_at_unix_ms <= max_age_ms,
-    }
-}
-
-impl FreshControlRequest {
-    pub(crate) fn request_id(&self) -> &CommandId {
-        &self.0.request_id
-    }
-
-    pub(crate) const fn preset(&self) -> ControlPreset {
-        self.0.preset
-    }
-
-    pub(crate) fn is_fresh_now(&self) -> bool {
-        unix_millis(SystemTime::now()).is_some_and(|now| self.is_fresh_at(now))
-    }
-
-    pub(crate) fn is_fresh_at(&self, now_unix_ms: u64) -> bool {
-        self.0.is_fresh_at(now_unix_ms)
     }
 }
 
@@ -229,46 +192,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_control_request_must_be_fresh_before_it_can_be_executed() {
-        let request = ControlRequest {
-            request_id: CommandId::parse("ha-123").unwrap(),
-            preset: ControlPreset::TimerClear,
-            issued_at_unix_ms: 1_000_000,
-        };
-
-        let accepted = request.validate_fresh_at(1_000_000).unwrap();
-        assert_eq!(accepted.preset(), ControlPreset::TimerClear);
-        assert_eq!(accepted.request_id().as_str(), "ha-123");
-        assert!(accepted.is_fresh_at(1_030_000));
-        assert!(!accepted.is_fresh_at(1_030_001));
-
-        let latest = ControlRequest {
-            request_id: CommandId::parse("ha-latest").unwrap(),
-            preset: ControlPreset::TimerClear,
-            issued_at_unix_ms: 1_000_000,
-        };
-        assert!(latest.validate_fresh_at(1_030_000).is_ok());
-
-        let clock_skew = ControlRequest {
-            request_id: CommandId::parse("ha-clock-skew").unwrap(),
-            preset: ControlPreset::TimerClear,
-            issued_at_unix_ms: 1_005_000,
-        };
-        assert!(clock_skew.validate_fresh_at(1_000_000).is_ok());
-
-        let stale = ControlRequest {
-            request_id: CommandId::parse("ha-old").unwrap(),
-            preset: ControlPreset::TimerClear,
-            issued_at_unix_ms: 1_000_000,
-        };
-        assert!(stale.validate_fresh_at(1_031_000).is_err());
-
-        let future = ControlRequest {
-            request_id: CommandId::parse("ha-future").unwrap(),
-            preset: ControlPreset::TimerClear,
-            issued_at_unix_ms: 1_005_001,
-        };
-        assert!(future.validate_fresh_at(1_000_000).is_err());
+    fn control_clock_freshness_observes_age_and_future_skew_bounds() {
+        let max_age = Duration::from_secs(30);
+        let future_skew = Duration::from_secs(5);
+        assert!(is_fresh_at(1_000_000, 1_030_000, max_age, future_skew));
+        assert!(!is_fresh_at(1_000_000, 1_030_001, max_age, future_skew));
+        assert!(is_fresh_at(1_005_000, 1_000_000, max_age, future_skew));
+        assert!(!is_fresh_at(1_005_001, 1_000_000, max_age, future_skew));
     }
 
     #[test]

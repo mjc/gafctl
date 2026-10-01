@@ -6,7 +6,7 @@ use std::{
 };
 
 use crate::backend::{DeviceRegistry, DeviceRuntime};
-use crate::control::{CommandId, ControlPreset, FreshControlRequest, is_fresh_at, unix_millis};
+use crate::control::{CommandId, ControlPreset, is_fresh_at, unix_millis};
 use crate::device::{
     DeviceBackend, DeviceCommand, DeviceId, DeviceSettings, DeviceState, LegacyMode,
     StateProvenance,
@@ -18,7 +18,7 @@ use axum::{
     http::StatusCode,
     routing::{get, post},
 };
-use futures_util::{Stream, StreamExt, stream};
+use futures_util::{Stream, StreamExt, TryStreamExt, stream};
 use serde::{Deserialize, Serialize};
 use tokio::{
     net::TcpListener,
@@ -44,7 +44,8 @@ const DEFAULT_FRESHNESS_LIMIT: Duration = Duration::from_secs(90);
 struct ApiState {
     registry: Arc<RwLock<DeviceRegistry>>,
     ble_device: Option<Arc<LegacyBleRuntime>>,
-    mqtt_updates: Option<watch::Sender<Arc<String>>>,
+    mqtt_updates: Option<watch::Sender<Arc<crate::mqtt::MqttStateSnapshot>>>,
+    mqtt_discovery_enabled: bool,
     quickconnect_control: Option<QuickConnectControlService>,
     v2_control_results: Arc<tokio::sync::Mutex<RecentV2ControlResults>>,
 }
@@ -63,6 +64,7 @@ impl ApiState {
             registry: Arc::new(RwLock::new(registry)),
             ble_device: None,
             mqtt_updates: None,
+            mqtt_discovery_enabled: false,
             quickconnect_control: None,
             v2_control_results: Arc::default(),
         }
@@ -82,6 +84,7 @@ impl ApiState {
                 device,
             ))),
             mqtt_updates: None,
+            mqtt_discovery_enabled: false,
             quickconnect_control: None,
             v2_control_results: Arc::default(),
         }
@@ -98,52 +101,17 @@ impl ApiState {
             .await
     }
 
-    async fn execute_mqtt_control(&self, request: &FreshControlRequest) -> ControlResponse {
-        match &self.ble_device {
-            Some(device) => device.execute_mqtt_control(self, request).await,
-            None => ControlResponse::rejected(
-                request.preset(),
-                "configured BLE device is not available",
-            ),
-        }
-    }
-
-    async fn replay_or_execute_control(
-        &self,
-        request: &FreshControlRequest,
-        recent: &mut RecentControlResults,
-    ) -> Arc<ControlResponse> {
-        if !request.is_fresh_now() {
-            return Arc::new(ControlResponse::rejected(
-                request.preset(),
-                "stale or future-dated control request",
-            ));
-        }
-        if let Some(response) = recent.get(request.request_id(), request.preset()) {
-            return response;
-        }
-        let response = Arc::new(self.execute_mqtt_control(request).await);
-        recent.insert(
-            request.request_id().clone(),
-            request.preset(),
-            Arc::clone(&response),
-        );
-        response
-    }
-
     async fn poll_and_publish_state(&self) {
         if let Some(device) = &self.ble_device {
             device.poll_and_publish_state(self).await;
+        } else {
+            self.publish_state().await;
         }
     }
 
     async fn start_mqtt(&mut self, config: crate::mqtt::MqttConfig) -> Result<()> {
-        let Some(device) = &self.ble_device else {
-            tracing::warn!("MQTT is not started until a device backend is registered");
-            return Ok(());
-        };
-        let initial_state = serde_json::to_string(&device_state_response(device).await)
-            .context("could not serialize initial MQTT state")?;
+        self.mqtt_discovery_enabled = config.discovery_enabled;
+        let initial_state = self.mqtt_state_snapshot().await?;
         let bridge = crate::mqtt::start(config, initial_state);
         self.mqtt_updates = Some(bridge.state_updates);
         tokio::spawn(process_mqtt_controls(self.clone(), bridge.control_requests));
@@ -154,15 +122,53 @@ impl ApiState {
         let Some(updates) = &self.mqtt_updates else {
             return;
         };
-        let Some(device) = &self.ble_device else {
-            return;
-        };
-        match serde_json::to_string(&device_state_response(device).await) {
-            Ok(payload) => {
-                updates.send_replace(Arc::new(payload));
+        match self.mqtt_state_snapshot().await {
+            Ok(snapshot) => {
+                updates.send_replace(Arc::new(snapshot));
             }
-            Err(error) => tracing::error!(%error, "could not serialize device state for MQTT"),
+            Err(error) => tracing::error!(%error, "could not collect device state for MQTT"),
         }
+    }
+
+    async fn mqtt_state_snapshot(&self) -> Result<crate::mqtt::MqttStateSnapshot> {
+        let descriptors = self
+            .registry
+            .read()
+            .await
+            .descriptors()
+            .cloned()
+            .collect::<Vec<_>>();
+        let publications = stream::iter(descriptors.iter().cloned())
+            .then(|descriptor| async move {
+                let response = device_state_v2_data(self, &descriptor.id)
+                    .await
+                    .map_err(|_| anyhow::anyhow!("registered device state is unavailable"))?;
+                let legacy_payload = match (&descriptor.backend, self.ble_device.as_ref()) {
+                    (DeviceBackend::LegacyBle, Some(device))
+                        if descriptor.id == DeviceId::configured_ble() =>
+                    {
+                        Some(
+                            serde_json::to_string(&device_state_response(device).await)
+                                .context("could not serialize legacy BLE MQTT state")?,
+                        )
+                    }
+                    _ => None,
+                };
+                Ok::<_, anyhow::Error>(crate::mqtt::MqttStatePublication {
+                    id: descriptor.id,
+                    payload: serde_json::to_string(&response)
+                        .context("could not serialize v2 device state for MQTT")?,
+                    available: response.available,
+                    legacy_payload,
+                })
+            })
+            .try_collect()
+            .await?;
+        Ok(crate::mqtt::MqttStateSnapshot {
+            devices: descriptors,
+            publications,
+            legacy_discovery_enabled: self.mqtt_discovery_enabled,
+        })
     }
 }
 
@@ -175,21 +181,6 @@ impl LegacyBleRuntime {
             freshness_limit,
             peripheral_id: Arc::from(peripheral_id),
         }
-    }
-
-    async fn execute_mqtt_control(
-        &self,
-        state: &ApiState,
-        request: &FreshControlRequest,
-    ) -> ControlResponse {
-        let _transaction = self.device.acquire_transaction().await;
-        if !request.is_fresh_now() {
-            return ControlResponse::rejected(
-                request.preset(),
-                "stale or future-dated control request",
-            );
-        }
-        self.execute_control_locked(state, request.preset()).await
     }
 
     async fn execute_http_control(
@@ -413,7 +404,7 @@ pub(crate) async fn serve(
         state.start_mqtt(config).await?;
     }
     let app = router(state.clone());
-    if state.ble_device.is_some() {
+    if state_polling_enabled(&state) {
         tokio::spawn(poll_device(state, DEFAULT_POLL_INTERVAL));
     }
 
@@ -421,6 +412,10 @@ pub(crate) async fn serve(
     axum::serve(listener, app)
         .await
         .context("HTTP server failed")
+}
+
+fn state_polling_enabled(state: &ApiState) -> bool {
+    state.ble_device.is_some() || state.mqtt_updates.is_some()
 }
 
 fn validate_bind_address(address: SocketAddr, allow_remote: bool) -> Result<()> {
@@ -466,15 +461,22 @@ async fn device_state_v2(
     Path(id): Path<String>,
 ) -> Result<Json<DeviceStateV2Response>, StatusCode> {
     let id = DeviceId::parse(id).ok_or(StatusCode::NOT_FOUND)?;
+    device_state_v2_data(&state, &id).await.map(Json)
+}
+
+async fn device_state_v2_data(
+    state: &ApiState,
+    id: &DeviceId,
+) -> Result<DeviceStateV2Response, StatusCode> {
     let registry = state.registry.read().await;
     let descriptor = registry
         .descriptors()
-        .find(|descriptor| descriptor.id == id)
+        .find(|descriptor| descriptor.id == *id)
         .ok_or(StatusCode::NOT_FOUND)?;
-    let runtime = registry.runtime(&id).ok_or(StatusCode::NOT_FOUND)?;
+    let runtime = registry.runtime(id).ok_or(StatusCode::NOT_FOUND)?;
     let snapshot = runtime.snapshot().await;
     let (last_error, inventory_status) = match (&descriptor.backend, state.ble_device.as_ref()) {
-        (DeviceBackend::LegacyBle, Some(device)) if id == DeviceId::configured_ble() => {
+        (DeviceBackend::LegacyBle, Some(device)) if *id == DeviceId::configured_ble() => {
             let reconciler = device.reconciler.read().await;
             let poll_error = reconciler.last_error().map(str::to_owned);
             let inventory_status = if poll_error.is_some() && reconciler.latest_snapshot().is_none()
@@ -487,28 +489,34 @@ async fn device_state_v2(
         }
         _ => (snapshot.last_error, snapshot.inventory_status),
     };
-    Ok(Json(DeviceStateV2Response {
-        id,
+    Ok(DeviceStateV2Response {
+        id: id.clone(),
         backend: descriptor.backend,
         available: snapshot.state.is_some(),
         inventory_status,
         last_error,
         state: snapshot.state,
-    }))
+    })
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
 #[serde(deny_unknown_fields)]
-struct DeviceControlV2Request {
-    request_id: CommandId,
-    issued_at_unix_ms: u64,
-    command: DeviceCommand,
+pub(crate) struct DeviceControlV2Request {
+    pub(crate) request_id: CommandId,
+    pub(crate) issued_at_unix_ms: u64,
+    pub(crate) command: DeviceCommand,
 }
 
 #[derive(Clone, Debug, Serialize)]
-struct DeviceControlV2Response {
-    request_id: String,
-    status: &'static str,
+pub(crate) struct DeviceControlV2Response {
+    pub(crate) request_id: String,
+    pub(crate) status: &'static str,
+}
+
+#[derive(Clone)]
+pub(crate) struct CachedV2ControlResult {
+    pub(crate) response: DeviceControlV2Response,
+    pub(crate) legacy_response: Option<ControlResponse>,
 }
 
 const V2_CONTROL_MAX_AGE: Duration = Duration::from_secs(30);
@@ -520,20 +528,20 @@ struct RecentV2ControlResults(HashMap<DeviceId, Arc<tokio::sync::Mutex<V2DeviceC
 
 #[derive(Default)]
 struct V2DeviceControlHistory {
-    completed: VecDeque<(CommandId, DeviceCommand, DeviceControlV2Response)>,
+    completed: VecDeque<(CommandId, DeviceCommand, CachedV2ControlResult)>,
     in_flight: HashMap<
         CommandId,
         (
             DeviceCommand,
-            tokio::sync::watch::Receiver<Option<DeviceControlV2Response>>,
+            tokio::sync::watch::Receiver<Option<CachedV2ControlResult>>,
         ),
     >,
 }
 
 enum V2ControlReservation {
-    Execute(tokio::sync::watch::Sender<Option<DeviceControlV2Response>>),
-    Wait(tokio::sync::watch::Receiver<Option<DeviceControlV2Response>>),
-    Completed(DeviceControlV2Response),
+    Execute(tokio::sync::watch::Sender<Option<CachedV2ControlResult>>),
+    Wait(tokio::sync::watch::Receiver<Option<CachedV2ControlResult>>),
+    Completed(CachedV2ControlResult),
 }
 
 async fn control_device_v2(
@@ -541,22 +549,21 @@ async fn control_device_v2(
     Path(id): Path<String>,
     Json(request): Json<DeviceControlV2Request>,
 ) -> (StatusCode, Json<DeviceControlV2Response>) {
-    let id = match DeviceId::parse(id) {
-        Some(id) => id,
-        None => {
-            return v2_control_rejected(
-                request.request_id,
-                "unknown_device",
-                StatusCode::NOT_FOUND,
-            );
-        }
+    let Some(id) = DeviceId::parse(id) else {
+        return v2_control_rejected(request.request_id, "unknown_device", StatusCode::NOT_FOUND);
     };
+    let result = process_v2_control_request(&state, id, request).await;
+    let status = status_for_v2_outcome(result.response.status);
+    (status, Json(result.response))
+}
+
+async fn process_v2_control_request(
+    state: &ApiState,
+    id: DeviceId,
+    request: DeviceControlV2Request,
+) -> CachedV2ControlResult {
     if !v2_request_is_fresh(request.issued_at_unix_ms) {
-        return v2_control_rejected(
-            request.request_id,
-            "stale_request",
-            StatusCode::UNPROCESSABLE_ENTITY,
-        );
+        return cached_v2_result(request.request_id, "stale_request");
     }
 
     let registered = state
@@ -566,7 +573,7 @@ async fn control_device_v2(
         .descriptors()
         .any(|descriptor| descriptor.id == id);
     if !registered {
-        return v2_control_rejected(request.request_id, "unknown_device", StatusCode::NOT_FOUND);
+        return cached_v2_result(request.request_id, "unknown_device");
     }
     let history = Arc::clone(
         state
@@ -584,9 +591,7 @@ async fn control_device_v2(
         reserve_v2_control(&mut history, &request.request_id, request.command)
     };
     let mut receiver = match reservation {
-        V2ControlReservation::Completed(response) => {
-            return (status_for_v2_outcome(response.status), Json(response));
-        }
+        V2ControlReservation::Completed(result) => return result,
         V2ControlReservation::Wait(receiver) => receiver,
         V2ControlReservation::Execute(sender) => {
             let receiver = sender.subscribe();
@@ -603,42 +608,41 @@ async fn control_device_v2(
             receiver
         }
     };
-    let Some(response) = receiver
+    receiver
         .wait_for(Option::is_some)
         .await
         .ok()
         .and_then(|response| response.clone())
-    else {
-        return v2_control_rejected(
-            request.request_id,
-            "control_failed",
-            StatusCode::INTERNAL_SERVER_ERROR,
-        );
-    };
-    (status_for_v2_outcome(response.status), Json(response))
+        .unwrap_or_else(|| cached_v2_result(request.request_id, "control_failed"))
 }
 
 async fn execute_v2_control(
     state: &ApiState,
     id: &DeviceId,
     request: &DeviceControlV2Request,
-) -> DeviceControlV2Response {
+) -> CachedV2ControlResult {
     let backend = state.registry.read().await.dispatch(id, request.command);
-    let outcome = match backend {
+    let (outcome, legacy_response) = match backend {
         Ok(DeviceBackend::LegacyBle) => {
             if state.ble_device.is_none() {
-                "device_unavailable"
+                ("device_unavailable", None)
             } else if let DeviceCommand::LegacyPreset { preset } = request.command {
                 match state
                     .execute_http_control(request.issued_at_unix_ms, preset)
                     .await
                 {
-                    Ok(response) if response.success => "confirmed",
-                    Ok(_) => "unconfirmed",
-                    Err(()) => "stale_request",
+                    Ok(response) => {
+                        let status = if response.success {
+                            "confirmed"
+                        } else {
+                            "unconfirmed"
+                        };
+                        (status, Some(response))
+                    }
+                    Err(()) => ("stale_request", None),
                 }
             } else {
-                "unsupported_command"
+                ("unsupported_command", None)
             }
         }
         Ok(DeviceBackend::QuickConnect) => match (
@@ -651,24 +655,26 @@ async fn execute_v2_control(
                     request.issued_at_unix_ms,
                     command,
                 ) else {
-                    return DeviceControlV2Response {
-                        request_id: request.request_id.as_str().to_owned(),
-                        status: "invalid_request_id",
-                    };
+                    return cached_v2_result(request.request_id.clone(), "invalid_request_id");
                 };
                 let result = service.execute(id, intent).await;
-                quickconnect_status_name(result.status())
+                (quickconnect_status_name(result.status()), None)
             }
-            (None, _) => "backend_unavailable",
-            (_, None) => "unsupported_command",
+            (None, _) => ("backend_unavailable", None),
+            (_, None) => ("unsupported_command", None),
         },
-        Err(crate::backend::DeviceRegistryError::UnknownDevice) => "unknown_device",
-        Err(crate::backend::DeviceRegistryError::UnsupportedCommand) => "unsupported_command",
-        Err(_) => "control_failed",
+        Err(crate::backend::DeviceRegistryError::UnknownDevice) => ("unknown_device", None),
+        Err(crate::backend::DeviceRegistryError::UnsupportedCommand) => {
+            ("unsupported_command", None)
+        }
+        Err(_) => ("control_failed", None),
     };
-    DeviceControlV2Response {
-        request_id: request.request_id.as_str().to_owned(),
-        status: outcome,
+    CachedV2ControlResult {
+        response: DeviceControlV2Response {
+            request_id: request.request_id.as_str().to_owned(),
+            status: outcome,
+        },
+        legacy_response,
     }
 }
 
@@ -676,8 +682,8 @@ fn spawn_v2_control_execution(
     history: Arc<tokio::sync::Mutex<V2DeviceControlHistory>>,
     request_id: CommandId,
     command: DeviceCommand,
-    sender: tokio::sync::watch::Sender<Option<DeviceControlV2Response>>,
-    execution: impl std::future::Future<Output = DeviceControlV2Response> + Send + 'static,
+    sender: tokio::sync::watch::Sender<Option<CachedV2ControlResult>>,
+    execution: impl std::future::Future<Output = CachedV2ControlResult> + Send + 'static,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let response = execution.await;
@@ -703,29 +709,23 @@ fn reserve_v2_control(
         return V2ControlReservation::Completed(if *previous_command == command {
             response.clone()
         } else {
-            DeviceControlV2Response {
-                request_id: request_id.as_str().to_owned(),
-                status: "request_id_reused",
-            }
+            cached_v2_result(request_id.clone(), "request_id_reused")
         });
     }
     if let Some((previous_command, receiver)) = history.in_flight.get(request_id) {
         if *previous_command != command {
-            return V2ControlReservation::Completed(DeviceControlV2Response {
-                request_id: request_id.as_str().to_owned(),
-                status: "request_id_reused",
-            });
+            return V2ControlReservation::Completed(cached_v2_result(
+                request_id.clone(),
+                "request_id_reused",
+            ));
         }
         if receiver.has_changed().is_ok() {
             return V2ControlReservation::Wait(receiver.clone());
         }
         history.in_flight.remove(request_id);
-        let response = DeviceControlV2Response {
-            request_id: request_id.as_str().to_owned(),
-            status: "control_failed",
-        };
-        remember_v2_control_result(history, request_id.clone(), command, response.clone());
-        return V2ControlReservation::Completed(response);
+        let result = cached_v2_result(request_id.clone(), "control_failed");
+        remember_v2_control_result(history, request_id.clone(), command, result.clone());
+        return V2ControlReservation::Completed(result);
     }
 
     let (sender, receiver) = tokio::sync::watch::channel(None);
@@ -739,11 +739,21 @@ fn remember_v2_control_result(
     history: &mut V2DeviceControlHistory,
     request_id: CommandId,
     command: DeviceCommand,
-    response: DeviceControlV2Response,
+    response: CachedV2ControlResult,
 ) {
     history.completed.push_back((request_id, command, response));
     if history.completed.len() > V2_REPLAY_CAPACITY {
         history.completed.pop_front();
+    }
+}
+
+fn cached_v2_result(request_id: CommandId, status: &'static str) -> CachedV2ControlResult {
+    CachedV2ControlResult {
+        response: DeviceControlV2Response {
+            request_id: request_id.as_str().to_owned(),
+            status,
+        },
+        legacy_response: None,
     }
 }
 
@@ -761,7 +771,7 @@ fn v2_control_rejected(
     )
 }
 
-fn v2_request_is_fresh(issued_at_unix_ms: u64) -> bool {
+pub(crate) fn v2_request_is_fresh(issued_at_unix_ms: u64) -> bool {
     v2_request_is_fresh_at(issued_at_unix_ms, unix_millis(SystemTime::now()))
 }
 
@@ -848,48 +858,13 @@ impl ControlResponse {
     }
 }
 
-const CONTROL_REPLAY_CAPACITY: usize = 64;
-
-#[derive(Default)]
-struct RecentControlResults(VecDeque<(CommandId, ControlPreset, Arc<ControlResponse>)>);
-
-impl RecentControlResults {
-    fn get(&self, request_id: &CommandId, preset: ControlPreset) -> Option<Arc<ControlResponse>> {
-        let (_, seen_preset, response) = self
-            .0
-            .iter()
-            .find(|(seen_id, _, _)| seen_id == request_id)?;
-        Some(if *seen_preset == preset {
-            Arc::clone(response)
-        } else {
-            Arc::new(ControlResponse::rejected(
-                preset,
-                "request_id was reused for another preset",
-            ))
-        })
-    }
-
-    fn insert(
-        &mut self,
-        request_id: CommandId,
-        preset: ControlPreset,
-        response: Arc<ControlResponse>,
-    ) {
-        self.0.retain(|(seen_id, _, _)| seen_id != &request_id);
-        self.0.push_back((request_id, preset, response));
-        if self.0.len() > CONTROL_REPLAY_CAPACITY {
-            self.0.pop_front();
-        }
-    }
-}
-
 async fn process_mqtt_controls(
     state: ApiState,
     controls: mpsc::Receiver<crate::mqtt::MqttControlWork>,
 ) {
     control_requests(controls)
-        .fold(RecentControlResults::default(), |recent, work| {
-            reply_to_control_request(&state, recent, work)
+        .for_each_concurrent(Some(crate::mqtt::CONTROL_QUEUE_CAPACITY), |work| {
+            reply_to_device_control(&state, work)
         })
         .await;
 }
@@ -910,16 +885,9 @@ async fn receive_control_request(
     Some((work, controls))
 }
 
-async fn reply_to_control_request(
-    state: &ApiState,
-    mut recent: RecentControlResults,
-    work: crate::mqtt::MqttControlWork,
-) -> RecentControlResults {
-    let response = state
-        .replay_or_execute_control(&work.request, &mut recent)
-        .await;
+async fn reply_to_device_control(state: &ApiState, work: crate::mqtt::MqttControlWork) {
+    let response = process_v2_control_request(state, work.device_id, work.request).await;
     let _ = work.reply.send(response);
-    recent
 }
 
 async fn device_state_response(device: &LegacyBleRuntime) -> DeviceStateResponse {
@@ -1135,6 +1103,7 @@ const fn freshness_name(freshness: StateFreshness) -> &'static str {
 mod tests {
     use std::{fs, path::PathBuf, time::SystemTime};
 
+    use crate::device::EntitySource;
     use axum::{body::Body, http::Request};
     use http_body_util::BodyExt;
     use tower::ServiceExt;
@@ -1150,21 +1119,105 @@ mod tests {
 
     fn reservation_is_reused(reservation: V2ControlReservation) -> bool {
         match reservation {
-            V2ControlReservation::Completed(response) => response.status == "request_id_reused",
+            V2ControlReservation::Completed(response) => {
+                response.response.status == "request_id_reused"
+            }
             V2ControlReservation::Execute(_) | V2ControlReservation::Wait(_) => false,
         }
     }
 
     fn reservation_has_status(reservation: V2ControlReservation, status: &str) -> bool {
         match reservation {
-            V2ControlReservation::Completed(response) => response.status == status,
+            V2ControlReservation::Completed(response) => response.response.status == status,
             V2ControlReservation::Execute(_) | V2ControlReservation::Wait(_) => false,
         }
     }
 
+    #[test]
+    fn cloud_only_mqtt_state_is_scheduled_without_ble() {
+        let mut state = ApiState::with_registry(DeviceRegistry::new());
+        assert!(!state_polling_enabled(&state));
+        state.mqtt_updates = Some(
+            watch::channel(Arc::new(crate::mqtt::MqttStateSnapshot {
+                devices: Vec::new(),
+                publications: Vec::new(),
+                legacy_discovery_enabled: false,
+            }))
+            .0,
+        );
+        assert!(state_polling_enabled(&state));
+    }
+
+    #[tokio::test]
+    async fn cloud_only_periodic_state_publication_refreshes_the_mqtt_snapshot() {
+        let initial = crate::mqtt::MqttStateSnapshot {
+            devices: Vec::new(),
+            publications: Vec::new(),
+            legacy_discovery_enabled: false,
+        };
+        let (updates, mut current) = watch::channel(Arc::new(initial));
+        let mut state = ApiState::with_registry(DeviceRegistry::new());
+        state.mqtt_updates = Some(updates);
+
+        state.poll_and_publish_state().await;
+
+        assert!(current.changed().await.is_ok());
+        assert!(current.borrow().publications.is_empty());
+    }
+
+    #[tokio::test]
+    async fn mqtt_discovery_start_preserves_mixed_per_device_sources() {
+        let path = identity_store_path();
+        let mut registry = DeviceRegistry::load(&path).unwrap();
+        let ids = registry
+            .reconcile_quickconnect(
+                "account-a",
+                &[
+                    crate::backend::CloudDeviceInput::new(
+                        "provider-a".to_owned(),
+                        "Cloud fan A".to_owned(),
+                    ),
+                    crate::backend::CloudDeviceInput::new(
+                        "provider-b".to_owned(),
+                        "Cloud fan B".to_owned(),
+                    ),
+                ],
+            )
+            .unwrap();
+        registry
+            .set_entity_sources(&ids[0], EntitySource::Mqtt, EntitySource::Http)
+            .unwrap();
+        let mut state = ApiState::with_registry(registry);
+
+        state
+            .start_mqtt(crate::mqtt::MqttConfig {
+                host: "127.0.0.1".to_owned(),
+                port: 1,
+                username: "test-user".to_owned(),
+                password: "test-password".to_owned(),
+                discovery_enabled: true,
+            })
+            .await
+            .unwrap();
+
+        let registry = state.registry.read().await;
+        let descriptors = registry.descriptors().collect::<Vec<_>>();
+        assert!(descriptors.iter().any(|device| {
+            device.id == ids[0]
+                && device.state_source == EntitySource::Mqtt
+                && device.command_source == EntitySource::Http
+        }));
+        assert!(descriptors.iter().any(|device| {
+            device.id == ids[1]
+                && device.state_source == EntitySource::Http
+                && device.command_source == EntitySource::Http
+        }));
+        fs::remove_dir_all(path.parent().unwrap()).ok();
+    }
+
     fn reservation_is_execute(
         reservation: V2ControlReservation,
-    ) -> Option<tokio::sync::watch::Sender<Option<DeviceControlV2Response>>> {
+    ) -> Option<tokio::sync::watch::Sender<Option<CachedV2ControlResult>>> {
         match reservation {
             V2ControlReservation::Execute(sender) => Some(sender),
             V2ControlReservation::Wait(_) | V2ControlReservation::Completed(_) => None,
@@ -1208,6 +1261,38 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn v2_replay_reservations_are_scoped_to_each_local_device_id() {
+        let mut results = RecentV2ControlResults::default();
+        let request_id = CommandId::parse("same-request").unwrap();
+        let command = DeviceCommand::QuickConnectMode {
+            mode: crate::device::QuickConnectMode::Automatic,
+        };
+        let first_device = DeviceId::parse("quickconnect-a".to_owned()).unwrap();
+        let second_device = DeviceId::parse("quickconnect-b".to_owned()).unwrap();
+
+        let first = Arc::clone(results.0.entry(first_device).or_insert_with(|| {
+            Arc::new(tokio::sync::Mutex::new(V2DeviceControlHistory::default()))
+        }));
+        let second = Arc::clone(results.0.entry(second_device).or_insert_with(|| {
+            Arc::new(tokio::sync::Mutex::new(V2DeviceControlHistory::default()))
+        }));
+        let mut first_history = first.lock().await;
+        assert!(
+            reservation_is_execute(reserve_v2_control(&mut first_history, &request_id, command,))
+                .is_some()
+        );
+        let mut second_history = second.lock().await;
+        assert!(
+            reservation_is_execute(reserve_v2_control(
+                &mut second_history,
+                &request_id,
+                command,
+            ))
+            .is_some()
+        );
+    }
+
+    #[tokio::test]
     async fn v2_control_execution_survives_waiter_cancellation_and_records_result() {
         let request_id = CommandId::parse("cancelled-waiter").unwrap();
         let command = DeviceCommand::LegacyPreset {
@@ -1224,9 +1309,12 @@ mod tests {
         drop(cancelled_waiter);
         let (started_sender, started_receiver) = tokio::sync::oneshot::channel();
         let (finish_sender, finish_receiver) = tokio::sync::oneshot::channel();
-        let response = DeviceControlV2Response {
-            request_id: request_id.as_str().to_owned(),
-            status: "unconfirmed",
+        let response = CachedV2ControlResult {
+            response: DeviceControlV2Response {
+                request_id: request_id.as_str().to_owned(),
+                status: "unconfirmed",
+            },
+            legacy_response: None,
         };
         let execution = spawn_v2_control_execution(
             Arc::clone(&history),
@@ -1245,7 +1333,10 @@ mod tests {
         assert!(execution.await.is_ok());
         let history = history.lock().await;
         assert!(!history.in_flight.contains_key(&request_id));
-        assert_eq!(history.completed.front().unwrap().2.status, "unconfirmed");
+        assert_eq!(
+            history.completed.front().unwrap().2.response.status,
+            "unconfirmed"
+        );
     }
 
     fn snapshot_at(started_at: Instant, observed_at: SystemTime) -> DeviceSnapshot {
@@ -1739,47 +1830,6 @@ mod tests {
             )
             .is_err()
         );
-    }
-
-    #[test]
-    fn mqtt_control_request_ids_replay_once_and_reject_preset_changes() {
-        let id = CommandId::parse("ha-command-1").unwrap();
-        let mut recent = RecentControlResults::default();
-        let response = ControlResponse {
-            success: true,
-            preset: ControlPreset::TimerOneMinute,
-            message: "command acknowledged and readback matched",
-            state: None,
-        };
-        recent.insert(
-            id.clone(),
-            ControlPreset::TimerOneMinute,
-            Arc::new(response),
-        );
-
-        assert!(
-            recent
-                .get(&id, ControlPreset::TimerOneMinute)
-                .unwrap()
-                .success
-        );
-        let changed = recent
-            .get(&id, ControlPreset::TimerClear)
-            .expect("a reused request ID is rejected");
-        assert!(!changed.success);
-        assert_eq!(changed.message, "request_id was reused for another preset");
-
-        (0..=CONTROL_REPLAY_CAPACITY).for_each(|index| {
-            recent.insert(
-                CommandId::parse(&format!("command-{index}")).unwrap(),
-                ControlPreset::TimerClear,
-                Arc::new(ControlResponse::rejected(
-                    ControlPreset::TimerClear,
-                    "not confirmed",
-                )),
-            );
-        });
-        assert!(recent.0.len() <= CONTROL_REPLAY_CAPACITY);
     }
 
     #[tokio::test]

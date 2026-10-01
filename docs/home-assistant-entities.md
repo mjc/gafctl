@@ -1,12 +1,12 @@
 # Home Assistant transports
 
-Updraft supports HTTP and MQTT. Both expose the same state and fixed control presets. They share the BLE poll lock and report control success only after device acknowledgement and matching readback.
+Updraft supports HTTP and MQTT for multiple registered devices. Each transport exposes the same per-device state and capability-based command contract. Backends report their own confirmation outcome.
 
 ## Choose one entity source
 
-The native HTTP integration is the default. It owns Home Assistant setup, entity registration, polling, and errors.
+Explicit MQTT discovery publishes the configured BLE entities. QuickConnect discovery follows each device's independently selected state and command sources; those sources default to HTTP.
 
-MQTT state publishing can run beside the HTTP integration without discovery. MQTT discovery is optional. Enable it only when MQTT should own the entities, and remove the HTTP integration for the same device. Two entity sources can create duplicate Home Assistant entities.
+MQTT state publishing can run beside the HTTP API without discovery. MQTT discovery is optional and follows the selected MQTT source. The legacy BLE topics remain aliases routed through the same control owner, so they do not create another device or submit commands twice.
 
 ## State and availability
 
@@ -16,15 +16,15 @@ The fan flag is a controller report. It does not confirm physical operation or a
 
 HTTP entity availability follows the age of the last complete device snapshot. `/health` reports whether the API process responds; read the device state endpoint to check BLE availability.
 
-MQTT publishes retained state and availability. Its last will marks the publisher offline after an unexpected disconnect. The client reconnects and republishes the latest state and, when enabled, discovery data. Broker connectivity and device-state freshness are separate signals.
+MQTT publishes retained state and per-device availability under `updraft/{local-id}/`. The process last will is `updraft/availability`; each device's availability is updated from that device's own state. An unavailable cloud account or device does not mark other devices unavailable. On reconnect, the client republishes current states and enabled discovery data. Broker connectivity and device-state freshness remain separate signals.
 
 ## Controls
 
-HTTP and MQTT use the same fixed presets. Unknown fields, unsupported presets, stale requests, future-dated requests, and retained MQTT requests are rejected before BLE access. MQTT requests are size-limited and use a bounded queue.
+HTTP and per-device MQTT use the same typed commands advertised by each device's capabilities. The legacy BLE topic remains an alias for its preset commands. Unknown fields, unsupported commands, stale requests, future-dated requests, and retained MQTT requests are rejected before device access. MQTT requests are size-limited and use a bounded queue.
 
-Controls share a transaction lock with polling. Updraft reports success only after an accepted device acknowledgement and matching state readback. It does not update Home Assistant optimistically. A missing MQTT result does not prove that the device rejected a command; inspect the current state before retrying.
+Controls share a per-device transaction lock with state polling. Updraft does not update Home Assistant optimistically. A missing MQTT result does not prove that the device rejected a command; inspect its current state before retrying.
 
-MQTT results include a request ID and are not retained. Updraft caches results for the 64 most recent request IDs. While a result is cached, repeating its ID with the same preset returns that result; reusing its ID for another preset is rejected. An evicted ID can execute again if its timestamp is still fresh. The cache does not survive a process restart.
+MQTT results include a request ID and are not retained. Updraft caches the 64 most recent requests per local device ID. While a result is cached, repeating its ID with the same complete typed command returns that result; reusing it for a different command is rejected. An evicted ID can execute again if its timestamp is still fresh. The cache does not survive a process restart.
 
 The MQTT preset select resets to unknown when the current settings do not match a supported preset. An expired one-minute timer is not reported as an active one-minute preset.
 
