@@ -81,6 +81,17 @@ pub enum QuickConnectMode {
     Manual,
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum QuickConnectModeStatus {
+    Off,
+    Automatic,
+    Timer,
+    Manual,
+    Unknown,
+    Conflicting,
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(tag = "kind", content = "value", rename_all = "snake_case")]
 pub enum CommandCapability {
@@ -175,7 +186,7 @@ pub enum DeviceSettings {
         timer_original_minutes: Option<u16>,
     },
     QuickConnect {
-        mode: Option<QuickConnectMode>,
+        mode: QuickConnectModeStatus,
         automatic_temperature_f: Option<u16>,
         automatic_humidity_percent: Option<u16>,
         timer_duration_minutes: Option<u16>,
@@ -195,7 +206,17 @@ pub struct DeviceState {
     pub temperature_f: Option<f64>,
     pub humidity_percent: Option<f64>,
     pub settings: DeviceSettings,
+    pub estimated_running: Option<bool>,
+    pub diagnostics: Option<DeviceDiagnostics>,
     pub provenance: StateProvenance,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct DeviceDiagnostics {
+    pub firmware_version: Option<String>,
+    pub signal_strength_raw: Option<String>,
+    pub verified_raw: Option<String>,
+    pub ota_in_progress: Option<bool>,
 }
 
 #[cfg(test)]
@@ -234,12 +255,14 @@ mod tests {
             temperature_f: Some(101.0),
             humidity_percent: None,
             settings: DeviceSettings::QuickConnect {
-                mode: Some(QuickConnectMode::Automatic),
+                mode: QuickConnectModeStatus::Automatic,
                 automatic_temperature_f: Some(105),
                 automatic_humidity_percent: Some(40),
                 timer_duration_minutes: None,
                 humidity_monitor: None,
             },
+            estimated_running: None,
+            diagnostics: None,
             provenance: StateProvenance {
                 backend: DeviceBackend::QuickConnect,
                 fetched_at_unix_ms: Some(500),

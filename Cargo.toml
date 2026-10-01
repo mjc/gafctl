@@ -51,6 +51,7 @@ uuid = { version = "1.26.1", features = ["v4"] }
 
 [dependencies]
 futures-util.workspace = true
+reqwest.workspace = true
 anyhow.workspace = true
 axum.workspace = true
 clap.workspace = true
@@ -63,6 +64,7 @@ rumqttc.workspace = true
 thiserror.workspace = true
 uuid.workspace = true
 updraft-bluetooth = { path = "crates/updraft-bluetooth" }
+updraft-quickconnect = { path = "crates/updraft-quickconnect" }
 updraft-protocol = { path = "crates/updraft-protocol" }
 
 [dev-dependencies]
