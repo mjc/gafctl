@@ -24,7 +24,9 @@ HTTP and MQTT use the same fixed presets. Unknown fields, unsupported presets, s
 
 Controls share a transaction lock with polling. Updraft reports success only after an accepted device acknowledgement and matching state readback. It does not update Home Assistant optimistically. A missing MQTT result does not prove that the device rejected a command; inspect the current state before retrying.
 
-MQTT results include a request ID and are not retained. Repeating an ID with the same preset returns the cached result during the current process lifetime. Reusing an ID for another preset is rejected. The replay cache does not survive a process restart.
+MQTT results include a request ID and are not retained. Updraft caches results for the 64 most recent request IDs. While a result is cached, repeating its ID with the same preset returns that result; reusing its ID for another preset is rejected. An evicted ID can execute again if its timestamp is still fresh. The cache does not survive a process restart.
+
+The MQTT preset select resets to unknown when the current settings do not match a supported preset. An expired one-minute timer is not reported as an active one-minute preset.
 
 ## Privacy
 

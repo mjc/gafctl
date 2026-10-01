@@ -202,7 +202,7 @@ impl ControlPreset {
             }
             OperatingMode::Timer => match (timer.remaining.value(), timer.original.value()) {
                 (0, 0) => Some(Self::TimerClear),
-                (_, 1) => Some(Self::TimerOneMinute),
+                (1, 1) => Some(Self::TimerOneMinute),
                 _ => None,
             },
             OperatingMode::Ota => None,
@@ -300,5 +300,26 @@ mod tests {
             ),
             None
         );
+    }
+
+    #[test]
+    fn timer_preset_rejects_expired_and_inconsistent_readbacks() {
+        let thresholds = AutomaticThresholds {
+            temperature: TemperatureTenthsF::new(1050),
+            humidity: HumidityTenthsPercent::new(300),
+        };
+        [(0, 1), (2, 1), (1, 2), (0, 2)]
+            .into_iter()
+            .for_each(|(remaining, original)| {
+                let timer = TimerState {
+                    remaining: Minutes::new(remaining),
+                    original: Minutes::new(original),
+                };
+                assert_eq!(
+                    ControlPreset::from_readback(OperatingMode::Timer, thresholds, timer),
+                    None,
+                    "unsupported timer readback: remaining={remaining}, original={original}",
+                );
+            });
     }
 }

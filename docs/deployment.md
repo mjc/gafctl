@@ -27,7 +27,17 @@ Set these variables to enable MQTT:
 
 Load the password from a local secret store or service-manager credential. Do not pass it on the command line or commit it.
 
-Keep the MQTT account limited to the topics required for state, availability, results, commands, and discovery. Use broker authentication and transport encryption when the network is not trusted.
+Give Updraft and Home Assistant separate MQTT accounts with these permissions for this device:
+
+| Account | Operation | Topics |
+| --- | --- | --- |
+| Updraft | Publish | `updraft/gaf_vent/state`, `updraft/gaf_vent/availability`, `updraft/gaf_vent/control/result` |
+| Updraft | Publish discovery | `homeassistant/sensor/updraft/+/config`, `homeassistant/select/updraft/control/config` |
+| Updraft | Subscribe | `updraft/gaf_vent/control/set` |
+| Home Assistant | Publish | `updraft/gaf_vent/control/set` |
+| Home Assistant | Subscribe | The state, availability, result, and discovery topics above |
+
+Updraft's account must not publish commands. Avoid a publish grant for `updraft/gaf_vent/#`, which includes the command topic. Use broker authentication and transport encryption when the network is not trusted.
 
 ## Choose a Home Assistant source
 
@@ -42,6 +52,8 @@ MQTT publishes retained state and availability. The broker's last will marks Upd
 HTTP and MQTT accept the same fixed control presets. They do not accept arbitrary threshold, timer, mode, or power values.
 
 MQTT control requests use QoS 1 and must be non-retained JSON with a request ID, a Unix timestamp in milliseconds, and a supported preset. Updraft rejects malformed, stale, future-dated, retained, and unsupported requests before BLE access. The request queue is bounded. Controls share the BLE transaction lock with polling and report success only after acknowledgement and matching device readback.
+
+Generate a unique request ID and the current Unix timestamp in milliseconds for each new command. Requests older than 30 seconds or more than five seconds in the future are rejected. Reuse an ID only when retrying the same command; replay protection is limited to the cached results described in [Home Assistant transports](home-assistant-entities.md#controls).
 
 MQTT results include the request ID, outcome, preset, message, and readback state when available. Results are non-retained. A missing result does not prove the controller rejected the command; check current state before retrying.
 

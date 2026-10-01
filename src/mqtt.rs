@@ -693,7 +693,7 @@ fn control_discovery_config() -> Value {
             "command_template": "{% set issued = (as_timestamp(now()) * 1000) | int %}{\"request_id\":\"{{ issued }}\",\"issued_at_unix_ms\":{{ issued }},\"preset\":\"{{ value }}\"}",
             "qos": 1,
             "state_topic": STATE_TOPIC,
-            "value_template": "{{ value_json.state.control_preset | default('unknown') if value_json.state else 'unknown' }}",
+            "value_template": "{{ value_json.state.control_preset | default('None', true) if value_json.state else 'None' }}",
             "options": [
                 ControlPreset::Automatic105F30Percent.as_str(),
                 ControlPreset::Automatic105_1F30_1Percent.as_str(),
@@ -859,6 +859,10 @@ mod tests {
         assert_eq!(control["qos"], 1);
         assert!(control.get("command_qos").is_none());
         assert_eq!(control["state_topic"], STATE_TOPIC);
+        assert_eq!(
+            control["value_template"],
+            "{{ value_json.state.control_preset | default('None', true) if value_json.state else 'None' }}"
+        );
         assert_eq!(control["availability_mode"], "all");
         assert_eq!(control["availability"].as_array().unwrap().len(), 2);
         assert_eq!(
