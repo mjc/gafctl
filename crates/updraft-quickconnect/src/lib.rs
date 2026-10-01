@@ -513,6 +513,9 @@ fn validate_api_root(url: &Url) -> Result<(), ClientError> {
     let is_loopback = url.host_str().is_some_and(|host| {
         host.eq_ignore_ascii_case("localhost")
             || host
+                .strip_prefix('[')
+                .and_then(|host| host.strip_suffix(']'))
+                .unwrap_or(host)
                 .parse::<std::net::IpAddr>()
                 .is_ok_and(|address| address.is_loopback())
     });

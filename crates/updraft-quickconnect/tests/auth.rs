@@ -63,6 +63,7 @@ fn api_roots_require_tls_except_for_loopback_http() {
     let credentials = || Credentials::new("user", "password", AccountRole::Contractor);
     let https = reqwest::Url::parse("https://api.example.invalid/root/").unwrap();
     let loopback = reqwest::Url::parse("http://127.0.0.1:8080/root/").unwrap();
+    let ipv6_loopback = reqwest::Url::parse("http://[::1]:8080/root/").unwrap();
     let localhost = reqwest::Url::parse("http://localhost:8080/root/").unwrap();
     let public_http = reqwest::Url::parse("http://api.example.invalid/root/").unwrap();
     let other_scheme = reqwest::Url::parse("ftp://api.example.invalid/root/").unwrap();
@@ -78,6 +79,13 @@ fn api_roots_require_tls_except_for_loopback_http() {
         QuickConnectClient::new(
             credentials(),
             QuickConnectConfig::new(loopback.clone(), localhost),
+        )
+        .is_ok()
+    );
+    assert!(
+        QuickConnectClient::new(
+            credentials(),
+            QuickConnectConfig::new(ipv6_loopback, loopback.clone()),
         )
         .is_ok()
     );
