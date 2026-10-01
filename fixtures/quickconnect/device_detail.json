@@ -1,0 +1,22 @@
+{
+  "evidence": "synthetic",
+  "http_status": 200,
+  "body": {
+    "responseData": {
+      "deviceId": "synthetic-vent-1",
+      "deviceConfig": {"setTemperature": 78, "setHumidity": 44},
+      "deviceSettings": {
+        "automaticMode": true,
+        "timerMode": false,
+        "fanMode": false,
+        "setTemperature": 105,
+        "setHumidity": 40,
+        "timerValue": 60,
+        "humidityMonitor": true
+      },
+      "firmwareVersion": "synthetic-firmware-version",
+      "signalStrength": "synthetic-signal-strength",
+      "isVerified": "synthetic-verification-state"
+    }
+  }
+}

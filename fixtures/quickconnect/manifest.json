@@ -1,0 +1,27 @@
+{
+  "evidence": "synthetic",
+  "reference": {
+    "repository": "https://github.com/hitchin999/GAFVentControl-HA",
+    "revision": "336adfd8d8cc0a936b4585bd20301f74d585554c",
+    "integration_version": "1.1.0",
+    "protocol_source_described_by_reference": "Android com.gaf.quickconnectapp 1.0.9"
+  },
+  "license": {
+    "spdx_id": "MIT",
+    "copyright": "Copyright (c) 2026 hitchin999"
+  },
+  "fixtures": [
+    {"file": "device_detail.json"},
+    {"file": "device_list_array.json"},
+    {"file": "device_list_object.json"},
+    {"file": "login_rejected_401.json"},
+    {"file": "login_request.json"},
+    {"file": "login_success.json"},
+    {"file": "malformed_device_list.json"},
+    {"file": "missing_device_settings.json"},
+    {"file": "mode_request.json"},
+    {"file": "settings_rejected_417.json"},
+    {"file": "targets_request.json"},
+    {"file": "timer_request.json"}
+  ]
+}

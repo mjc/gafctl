@@ -1,0 +1,9 @@
+{
+  "evidence": "synthetic",
+  "body": {
+    "userName": "synthetic@example.invalid",
+    "password": "c3ludGhldGljLXBhc3N3b3JkLWRvLW5vdC11c2U=",
+    "userPoolId": "us-east-2_F6aHzg32w",
+    "userRole": "contractor"
+  }
+}

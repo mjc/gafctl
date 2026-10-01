@@ -1,0 +1,5 @@
+{
+  "evidence": "synthetic",
+  "http_status": 401,
+  "body": {"statusInfo": "synthetic-auth-rejected"}
+}

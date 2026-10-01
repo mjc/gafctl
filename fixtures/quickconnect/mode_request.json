@@ -1,0 +1,11 @@
+{
+  "evidence": "synthetic",
+  "body": {
+    "automaticMode": true,
+    "desiredTemp": 105,
+    "desiredHumidity": 40,
+    "timerMode": false,
+    "timerValue": 60,
+    "fanMode": false
+  }
+}
