@@ -9,8 +9,13 @@ use serde_json::Value;
 use thiserror::Error;
 use tokio::{sync::Mutex, time::sleep};
 
+mod commands;
 mod model;
 
+pub use commands::{
+    QuickConnectCommand, QuickConnectCommandError, QuickConnectCommandMode,
+    QuickConnectSettingsBody, build_settings_body,
+};
 pub use model::{
     DeviceModeStatus, InventoryDevice, QuickConnectDevicePoll, QuickConnectDeviceState,
     QuickConnectDiagnostics, QuickConnectSettings,
@@ -204,10 +209,10 @@ impl QuickConnectClient {
     }
 
     /// POST device settings once. Writes are never retried or reauthenticated automatically.
-    pub async fn save_device_settings<T: Serialize>(
+    pub async fn save_device_settings(
         &self,
         provider_id: &str,
-        body: &T,
+        body: &QuickConnectSettingsBody,
     ) -> Result<Value, ClientError> {
         let url = settings_endpoint(&self.config.device_base_url, provider_id)?;
         let token = self.current_token().await?;

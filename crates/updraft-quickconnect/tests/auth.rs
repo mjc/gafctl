@@ -13,11 +13,32 @@ use axum::{
     routing::post,
 };
 use serde_json::{Value, json};
-use updraft_quickconnect::{AccountRole, Credentials, QuickConnectClient, QuickConnectConfig};
+use updraft_quickconnect::{
+    AccountRole, Credentials, DeviceModeStatus, QuickConnectClient, QuickConnectCommand,
+    QuickConnectCommandMode, QuickConnectConfig, QuickConnectSettings, QuickConnectSettingsBody,
+    build_settings_body,
+};
 
 type LoginCapture = Arc<tokio::sync::Mutex<Option<Value>>>;
 type AuthorizationCapture = Arc<tokio::sync::Mutex<Option<String>>>;
 type Captures = (LoginCapture, AuthorizationCapture);
+
+fn typed_settings_body() -> QuickConnectSettingsBody {
+    let current = QuickConnectSettings {
+        mode: DeviceModeStatus::Automatic,
+        automatic_temperature_f: Some(105),
+        automatic_humidity_percent: Some(40),
+        timer_duration_minutes: Some(60),
+        humidity_monitor: Some(true),
+    };
+    build_settings_body(
+        &QuickConnectCommand::SetMode {
+            mode: QuickConnectCommandMode::Automatic,
+        },
+        &current,
+    )
+    .unwrap()
+}
 
 #[tokio::test]
 async fn login_trims_username_encodes_utf8_password_and_sends_literal_token_header() {
@@ -268,7 +289,7 @@ async fn settings_rejection_keeps_the_provider_service_status() {
 
     assert_eq!(
         client
-            .save_device_settings("fan", &json!({"automaticMode": true}))
+            .save_device_settings("fan", &typed_settings_body())
             .await
             .unwrap_err(),
         updraft_quickconnect::ClientError::ServiceStatus(4444)
@@ -464,7 +485,7 @@ async fn reads_retry_bounded_server_errors_and_writes_are_never_retried() {
     assert_eq!(read_count.load(Ordering::SeqCst), 3);
     assert_eq!(
         client
-            .save_device_settings("fan", &json!({"automaticMode": true}))
+            .save_device_settings("fan", &typed_settings_body())
             .await
             .unwrap_err(),
         updraft_quickconnect::ClientError::HttpStatus(500)
@@ -491,7 +512,7 @@ async fn timed_out_settings_write_is_not_replayed() {
 
     assert_eq!(
         client
-            .save_device_settings("fan", &json!({"automaticMode": true}))
+            .save_device_settings("fan", &typed_settings_body())
             .await
             .unwrap_err(),
         updraft_quickconnect::ClientError::Transport
