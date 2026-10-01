@@ -1,31 +1,41 @@
-use std::{future::Future, time::Duration};
+use std::{future::Future, ops::RangeInclusive, time::Duration};
 
 use anyhow::{Context, Result};
 use btleplug::{
     api::{Central as _, Peripheral as _},
     platform::{Adapter, Peripheral},
 };
-use tokio::time::{sleep, timeout};
+use tokio::time::{Instant, sleep, timeout};
 
 use crate::{
     DisconnectOutcome, ProbeError,
     error::{CleanupFailed, cleanup_is_complete},
 };
 
-const CONNECTION_RETRY_DELAYS: [Duration; 2] =
-    [Duration::from_millis(100), Duration::from_millis(300)];
+const CONNECTION_RETRY_CAPS_MS: [u64; 4] = [1_000, 2_000, 4_000, 8_000];
+const CONNECTION_RECOVERY_BUDGET: Duration = Duration::from_secs(20);
 
 pub(super) fn platform_timeout(response_timeout: Duration) -> Duration {
     // BlueZ allows 30 seconds for Connect, then five for service resolution.
     response_timeout.max(Duration::from_secs(40))
 }
 
-pub(super) const fn connection_retry_delay(retry_index: usize) -> Option<Duration> {
-    if retry_index < CONNECTION_RETRY_DELAYS.len() {
-        Some(CONNECTION_RETRY_DELAYS[retry_index])
-    } else {
-        None
-    }
+fn connection_retry_window(retry_index: usize) -> Option<RangeInclusive<u64>> {
+    CONNECTION_RETRY_CAPS_MS
+        .get(retry_index)
+        .map(|&cap| cap / 2..=cap)
+}
+
+fn connection_retry_delay(retry_index: usize) -> Option<Duration> {
+    connection_retry_window(retry_index)
+        .map(rand::random_range)
+        .map(Duration::from_millis)
+}
+
+fn retry_fits_recovery_budget(elapsed: Duration, delay: Duration) -> bool {
+    elapsed
+        .checked_add(delay)
+        .is_some_and(|next_attempt| next_attempt < CONNECTION_RECOVERY_BUDGET)
 }
 
 pub(super) async fn retry_connection<T, F, Fut>(mut connect: F) -> Result<T>
@@ -33,20 +43,39 @@ where
     F: FnMut() -> Fut,
     Fut: Future<Output = Result<T>>,
 {
-    let mut retry_index = 0;
-    loop {
+    let started = Instant::now();
+    let mut attempts = 1;
+    let mut failure = match connect().await {
+        Ok(value) => return Ok(value),
+        Err(error) => error,
+    };
+
+    for delay in (0..CONNECTION_RETRY_CAPS_MS.len()).filter_map(connection_retry_delay) {
+        if !ProbeError::is_transient_connect_failure(&failure)
+            || !retry_fits_recovery_budget(started.elapsed(), delay)
+        {
+            break;
+        }
+        tracing::info!(
+            attempts,
+            retry_delay_seconds = delay.as_secs_f64(),
+            error = %format_args!("{failure:#}"),
+            "Retrying BLE connection after cleanup"
+        );
+        sleep(delay).await;
+        if started.elapsed() >= CONNECTION_RECOVERY_BUDGET {
+            break;
+        }
+        attempts += 1;
         match connect().await {
-            Ok(value) => return Ok(value),
-            Err(error)
-                if ProbeError::is_transient_connect_failure(&error)
-                    && let Some(delay) = connection_retry_delay(retry_index) =>
-            {
-                sleep(delay).await;
-                retry_index += 1;
+            Ok(value) => {
+                tracing::info!(attempts, "BLE connection recovered");
+                return Ok(value);
             }
-            Err(error) => return Err(error),
+            Err(error) => failure = error,
         }
     }
+    Err(failure).with_context(|| format!("BLE connection failed after {attempts} attempts"))
 }
 
 pub(super) async fn complete_before<T>(
@@ -208,12 +237,142 @@ mod tests {
 
     #[test]
     fn connection_retry_delays_are_increasing_and_finite() {
-        assert_eq!(connection_retry_delay(0), Some(Duration::from_millis(100)));
-        assert_eq!(connection_retry_delay(1), Some(Duration::from_millis(300)));
-        assert_eq!(connection_retry_delay(2), None);
+        [500..=1_000, 1_000..=2_000, 2_000..=4_000, 4_000..=8_000]
+            .into_iter()
+            .enumerate()
+            .for_each(|(index, window)| {
+                assert_eq!(connection_retry_window(index).as_ref(), Some(&window));
+                (0..64).for_each(|_| {
+                    let delay = connection_retry_delay(index).expect("retry has a delay");
+                    assert!(
+                        window.contains(&u64::try_from(delay.as_millis()).expect("bounded delay"))
+                    );
+                });
+            });
+        assert_eq!(connection_retry_delay(4), None);
+        assert_eq!(connection_retry_delay(usize::MAX), None);
     }
 
-    #[tokio::test]
+    #[test]
+    fn retry_delay_must_leave_time_to_start_within_the_recovery_budget() {
+        assert!(retry_fits_recovery_budget(
+            Duration::from_secs(18),
+            Duration::from_secs(1)
+        ));
+        assert!(!retry_fits_recovery_budget(
+            Duration::from_secs(19),
+            Duration::from_secs(1)
+        ));
+        assert!(!retry_fits_recovery_budget(
+            Duration::MAX,
+            Duration::from_secs(1)
+        ));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn connection_retry_recovers_when_transport_needs_seconds_to_settle() {
+        let started = tokio::time::Instant::now();
+        let attempts = Cell::new(0);
+        let recovered = retry_connection(|| {
+            attempts.set(attempts.get() + 1);
+            async {
+                if started.elapsed() < Duration::from_secs(2) {
+                    Err(anyhow::Error::new(std::io::Error::new(
+                        std::io::ErrorKind::ConnectionAborted,
+                        "le-connection-abort-by-local",
+                    )))
+                } else {
+                    Ok("connected")
+                }
+            }
+        })
+        .await
+        .expect("a transient episode should recover within one poll");
+
+        assert_eq!(recovered, "connected");
+        assert!((3..=4).contains(&attempts.get()));
+        assert!(started.elapsed() >= Duration::from_secs(2));
+        assert!(started.elapsed() <= Duration::from_secs(7));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn connection_retry_stops_starting_attempts_after_recovery_budget() {
+        let attempts = Cell::new(0);
+        let started = tokio::time::Instant::now();
+        let error = retry_connection(|| {
+            attempts.set(attempts.get() + 1);
+            async {
+                sleep(Duration::from_secs(21)).await;
+                Err::<(), _>(anyhow::Error::new(btleplug::Error::TimedOut(
+                    Duration::from_secs(21),
+                )))
+            }
+        })
+        .await
+        .expect_err("a slow failure must not start another connection attempt");
+        assert!(ProbeError::is_transient_connect_failure(&error));
+        assert_eq!(attempts.get(), 1);
+        assert_eq!(started.elapsed(), Duration::from_secs(21));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn connection_retry_keeps_success_after_recovery_budget_expires() {
+        let attempts = Cell::new(0);
+        let started = Instant::now();
+        let recovered = retry_connection(|| {
+            let attempt = attempts.get() + 1;
+            attempts.set(attempt);
+            async move {
+                if attempt == 1 {
+                    Err(anyhow::Error::new(btleplug::Error::TimedOut(
+                        Duration::ZERO,
+                    )))
+                } else {
+                    sleep(Duration::from_secs(21)).await;
+                    Ok("connected")
+                }
+            }
+        })
+        .await
+        .expect("an admitted connection is allowed to finish");
+
+        assert_eq!(recovered, "connected");
+        assert_eq!(attempts.get(), 2);
+        assert!(started.elapsed() > CONNECTION_RECOVERY_BUDGET);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn connection_retry_does_not_retry_authentication_or_protocol_errors() {
+        let attempts = Cell::new(0);
+        let started = tokio::time::Instant::now();
+        let error = retry_connection(|| {
+            attempts.set(attempts.get() + 1);
+            async { Err::<(), _>(anyhow::Error::new(btleplug::Error::PermissionDenied)) }
+        })
+        .await
+        .expect_err("authentication failure is final");
+        assert_eq!(
+            ProbeError::classify(error).kind(),
+            crate::ProbeErrorKind::Authentication
+        );
+        assert_eq!(attempts.get(), 1);
+        assert_eq!(started.elapsed(), Duration::ZERO);
+
+        let error = retry_connection(|| {
+            attempts.set(attempts.get() + 1);
+            async { Err::<(), _>(anyhow::Error::new(crate::error::InvalidIdentityResponse)) }
+        })
+        .await
+        .expect_err("protocol failure is final");
+        assert_eq!(
+            ProbeError::classify(error).kind(),
+            crate::ProbeErrorKind::Protocol
+        );
+        assert_eq!(attempts.get(), 2);
+        assert_eq!(started.elapsed(), Duration::ZERO);
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn connection_retry_recovers_after_transient_failures() {
         let attempts = Cell::new(0);
         let connected = retry_connection(|| {
@@ -236,9 +395,10 @@ mod tests {
         assert_eq!(attempts.get(), 3);
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn connection_retry_stops_after_the_finite_attempt_budget() {
         let attempts = Cell::new(0);
+        let started = Instant::now();
         let error = retry_connection(|| {
             attempts.set(attempts.get() + 1);
             async {
@@ -251,10 +411,13 @@ mod tests {
         .expect_err("transient failure remains an error after retries");
 
         assert!(ProbeError::is_transient_connect_failure(&error));
-        assert_eq!(attempts.get(), 3);
+        assert_eq!(attempts.get(), 5);
+        assert!(started.elapsed() >= Duration::from_millis(7_500));
+        assert!(started.elapsed() <= Duration::from_secs(15));
+        assert!(error.to_string().contains("after 5 attempts"));
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn connection_retry_stops_when_cleanup_fails() {
         let attempts = Cell::new(0);
         let error = retry_connection(|| {

@@ -370,6 +370,18 @@ mod tests {
         assert_eq!(error.kind(), ProbeErrorKind::Unavailable);
     }
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn wrapped_bluez_connection_abort_is_retryable() {
+        let platform = bluez_async::BluetoothError::DbusError(dbus::Error::new_custom(
+            "org.bluez.Error.Failed",
+            "le-connection-abort-by-local",
+        ));
+        let wrapped = anyhow::Error::new(btleplug::Error::from(platform))
+            .context("connect to GAF BLE peripheral");
+        assert!(ProbeError::is_transient_connect_failure(&wrapped));
+    }
+
     #[test]
     fn only_transient_connect_errors_are_retried() {
         assert!(ProbeError::is_transient_connect_failure(

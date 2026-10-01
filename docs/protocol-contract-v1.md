@@ -64,7 +64,8 @@ Application state uses optional measurements, backend-specific settings, capabil
 - A BLE adapter, service, or peripheral that is absent is unavailable, not a protocol mismatch.
 - A platform-level authentication or pairing rejection must remain distinguishable from unavailable and protocol failures when surfaced by the operating system. This device capture did not exercise that path.
 - Bound discovery, connection, GATT setup, writes, and response waits. A timeout does not prove a control failed to execute.
-- The current BLE probe defaults to a six-second discovery scan and a three-second timeout for each BLE operation and command response; these are client-side bounds, not measured device requirements. The probe can override them.
+- The BLE probe defaults to a six-second discovery scan and a three-second timeout for GATT setup, each command write, and each response. Manager setup, scanning, connection, and cleanup allow at least 40 seconds for platform operations. These are client-side bounds, not measured device requirements.
+- Transient connection failures retry only after verified cleanup, with exponential backoff and equal jitter: 0.5–1, 1–2, 2–4, and 4–8 seconds. Recovery permits at most five attempts and stops admitting retries after 20 seconds, including connection and cleanup time. An attempt already in progress may finish afterward. Authentication, protocol, and cleanup failures stop immediately. GATT queries and control writes are outside this retry loop.
 - Reads may be retried by a higher-level poller after reconnecting. Do not retry a mutating command automatically unless an acknowledgement/readback proves the prior attempt did not take effect.
 
 ## Versioning and evidence
