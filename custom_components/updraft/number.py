@@ -1,5 +1,6 @@
-"""Capability-driven QuickConnect setting controls."""
+"""Capability-driven device setting controls."""
 
+import math
 from typing import Any
 
 from homeassistant.components.number import NumberEntity, NumberMode
@@ -12,7 +13,7 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from . import UpdraftCoordinator
-from .client import ApiError, QUICKCONNECT_NUMBER_RANGES, entity_keys
+from .client import ApiError, LEGACY_NUMBER_COMMANDS, LEGACY_NUMBER_RANGES, QUICKCONNECT_NUMBER_RANGES, entity_keys
 from .const import DOMAIN
 
 
@@ -48,6 +49,21 @@ CONTROLS = (
         "unit": UnitOfTime.MINUTES,
     },
 )
+LEGACY_STATE_KEYS = {
+    "automatic_temperature": "automatic_temperature_threshold_f",
+    "automatic_humidity": "automatic_humidity_threshold_percent",
+    "timer_duration": "timer_original_minutes",
+}
+LEGACY_CONTROLS = tuple(
+    control | {
+        "capability": LEGACY_NUMBER_COMMANDS[control["key"]][0],
+        "state_key": LEGACY_STATE_KEYS[control["key"]],
+        "minimum": LEGACY_NUMBER_RANGES[control["key"]][0],
+        "maximum": LEGACY_NUMBER_RANGES[control["key"]][1],
+        "step": LEGACY_NUMBER_RANGES[control["key"]][2],
+    }
+    for control in CONTROLS
+)
 
 
 async def async_setup_entry(
@@ -58,13 +74,13 @@ async def async_setup_entry(
     coordinator: UpdraftCoordinator = hass.data[DOMAIN][entry.entry_id]
     async_add_entities(
         UpdraftNumber(coordinator, entry, control)
-        for control in CONTROLS
+        for control in (LEGACY_CONTROLS if coordinator.device["backend"] == "legacy_ble" else CONTROLS)
         if control["key"] in entity_keys(coordinator.device).get("number", set())
     )
 
 
 class UpdraftNumber(CoordinatorEntity[UpdraftCoordinator], NumberEntity):
-    """One validated number setting for the selected QuickConnect device."""
+    """One setting advertised by the selected device."""
 
     _attr_mode = NumberMode.BOX
     _attr_has_entity_name = True
@@ -87,17 +103,23 @@ class UpdraftNumber(CoordinatorEntity[UpdraftCoordinator], NumberEntity):
         self._attr_native_unit_of_measurement = control["unit"]
 
     @property
-    def native_value(self) -> int | None:
+    def native_value(self) -> float | None:
         state = self.coordinator.data.get("state") if self.coordinator.data else None
         value = state.get(self._control["state_key"]) if state else None
-        return value if type(value) is int else None
+        if (
+            self.coordinator.device["backend"] == "legacy_ble"
+            and self._control["key"] == "timer_duration"
+            and not _valid_value(value, 0, 360, 1)
+        ):
+            return None
+        return value if _finite_number(value) else None
 
     @property
     def available(self) -> bool:
         data = self.coordinator.data or {}
         state = data.get("state") or {}
         value = state.get(self._control["state_key"])
-        current_targets_valid = all(
+        current_targets_valid = self._control["capability"] != "quick_connect_targets" or all(
             _valid_value(
                 state.get(key),
                 90 if key == "automatic_temperature_f" else 30,
@@ -112,17 +134,19 @@ class UpdraftNumber(CoordinatorEntity[UpdraftCoordinator], NumberEntity):
             and self.coordinator.supports(self._control["capability"])
             and data.get("available") is True
             and data.get("freshness") == "fresh"
-            and _valid_value(
-                value,
-                self._control["minimum"],
-                self._control["maximum"],
-                self._control["step"],
-            )
-            and (
-                self._control["capability"] != "quick_connect_targets"
-                or current_targets_valid
-            )
+            and self._current_value_supported(value)
+            and current_targets_valid
         )
+
+    def _current_value_supported(self, value: Any) -> bool:
+        control = self._control
+        if self.coordinator.device["backend"] == "legacy_ble":
+            return _finite_number(value) and (
+                control["minimum"] <= value <= control["maximum"]
+                or control["key"] == "automatic_humidity" and value == 100
+                or control["key"] == "timer_duration" and value == 600
+            )
+        return _valid_value(value, control["minimum"], control["maximum"], control["step"])
 
     async def async_set_native_value(self, value: float) -> None:
         control = self._control
@@ -176,6 +200,9 @@ class UpdraftNumber(CoordinatorEntity[UpdraftCoordinator], NumberEntity):
 
     def _command(self, state: dict[str, Any], value: int) -> dict[str, Any]:
         key = self._control["key"]
+        if self.coordinator.device["backend"] == "legacy_ble":
+            kind, field = LEGACY_NUMBER_COMMANDS[key]
+            return {"kind": kind, field: value}
         if key == "timer_duration":
             return {
                 "kind": "quick_connect_timer_duration",
@@ -201,7 +228,7 @@ class UpdraftNumber(CoordinatorEntity[UpdraftCoordinator], NumberEntity):
             identifiers={(DOMAIN, self._entry.unique_id)},
             name=self.coordinator.device.get("name", "GAF Vent"),
             manufacturer="GAF",
-            model="GAF QuickConnect Vent",
+            model="GAF Wi-Fi Vent" if self.coordinator.device["backend"] == "legacy_ble" else "GAF QuickConnect Vent",
         )
 
 
@@ -211,3 +238,7 @@ def _valid_value(value: Any, minimum: int, maximum: int, step: int) -> bool:
         and minimum <= value <= maximum
         and (value - minimum) % step == 0
     )
+
+
+def _finite_number(value: Any) -> bool:
+    return type(value) in (int, float) and math.isfinite(value)

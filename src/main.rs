@@ -4,6 +4,7 @@ mod cli;
 pub mod control;
 mod control_display;
 pub mod device;
+mod legacy_control;
 mod logging;
 #[cfg(feature = "mqtt")]
 mod mqtt;

@@ -2,6 +2,40 @@ use serde_json::json;
 use updraft_api::{CommandId, ControlStatus, DeviceControlV2Request, DeviceStateV2Response};
 
 #[test]
+fn adjustable_ble_controls_accept_original_app_ranges_and_reject_other_values() {
+    for (kind, field, minimum, maximum) in [
+        ("legacy_automatic_temperature", "temperature_f", 90, 120),
+        ("legacy_automatic_humidity", "humidity_percent", 30, 80),
+        ("legacy_timer", "minutes", 0, 360),
+    ] {
+        for value in [minimum, maximum] {
+            let mut command = json!({"kind":kind});
+            command[field] = json!(value);
+            assert!(
+                serde_json::from_value::<updraft_api::DeviceCommand>(command).is_ok(),
+                "{kind} {value}"
+            );
+        }
+        for value in [
+            json!(-1),
+            json!(maximum + 1),
+            json!(90.5),
+            json!(true),
+            json!(null),
+        ] {
+            let mut command = json!({"kind":kind});
+            command[field] = value;
+            assert!(serde_json::from_value::<updraft_api::DeviceCommand>(command).is_err());
+        }
+        if minimum > 0 {
+            let mut command = json!({"kind":kind});
+            command[field] = json!(minimum - 1);
+            assert!(serde_json::from_value::<updraft_api::DeviceCommand>(command).is_err());
+        }
+    }
+}
+
+#[test]
 fn request_ids_round_trip_and_commands_keep_the_v2_wire_shape() {
     let value = json!({"request_id":"cli-request_1", "issued_at_unix_ms":2000,
         "command":{"kind":"legacy_preset","preset":"timer_clear"}});

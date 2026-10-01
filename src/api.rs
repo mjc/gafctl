@@ -6,7 +6,9 @@ use std::{
 };
 
 use crate::backend::{DeviceRegistry, DeviceRuntime, RefreshReceiver, RefreshReservation};
-use crate::control::{CommandId, ControlPreset, is_fresh_at, unix_millis};
+#[cfg(test)]
+use crate::control::ControlPreset;
+use crate::control::{CommandId, is_fresh_at, unix_millis};
 use crate::device::{
     DeviceBackend, DeviceCommand, DeviceDescriptor, DeviceId, DeviceSettings, DeviceState,
     EntitySource, EntitySources, LegacyMode, StateProvenance,
@@ -84,6 +86,7 @@ enum ControlAdmissionError {
     BackendUnavailable,
     StaleRequest,
     Busy,
+    ReadbackUnavailable,
 }
 
 impl ControlAdmissionError {
@@ -92,6 +95,7 @@ impl ControlAdmissionError {
             Self::BackendUnavailable => V2ControlStatus::BackendUnavailable,
             Self::StaleRequest => V2ControlStatus::StaleRequest,
             Self::Busy => V2ControlStatus::Busy,
+            Self::ReadbackUnavailable => V2ControlStatus::ReadbackUnavailable,
         }
     }
 }
@@ -129,14 +133,14 @@ impl ApiState {
     async fn execute_http_control(
         &self,
         issued_at_unix_ms: u64,
-        preset: ControlPreset,
-    ) -> Result<ControlResponse, ControlAdmissionError> {
+        command: DeviceCommand,
+    ) -> Result<bool, ControlAdmissionError> {
         let device = self
             .ble_device
             .as_ref()
             .ok_or(ControlAdmissionError::BackendUnavailable)?;
         device
-            .execute_http_control(self, issued_at_unix_ms, preset)
+            .execute_http_control(self, issued_at_unix_ms, command)
             .await
     }
 
@@ -430,8 +434,8 @@ impl LegacyBleRuntime {
         &self,
         state: &ApiState,
         issued_at_unix_ms: u64,
-        preset: ControlPreset,
-    ) -> Result<ControlResponse, ControlAdmissionError> {
+        command: DeviceCommand,
+    ) -> Result<bool, ControlAdmissionError> {
         let _permit = self
             .device
             .try_reserve_control()
@@ -440,41 +444,67 @@ impl LegacyBleRuntime {
         if !v2_request_is_fresh_at(issued_at_unix_ms, unix_millis(SystemTime::now())) {
             return Err(ControlAdmissionError::StaleRequest);
         }
-        Ok(self.execute_control_locked(state, preset).await)
+        let prepared = self.prepare_control_locked(state, command).await?;
+        if !v2_request_is_fresh_at(issued_at_unix_ms, unix_millis(SystemTime::now())) {
+            return Err(ControlAdmissionError::StaleRequest);
+        }
+        Ok(self.execute_control_locked(state, prepared).await)
+    }
+
+    async fn prepare_control_locked(
+        &self,
+        state: &ApiState,
+        command: DeviceCommand,
+    ) -> Result<updraft_protocol::ControlCommand, ControlAdmissionError> {
+        let thresholds = if crate::legacy_control::needs_threshold_read(command) {
+            let poll_id = self.reconciler.write().await.begin_poll();
+            let result = self.probe(None).await;
+            let thresholds = probe_thresholds(&result);
+            if let Ok(ProbeResult::Queried { result, .. }) = &result
+                && let Some(snapshot) = &result.snapshot
+                && let Some(projection) = project_legacy_snapshot(snapshot)
+            {
+                self.device.set_state(projection).await;
+            }
+            self.reconcile_poll_result(poll_id, result).await;
+            state.publish_state().await;
+            thresholds
+        } else {
+            None
+        };
+        crate::legacy_control::prepare_control(command, thresholds)
+            .ok_or(ControlAdmissionError::ReadbackUnavailable)
     }
 
     async fn execute_control_locked(
         &self,
         state: &ApiState,
-        preset: ControlPreset,
-    ) -> ControlResponse {
+        command: updraft_protocol::ControlCommand,
+    ) -> bool {
         let poll_id = self.reconciler.write().await.begin_poll();
-        let outcome = control_outcome(self.probe(Some(preset)).await);
+        let outcome = control_outcome(self.probe(Some(command)).await);
         outcome.log_warnings();
         let (success, message, snapshot) = outcome.into_response_parts();
-        let response_state = self
-            .reconcile_control_snapshot(poll_id, snapshot, message)
+        self.reconcile_control_snapshot(poll_id, snapshot, message)
             .await;
         state.publish_state().await;
-        ControlResponse {
-            success,
-            preset,
-            message: message.to_owned(),
-            state: response_state,
-        }
+        success
     }
 
-    async fn probe(&self, preset: Option<ControlPreset>) -> Result<ProbeResult, ProbeError> {
-        self.ble_client.probe(self.probe_options(preset)).await
+    async fn probe(
+        &self,
+        command: Option<updraft_protocol::ControlCommand>,
+    ) -> Result<ProbeResult, ProbeError> {
+        self.ble_client.probe(self.probe_options(command)).await
     }
 
-    fn probe_options(&self, preset: Option<ControlPreset>) -> ProbeOptions {
+    fn probe_options(&self, command: Option<updraft_protocol::ControlCommand>) -> ProbeOptions {
         ProbeOptions {
             scan_duration: Duration::from_secs(6),
             response_timeout: Duration::from_secs(3),
             mode: ProbeMode::Query {
                 device_id: Some(self.peripheral_id.to_string()),
-                control_command: preset.map(ControlPreset::command),
+                control_command: command,
             },
         }
     }
@@ -484,23 +514,17 @@ impl LegacyBleRuntime {
         poll_id: u64,
         snapshot: Option<DeviceSnapshot>,
         message: &'static str,
-    ) -> Option<StateValues> {
+    ) {
         let mut reconciler = self.reconciler.write().await;
         match snapshot {
             Some(snapshot) => {
-                let projection = project_legacy_snapshot(&snapshot);
-                let state = projection
-                    .as_ref()
-                    .map(|projection| projection.values.clone());
-                if let Some(projection) = projection {
-                    self.device.set_state(projection.device_state).await;
+                if let Some(projection) = project_legacy_snapshot(&snapshot) {
+                    self.device.set_state(projection).await;
                 }
                 reconciler.apply_success(poll_id, snapshot);
-                state
             }
             None => {
                 reconciler.apply_failure(poll_id, message);
-                None
             }
         }
     }
@@ -512,7 +536,7 @@ impl LegacyBleRuntime {
             && let Some(snapshot) = &result.snapshot
             && let Some(projection) = project_legacy_snapshot(snapshot)
         {
-            self.device.set_state(projection.device_state).await;
+            self.device.set_state(projection).await;
             DeviceRefreshStatus::Fresh
         } else {
             DeviceRefreshStatus::Failed
@@ -970,15 +994,12 @@ async fn execute_ble_v2_control(
     if state.ble_device.is_none() {
         return V2ControlStatus::DeviceUnavailable;
     }
-    let DeviceCommand::LegacyPreset { preset } = request.command else {
-        return V2ControlStatus::UnsupportedCommand;
-    };
     match state
-        .execute_http_control(request.issued_at_unix_ms, preset)
+        .execute_http_control(request.issued_at_unix_ms, request.command)
         .await
     {
-        Ok(response) if response.success => V2ControlStatus::Confirmed,
-        Ok(_) => V2ControlStatus::Unconfirmed,
+        Ok(true) => V2ControlStatus::Confirmed,
+        Ok(false) => V2ControlStatus::Unconfirmed,
         Err(error) => error.status(),
     }
 }
@@ -1158,7 +1179,10 @@ fn quickconnect_command(command: DeviceCommand) -> Option<QuickConnectCommand> {
                 duration_minutes: minutes,
             })
         }
-        DeviceCommand::LegacyPreset { .. } => None,
+        DeviceCommand::LegacyPreset { .. }
+        | DeviceCommand::LegacyAutomaticTemperature { .. }
+        | DeviceCommand::LegacyAutomaticHumidity { .. }
+        | DeviceCommand::LegacyTimer { .. } => None,
     }
 }
 
@@ -1196,14 +1220,6 @@ fn status_for_v2_outcome(outcome: &V2ControlStatus) -> StatusCode {
 
 async fn health() -> Json<HealthResponse> {
     Json(HealthResponse { status: "ok" })
-}
-
-#[derive(Clone, Serialize)]
-pub(crate) struct ControlResponse {
-    success: bool,
-    preset: ControlPreset,
-    message: String,
-    state: Option<StateValues>,
 }
 
 #[cfg(feature = "mqtt")]
@@ -1247,26 +1263,7 @@ struct HealthResponse {
     status: &'static str,
 }
 
-#[derive(Clone, Serialize)]
-struct StateValues {
-    firmware_version: String,
-    mode: &'static str,
-    controller_fan_flag: &'static str,
-    temperature_f: f64,
-    humidity_percent: f64,
-    automatic_temperature_threshold_f: f64,
-    automatic_humidity_threshold_percent: f64,
-    control_preset: Option<&'static str>,
-    timer_remaining_minutes: u16,
-    timer_original_minutes: u16,
-}
-
-struct LegacyStateProjection {
-    device_state: DeviceState,
-    values: StateValues,
-}
-
-fn project_legacy_snapshot(snapshot: &DeviceSnapshot) -> Option<LegacyStateProjection> {
+fn project_legacy_snapshot(snapshot: &DeviceSnapshot) -> Option<DeviceState> {
     let identity = snapshot.identity.decoded().ok()?;
     let mode = snapshot.mode.decoded().ok()?;
     let sensors = snapshot.sensors.decoded().ok()?;
@@ -1291,7 +1288,7 @@ fn project_legacy_snapshot(snapshot: &DeviceSnapshot) -> Option<LegacyStateProje
         },
         estimated_running: None,
         diagnostics: Some(crate::device::DeviceDiagnostics {
-            firmware_version: Some(firmware_version.clone()),
+            firmware_version: Some(firmware_version),
             signal_strength_raw: None,
             verified_raw: None,
             ota_in_progress: None,
@@ -1302,23 +1299,7 @@ fn project_legacy_snapshot(snapshot: &DeviceSnapshot) -> Option<LegacyStateProje
             observed_at_unix_ms: unix_millis(snapshot.observed_at),
         },
     };
-    let values = StateValues {
-        firmware_version,
-        mode: operating_mode_name(mode.mode),
-        controller_fan_flag: fan_state_name(mode.fan),
-        temperature_f: tenths_to_decimal(sensors.temperature.value()),
-        humidity_percent: tenths_to_decimal(sensors.humidity.value()),
-        automatic_temperature_threshold_f: tenths_to_decimal(thresholds.temperature.value()),
-        automatic_humidity_threshold_percent: tenths_to_decimal(thresholds.humidity.value()),
-        control_preset: ControlPreset::from_readback(mode.mode, *thresholds, *timer)
-            .map(ControlPreset::as_str),
-        timer_remaining_minutes: timer.remaining.value(),
-        timer_original_minutes: timer.original.value(),
-    };
-    Some(LegacyStateProjection {
-        device_state,
-        values,
-    })
+    Some(device_state)
 }
 
 async fn poll_device(state: ApiState, poll_interval: Duration) {
@@ -1342,6 +1323,18 @@ fn poll_ticks(poll_interval: Duration) -> impl Stream<Item = ()> {
 async fn wait_for_poll_tick(mut ticker: Interval) -> Option<((), Interval)> {
     ticker.tick().await;
     Some(((), ticker))
+}
+
+fn probe_thresholds(
+    result: &Result<ProbeResult, ProbeError>,
+) -> Option<updraft_protocol::AutomaticThresholds> {
+    let Ok(ProbeResult::Queried { result, .. }) = result else {
+        return None;
+    };
+    if result.state_error.is_some() {
+        return None;
+    }
+    result.snapshot.as_ref()?.thresholds.decoded().ok().copied()
 }
 
 fn record_poll_result(
@@ -1401,21 +1394,6 @@ fn probe_error_message(error: &ProbeError) -> &'static str {
 
 fn tenths_to_decimal(value: u16) -> f64 {
     f64::from(value) / 10.0
-}
-
-const fn operating_mode_name(mode: updraft_protocol::OperatingMode) -> &'static str {
-    match mode {
-        updraft_protocol::OperatingMode::Automatic => "automatic",
-        updraft_protocol::OperatingMode::Timer => "timer",
-        updraft_protocol::OperatingMode::Ota => "ota",
-    }
-}
-
-const fn fan_state_name(fan: updraft_protocol::FanState) -> &'static str {
-    match fan {
-        updraft_protocol::FanState::On => "on",
-        updraft_protocol::FanState::Off => "off",
-    }
 }
 
 #[cfg(test)]
@@ -2043,7 +2021,13 @@ mod tests {
         let runtime = state.ble_device.as_ref().unwrap();
         assert_eq!(
             runtime
-                .execute_http_control(&state, 0, ControlPreset::TimerClear)
+                .execute_http_control(
+                    &state,
+                    0,
+                    DeviceCommand::LegacyPreset {
+                        preset: ControlPreset::TimerClear
+                    }
+                )
                 .await
                 .err(),
             Some(ControlAdmissionError::StaleRequest)
@@ -2707,7 +2691,7 @@ mod tests {
             .await
             .runtime(&DeviceId::configured_ble())
             .unwrap()
-            .set_state(projection.device_state)
+            .set_state(projection)
             .await;
         let fresh = state_response(state.clone()).await;
         assert_eq!(fresh["available"], true);
@@ -2719,8 +2703,7 @@ mod tests {
             Instant::now(),
             SystemTime::now() - Duration::from_secs(120),
         ))
-        .unwrap()
-        .device_state;
+        .unwrap();
         expired_state.provenance.fetched_at_unix_ms =
             unix_millis(SystemTime::now() - Duration::from_secs(120));
         state
@@ -2748,7 +2731,7 @@ mod tests {
             .await
             .runtime(&DeviceId::configured_ble())
             .unwrap()
-            .set_state(projection.device_state)
+            .set_state(projection)
             .await;
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
@@ -2817,12 +2800,9 @@ mod tests {
                 .unwrap(),
         )
         .unwrap();
-        let projected = serde_json::to_string(
-            &project_legacy_snapshot(&snapshot).map(|projection| projection.values),
-        )
-        .unwrap();
+        let projected = serde_json::to_string(&project_legacy_snapshot(&snapshot)).unwrap();
         assert!(!projected.contains("private-suffix"));
-        assert!(!projected.contains("running"));
-        assert!(projected.contains("\"controller_fan_flag\":\"off\""));
+        assert!(projected.contains("\"estimated_running\":null"));
+        assert!(projected.contains("\"controller_fan_on\":false"));
     }
 }

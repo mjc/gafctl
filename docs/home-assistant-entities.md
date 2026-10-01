@@ -21,6 +21,9 @@ For an original **GAF Master Flow Wi-Fi Attic Vent** (ERV5SMT or EGV5SMT):
 | Timer remaining | Remaining timer minutes |
 | Automatic thresholds | Select 105.0 °F / 30.0% or 105.1 °F / 30.1% |
 | Fan timer | Select Clear timer or 1 minute |
+| Target temperature | 90–120 °F in 1 °F steps |
+| Target humidity | 30–80% in 1% steps |
+| Timer duration | 0–360 minutes in 1-minute steps; zero clears |
 | Refresh readings | Request a new device reading through the service |
 
 The automatic selector sets both thresholds and automatic mode. Clearing the
@@ -28,6 +31,15 @@ timer leaves the controller in timer mode; use an automatic preset to return to
 automatic operation. A selector shows unknown when the current settings do not
 match an available choice. An expired timer does not show as an active one-minute
 timer. These thresholds are tested presets, not recommendations for your attic.
+
+The adjustable numbers use ranges and whole-unit steps from the original
+manufacturer app. Temperature and humidity commands change only the selected
+value; the service reads and preserves the other raw threshold under the same
+transaction before writing. Both select automatic mode. Timer duration starts
+timer mode and reports the original requested minutes, separate from remaining
+time. Fractional threshold readback is displayed without rounding; new settings
+use whole units. Physical acceptance of the broader ranges is separate from
+the verified presets.
 
 QuickConnect devices expose temperature, humidity, and available diagnostics.
 They include the Refresh readings button without enabling cloud writes.

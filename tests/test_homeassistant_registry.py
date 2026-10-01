@@ -20,6 +20,7 @@ from homeassistant.components.mqtt import sensor as mqtt_sensor, select as mqtt_
 
 from custom_components.updraft import UpdraftCoordinator
 from custom_components.updraft.button import UpdraftRefreshButton
+from custom_components.updraft import number as updraft_number
 from custom_components.updraft.client import ApiError
 from homeassistant.exceptions import HomeAssistantError
 
@@ -41,6 +42,63 @@ def device(proxy_id=PROXY_ID, owner="http"):
 
 
 class RegistryTests(unittest.IsolatedAsyncioTestCase):
+    async def test_ble_timer_can_replace_manual_sentinel_with_bounded_timer(self):
+        entry = await self.entry()
+        selected = device() | {"commands": [{"kind": "legacy_timer"}]}
+        old = {"available": True, "freshness": "fresh", "state": {"timer_original_minutes": 600}}
+        new = old | {"state": {"timer_original_minutes": 1}}
+        client = AsyncMock()
+        client.fetch_devices.return_value = [selected]
+        client.fetch_state.side_effect = [old, new]
+        coordinator = UpdraftCoordinator(self.hass, client, selected, entry)
+        coordinator.async_set_updated_data(old)
+        self.hass.data["updraft"] = {entry.entry_id: coordinator}
+        entities = []
+        await updraft_number.async_setup_entry(self.hass, entry, entities.extend)
+        timer = entities[0]
+        self.assertTrue(timer.available)
+        self.assertIsNone(timer.native_value)
+        await timer.async_set_native_value(1)
+        client.set_control.assert_awaited_once_with("configured", {"kind": "legacy_timer", "minutes": 1})
+
+    async def test_ble_numbers_accept_fractional_readback_and_send_partial_command(self):
+        entry = await self.entry()
+        selected = device() | {"commands": [
+            {"kind": "legacy_automatic_temperature"},
+            {"kind": "legacy_automatic_humidity"},
+            {"kind": "legacy_timer"},
+        ]}
+        old = {"available": True, "freshness": "fresh", "state": {
+            "automatic_temperature_threshold_f": 105.1,
+            "automatic_humidity_threshold_percent": 30.1,
+            "timer_original_minutes": 0,
+        }}
+        new = old | {"state": old["state"] | {"automatic_temperature_threshold_f": 110.0}}
+        client = AsyncMock()
+        client.fetch_devices.return_value = [selected]
+        client.fetch_state.side_effect = [old, new]
+        coordinator = UpdraftCoordinator(self.hass, client, selected, entry)
+        coordinator.async_set_updated_data(old)
+        self.hass.data["updraft"] = {entry.entry_id: coordinator}
+        entities = []
+        await updraft_number.async_setup_entry(self.hass, entry, entities.extend)
+        self.assertEqual(len(entities), 3)
+        temperature, humidity, timer = entities
+        self.assertTrue(temperature.available)
+        self.assertEqual(temperature.native_value, 105.1)
+        self.assertTrue(humidity.available)
+        self.assertEqual(humidity.native_value, 30.1)
+        self.assertEqual(timer.native_min_value, 0)
+        self.assertEqual(timer.native_step, 1)
+        await temperature.async_set_native_value(110)
+        client.set_control.assert_awaited_once_with("configured", {
+            "kind": "legacy_automatic_temperature", "temperature_f": 110,
+        })
+        for invalid in [89, 121, 105.1, True, float("nan"), float("inf")]:
+            with self.assertRaises(HomeAssistantError):
+                await temperature.async_set_native_value(invalid)
+        self.assertEqual(client.set_control.await_count, 1)
+
     async def asyncSetUp(self):
         self.directory = tempfile.TemporaryDirectory()
         self.hass = HomeAssistant(self.directory.name)

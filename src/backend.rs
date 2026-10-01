@@ -672,11 +672,13 @@ impl DeviceRegistry {
             .get(id)
             .ok_or(DeviceRegistryError::UnknownDevice)?;
         match (descriptor.backend, command) {
-            (DeviceBackend::LegacyBle, DeviceCommand::LegacyPreset { .. })
-                if descriptor.capabilities.supports(command) =>
-            {
-                Ok(DeviceBackend::LegacyBle)
-            }
+            (
+                DeviceBackend::LegacyBle,
+                DeviceCommand::LegacyPreset { .. }
+                | DeviceCommand::LegacyAutomaticTemperature { .. }
+                | DeviceCommand::LegacyAutomaticHumidity { .. }
+                | DeviceCommand::LegacyTimer { .. },
+            ) if descriptor.capabilities.supports(command) => Ok(DeviceBackend::LegacyBle),
             (
                 DeviceBackend::QuickConnect,
                 DeviceCommand::QuickConnectMode { .. }

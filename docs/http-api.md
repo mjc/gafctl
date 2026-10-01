@@ -48,7 +48,8 @@ curl http://127.0.0.1:8787/api/v2/devices
 ```
 
 A Bluetooth device description looks like this. The capability list below is
-abbreviated to one preset; the actual original-controller list has all four:
+abbreviated to one preset; the original-controller list includes four presets
+and the three adjustable controls below:
 
 ```json
 {
@@ -158,6 +159,29 @@ Example body, with an illustrative timestamp that must be replaced before sendin
 Original-controller presets are `automatic105_f30_percent`,
 `automatic105_1_f30_1_percent`, `timer_clear`, and `timer_one_minute`. Their effects
 are listed in the [CLI reference](cli.md#original-fan-controls).
+
+Original-controller adjustable commands:
+
+```json
+{"kind":"legacy_automatic_temperature","temperature_f":110}
+{"kind":"legacy_automatic_humidity","humidity_percent":40}
+{"kind":"legacy_timer","minutes":60}
+```
+
+Temperature accepts 90–120 °F, humidity 30–80%, and timer 0–360 minutes,
+all in whole-unit steps. Zero clears the timer. These limits come from the
+original manufacturer Android app, including its timer picker and setter
+encoding. They do not expose the app's manual or humidity-disable sentinels.
+Changing either threshold selects automatic mode. The service reads current
+thresholds while holding the device transaction, preserves the untouched raw
+tenths field, checks request age again, then writes and verifies readback.
+Missing or unsupported readback prevents the write. An existing 100% humidity
+disable sentinel is preserved when changing temperature.
+
+The original controller advertises `legacy_automatic_temperature`,
+`legacy_automatic_humidity`, and `legacy_timer` capabilities. Broader values
+within the app ranges still need owned-device readback acceptance; the
+previously verified presets remain available.
 
 QuickConnect commands:
 

@@ -180,6 +180,16 @@ QUICKCONNECT_NUMBER_RANGES = {
     "automatic_humidity": (30, 80, 1),
     "timer_duration": (30, 360, 30),
 }
+LEGACY_NUMBER_RANGES = {
+    "automatic_temperature": (90, 120, 1),
+    "automatic_humidity": (30, 80, 1),
+    "timer_duration": (0, 360, 1),
+}
+LEGACY_NUMBER_COMMANDS = {
+    "automatic_temperature": ("legacy_automatic_temperature", "temperature_f"),
+    "automatic_humidity": ("legacy_automatic_humidity", "humidity_percent"),
+    "timer_duration": ("legacy_timer", "minutes"),
+}
 QUICKCONNECT_SENSOR_KEYS = {
     "temperature",
     "humidity",
@@ -241,6 +251,13 @@ def entity_keys(device: Mapping[str, Any]) -> dict[str, set[str]]:
         return entities
     if backend == "legacy_ble" and "legacy_preset" in command_kinds:
         entities["select"] = {"automatic_thresholds", "timer"}
+    if backend == "legacy_ble":
+        number_keys = {
+            key for key, (capability, _) in LEGACY_NUMBER_COMMANDS.items()
+            if capability in command_kinds
+        }
+        if number_keys:
+            entities["number"] = number_keys
     if backend == "quick_connect":
         if "quick_connect_mode" in command_kinds:
             entities["select"] = {"mode"}
@@ -266,6 +283,11 @@ def _control_command(command: str | Mapping[str, Any]) -> dict[str, Any]:
     if not isinstance(command, Mapping):
         raise ApiError("unsupported control command")
     kind = command.get("kind")
+    for key, (capability, field) in LEGACY_NUMBER_COMMANDS.items():
+        if kind == capability and set(command) == {"kind", field}:
+            minimum, maximum, _ = LEGACY_NUMBER_RANGES[key]
+            if _integer_in_range(command[field], minimum, maximum):
+                return dict(command)
     if kind == "quick_connect_mode" and set(command) == {"kind", "mode"}:
         if isinstance(command["mode"], str) and command["mode"] in QUICKCONNECT_MODES:
             return dict(command)
@@ -291,7 +313,7 @@ def _control_command(command: str | Mapping[str, Any]) -> dict[str, Any]:
         minimum, maximum, step = QUICKCONNECT_NUMBER_RANGES["timer_duration"]
         if _integer_in_range(duration, minimum, maximum) and duration % step == 0:
             return dict(command)
-    raise ApiError("invalid QuickConnect control command")
+    raise ApiError("invalid device control command")
 
 
 def _integer_in_range(value: Any, minimum: int, maximum: int) -> bool:

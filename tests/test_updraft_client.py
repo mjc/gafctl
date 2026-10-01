@@ -136,6 +136,25 @@ class FailedSession:
 
 
 class ApiClientTests(unittest.TestCase):
+    def test_adjustable_ble_capabilities_create_numbers_and_send_bounded_commands(self):
+        commands = [
+            {"kind": "legacy_automatic_temperature", "temperature_f": 90},
+            {"kind": "legacy_automatic_humidity", "humidity_percent": 80},
+            {"kind": "legacy_timer", "minutes": 360},
+        ]
+        device = {"backend": "legacy_ble", "commands": [{"kind": item["kind"]} for item in commands]}
+        self.assertEqual(CLIENT.entity_keys(device)["number"], {"automatic_temperature", "automatic_humidity", "timer_duration"})
+        session = FakeSession([FakeResponse({"request_id": "$request_id", "status": "confirmed"}) for _ in commands])
+        client = ApiClient("http://proxy", session)
+        for command in commands:
+            asyncio.run(client.set_control("configured", command))
+        self.assertEqual([post["json"]["command"] for post in session.posts], commands)
+        for command in commands:
+            field = next(key for key in command if key != "kind")
+            for value in [-1, 361, 1.5, True, None]:
+                with self.assertRaises(ApiError):
+                    CLIENT._control_command(command | {field: value})
+
     def test_refresh_reads_device_once_and_rejects_cached_failed_outcome(self):
         payload = v2_state_payload(legacy_state(), status="fresh")
         session = FakeSession([FakeResponse(payload)])

@@ -220,7 +220,10 @@ fn control_configs(device: &DeviceDescriptor) -> impl Iterator<Item = (String, V
         .iter()
         .filter_map(|capability| match capability {
             CommandCapability::LegacyPreset(preset) => Some(preset.as_str()),
-            CommandCapability::QuickConnectMode
+            CommandCapability::LegacyAutomaticTemperature
+            | CommandCapability::LegacyAutomaticHumidity
+            | CommandCapability::LegacyTimer
+            | CommandCapability::QuickConnectMode
             | CommandCapability::QuickConnectTargets
             | CommandCapability::QuickConnectTimerDuration => None,
         })

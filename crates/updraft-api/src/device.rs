@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::control::ControlPreset;
+use crate::{LegacyHumidityPercent, LegacyTemperatureF, LegacyTimerMinutes};
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(try_from = "uuid::Uuid", into = "uuid::Uuid")]
@@ -109,6 +110,15 @@ pub enum DeviceCommand {
     LegacyPreset {
         preset: ControlPreset,
     },
+    LegacyAutomaticTemperature {
+        temperature_f: LegacyTemperatureF,
+    },
+    LegacyAutomaticHumidity {
+        humidity_percent: LegacyHumidityPercent,
+    },
+    LegacyTimer {
+        minutes: LegacyTimerMinutes,
+    },
     QuickConnectMode {
         mode: QuickConnectMode,
     },
@@ -145,6 +155,9 @@ pub enum QuickConnectModeStatus {
 #[serde(tag = "kind", content = "value", rename_all = "snake_case")]
 pub enum CommandCapability {
     LegacyPreset(ControlPreset),
+    LegacyAutomaticTemperature,
+    LegacyAutomaticHumidity,
+    LegacyTimer,
     QuickConnectMode,
     QuickConnectTargets,
     QuickConnectTimerDuration,
@@ -168,6 +181,11 @@ impl DeviceCapabilities {
             ]
             .into_iter()
             .map(CommandCapability::LegacyPreset)
+            .chain([
+                CommandCapability::LegacyAutomaticTemperature,
+                CommandCapability::LegacyAutomaticHumidity,
+                CommandCapability::LegacyTimer,
+            ])
             .collect(),
         }
     }
@@ -193,6 +211,13 @@ impl DeviceCapabilities {
     pub fn supports(&self, command: DeviceCommand) -> bool {
         let capability = match command {
             DeviceCommand::LegacyPreset { preset } => CommandCapability::LegacyPreset(preset),
+            DeviceCommand::LegacyAutomaticTemperature { .. } => {
+                CommandCapability::LegacyAutomaticTemperature
+            }
+            DeviceCommand::LegacyAutomaticHumidity { .. } => {
+                CommandCapability::LegacyAutomaticHumidity
+            }
+            DeviceCommand::LegacyTimer { .. } => CommandCapability::LegacyTimer,
             DeviceCommand::QuickConnectMode { .. } => CommandCapability::QuickConnectMode,
             DeviceCommand::QuickConnectTargets { .. } => CommandCapability::QuickConnectTargets,
             DeviceCommand::QuickConnectTimerDuration { .. } => {
