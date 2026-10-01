@@ -40,7 +40,7 @@ impl Default for Service {
 async fn devices(State(service): State<Service>) -> Json<Value> {
     Json(
         json!({"devices":[{"id":"configured","name":"Attic fan","backend":"legacy_ble",
-        "capabilities":{"read_state":true,"commands":if service.supported { json!([{"kind":"legacy_preset","value":"timer_clear"}]) } else { json!([]) }},
+        "proxy_id":"550e8400-e29b-41d4-a716-446655440000","capabilities":{"read_state":true,"commands":if service.supported { json!([{"kind":"legacy_preset","value":"timer_clear"}]) } else { json!([]) }},
         "state_source":"mqtt","command_source":"mqtt"}]}),
     )
 }
@@ -414,8 +414,8 @@ async fn malformed_inventory_and_wrong_state_identity_are_rejected() {
     for inventory in [
         json!({"devices":[{"id":"../bad"}]}),
         json!({"devices":[
-        {"id":"configured","name":"one","backend":"legacy_ble","capabilities":{"read_state":true,"commands":[]},"state_source":"http","command_source":"http"},
-        {"id":"configured","name":"two","backend":"legacy_ble","capabilities":{"read_state":true,"commands":[]},"state_source":"http","command_source":"http"}]} ),
+        {"id":"configured","name":"one","backend":"legacy_ble","proxy_id":"550e8400-e29b-41d4-a716-446655440000","capabilities":{"read_state":true,"commands":[]},"state_source":"http","command_source":"http"},
+        {"id":"configured","name":"two","backend":"legacy_ble","proxy_id":"550e8400-e29b-41d4-a716-446655440000","capabilities":{"read_state":true,"commands":[]},"state_source":"http","command_source":"http"}]} ),
     ] {
         let app = Router::new().route(
             "/prefix/api/v2/devices",

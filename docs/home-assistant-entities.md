@@ -55,9 +55,10 @@ unavailable after 90 seconds without a complete successful reading.
 state timestamps. A cloud outage affects cloud devices without stopping Bluetooth
 polling.
 
-Home Assistant adds one integration entry per selected fan. Add the integration
-again to select another fan. Keep the QuickConnect identity store across restarts
-so existing cloud devices keep their IDs. The service currently configures one
+Home Assistant adds one integration entry per selected fan, identified by the
+persistent proxy UUID and local device ID. Add the integration again to select
+another fan. Keep the identity store across restarts so proxy and device IDs stay
+stable. The service currently configures one
 original Bluetooth fan, using local ID `configured`.
 
 ## MQTT setup
@@ -76,9 +77,10 @@ UPDRAFT_MQTT_PASSWORD=YOUR_BROKER_PASSWORD
 UPDRAFT_MQTT_DISCOVERY=true
 ```
 
-Restart Updraft. Home Assistant should discover the Bluetooth fan through MQTT.
-Do not also add that fan through the HTTP integration: the explicit Bluetooth
-MQTT discovery option publishes its entities independently of HTTP ownership.
+Restart Updraft, then select MQTT ownership through the
+[entity-source endpoint](http-api.md#home-assistant-entity-source). Enabling
+discovery alone leaves HTTP ownership unchanged. Each fan has one HA owner for
+both readings and controls. Both administrative transports remain available.
 Keep the environment file private. The password is required when MQTT is enabled;
 there is currently no MQTT password-file option.
 
@@ -86,13 +88,18 @@ Updraft's MQTT connection currently uses plain TCP. Setting port 8883 alone does
 not enable TLS. Use a trusted network or a local TLS tunnel if your broker
 requires encrypted connections.
 
-QuickConnect defaults to HTTP for both state and controls. Enabling
-`UPDRAFT_MQTT_DISCOVERY` alone does not move cloud entities to MQTT. To select
-MQTT for a cloud device, use its local ID with the
-[entity-source endpoint](http-api.md#home-assistant-entity-source), setting both
-sources to `mqtt`. State and controls must use the same source. The CLI does not
-currently expose a source-selection command. The selection persists in the
-identity store; keep a broker and discovery configured while any device uses MQTT.
+All devices default to HTTP ownership. Set both source fields to `mqtt` to move
+a fan's HA entities to MQTT. Split ownership is rejected. The selection persists
+in the identity store; MQTT owners in enabled backends require a configured
+broker and discovery at startup. A broker outage does not change ownership.
+
+The HTTP adapter removes its obsolete registry entities and empty device record
+when it observes the change, including after a restart. MQTT discovery is removed
+by publishing empty retained configurations, including for saved devices absent
+from the active inventory. The adapter polls every 30 seconds, so handoff can
+briefly expose both owners. HA gives integrations separate device records;
+changing the owner can change HA device and entity IDs. Update automations that
+refer to the old owner.
 
 Leave `UPDRAFT_MQTT_DISCOVERY` unset or false to publish MQTT state without
 Home Assistant discovery.
@@ -104,25 +111,28 @@ only these permissions:
 
 | Account | Operation | Topics |
 | --- | --- | --- |
-| Updraft | Publish | `updraft/availability`, `updraft/+/state`, `updraft/+/availability`, `updraft/+/control/result` |
+| Updraft | Publish | `updraft/+/availability`, `updraft/+/+/state`, `updraft/+/+/availability`, `updraft/+/+/control/result` |
 | Updraft | Publish discovery | `homeassistant/+/+/+/config` |
-| Updraft | Subscribe | `updraft/+/control/set` |
-| Home Assistant | Publish | `updraft/+/control/set` |
-| Home Assistant | Subscribe | `updraft/availability`, `updraft/+/state`, `updraft/+/availability`, `updraft/+/control/result`, `homeassistant/+/+/+/config` |
+| Updraft | Subscribe | `updraft/+/+/control/set` |
+| Home Assistant | Publish | `updraft/+/+/control/set` |
+| Home Assistant | Subscribe | `updraft/+/availability`, `updraft/+/+/state`, `updraft/+/+/availability`, `updraft/+/+/control/result`, `homeassistant/+/+/+/config` |
 
 Avoid a publish grant on all of `updraft/#`; that would let a command client
-publish service state too. Existing `updraft/gaf_vent/...` topics remain aliases
-for the original Bluetooth fan; use the per-device topics for new clients.
+publish service state too. Every proxy has its own namespace. There are no unscoped aliases.
+
+Read `proxy_id` and device `id` from `/api/v2/devices`. Device topics use
+`updraft/{proxy_id}/{id}/...`; discovery identifiers also include both IDs. MQTT
+client IDs include the proxy UUID so separate services can share a broker.
 
 Device state and availability messages are retained. Process availability has
-its own last-will topic, `updraft/availability`. It does not replace each fan's
+its own last-will topic, `updraft/{proxy_id}/availability`. It does not replace each fan's
 availability. After reconnecting, Updraft republishes current state and enabled
 discovery messages.
 
 ## Controls
 
 The Home Assistant integration and discovered MQTT controls create requests for
-you. Custom MQTT clients publish JSON to `updraft/{id}/control/set` with QoS 1
+you. Custom MQTT clients publish JSON to `updraft/{proxy_id}/{id}/control/set` with QoS 1
 and **retain disabled**:
 
 ```json
@@ -139,7 +149,7 @@ use a new request ID for each new command. The
 MQTT uses the same commands. Requests more than 30 seconds old, more than five
 seconds ahead, retained, malformed, or unsupported are rejected before fan access.
 
-Results arrive at `updraft/{id}/control/result`, include the request ID, and are
+Results arrive at `updraft/{proxy_id}/{id}/control/result`, include the request ID, and are
 not retained. A successful control requires acknowledgement and matching state
 readback. Home Assistant does not display a requested setting as if it had
 already succeeded.

@@ -2,7 +2,7 @@ use std::{
     collections::{HashMap, VecDeque},
     net::SocketAddr,
     sync::Arc,
-    time::{Duration, Instant, SystemTime},
+    time::{Duration, SystemTime},
 };
 
 use crate::backend::{DeviceRegistry, DeviceRuntime};
@@ -31,7 +31,7 @@ use updraft_bluetooth::{
     DisconnectOutcome, ProbeClient, ProbeError, ProbeErrorKind, ProbeMode, ProbeOptions,
     ProbeResult, QueryResult,
 };
-use updraft_protocol::{DeviceSnapshot, StateFreshness, StateReconciler};
+use updraft_protocol::{DeviceSnapshot, StateReconciler};
 use updraft_quickconnect::{
     QuickConnectClient, QuickConnectCommand, QuickConnectCommandMode, QuickConnectConfig,
 };
@@ -40,9 +40,9 @@ use crate::quickconnect_control::{
     QuickConnectControlIntent, QuickConnectControlService, QuickConnectControlStatus,
 };
 
+#[cfg(test)]
 const DEVICE_ID: &str = "configured";
 const DEFAULT_POLL_INTERVAL: Duration = Duration::from_secs(30);
-const DEFAULT_FRESHNESS_LIMIT: Duration = Duration::from_secs(90);
 
 #[derive(Clone)]
 struct ApiState {
@@ -65,7 +65,6 @@ struct LegacyBleRuntime {
     reconciler: Arc<RwLock<StateReconciler>>,
     device: Arc<DeviceRuntime>,
     ble_client: Arc<ProbeClient>,
-    freshness_limit: Duration,
     peripheral_id: Arc<str>,
 }
 
@@ -99,19 +98,11 @@ impl ApiState {
         }
     }
 
-    fn with_ble_device(
-        freshness_limit: Duration,
-        device_id: String,
-        mut registry: DeviceRegistry,
-    ) -> Self {
+    fn with_ble_device(device_id: String, mut registry: DeviceRegistry) -> Self {
         let device = registry.register_configured_ble();
         Self {
             registry: Arc::new(RwLock::new(registry)),
-            ble_device: Some(Arc::new(LegacyBleRuntime::new(
-                freshness_limit,
-                device_id,
-                device,
-            ))),
+            ble_device: Some(Arc::new(LegacyBleRuntime::new(device_id, device))),
             mqtt_updates: None,
             mqtt_discovery_enabled: false,
             quickconnect_control: None,
@@ -211,61 +202,63 @@ impl ApiState {
         };
         match self.mqtt_state_snapshot().await {
             Ok(snapshot) => {
-                updates.send_replace(Arc::new(snapshot));
+                self.publish_current_mqtt_snapshot(updates, snapshot).await;
             }
             Err(error) => tracing::error!(%error, "could not collect device state for MQTT"),
         }
     }
 
+    async fn publish_current_mqtt_snapshot(
+        &self,
+        updates: &watch::Sender<Arc<crate::mqtt::MqttStateSnapshot>>,
+        snapshot: crate::mqtt::MqttStateSnapshot,
+    ) -> bool {
+        let registry = self.registry.read().await;
+        if !registry.descriptors().eq(snapshot.devices.iter()) {
+            return false;
+        }
+        updates.send_replace(Arc::new(snapshot));
+        true
+    }
+
     async fn mqtt_state_snapshot(&self) -> Result<crate::mqtt::MqttStateSnapshot> {
-        let descriptors = self
-            .registry
-            .read()
-            .await
-            .descriptors()
-            .cloned()
-            .collect::<Vec<_>>();
-        let publications = stream::iter(descriptors.iter().cloned())
+        let (proxy_id, descriptors, discovery_identities) = {
+            let registry = self.registry.read().await;
+            (
+                registry.proxy_id(),
+                registry.descriptors().cloned().collect::<Vec<_>>(),
+                registry.discovery_identities().collect(),
+            )
+        };
+        let publications = stream::iter(descriptors.iter())
             .then(|descriptor| async move {
                 let response = device_state_v2_data(self, &descriptor.id)
                     .await
                     .map_err(|_| anyhow::anyhow!("registered device state is unavailable"))?;
-                let legacy_payload = match (&descriptor.backend, self.ble_device.as_ref()) {
-                    (DeviceBackend::LegacyBle, Some(device))
-                        if descriptor.id == DeviceId::configured_ble() =>
-                    {
-                        Some(
-                            serde_json::to_string(&device_state_response(device).await)
-                                .context("could not serialize legacy BLE MQTT state")?,
-                        )
-                    }
-                    _ => None,
-                };
                 Ok::<_, anyhow::Error>(crate::mqtt::MqttStatePublication {
-                    id: descriptor.id,
+                    id: descriptor.id.clone(),
                     payload: serde_json::to_string(&response)
                         .context("could not serialize v2 device state for MQTT")?,
                     available: response.available,
-                    legacy_payload,
                 })
             })
             .try_collect()
             .await?;
         Ok(crate::mqtt::MqttStateSnapshot {
+            proxy_id,
+            discovery_identities,
             devices: descriptors,
             publications,
-            legacy_discovery_enabled: self.mqtt_discovery_enabled,
         })
     }
 }
 
 impl LegacyBleRuntime {
-    fn new(freshness_limit: Duration, peripheral_id: String, device: Arc<DeviceRuntime>) -> Self {
+    fn new(peripheral_id: String, device: Arc<DeviceRuntime>) -> Self {
         Self {
             reconciler: Arc::new(RwLock::new(StateReconciler::default())),
             device,
             ble_client: Arc::new(ProbeClient::new()),
-            freshness_limit,
             peripheral_id: Arc::from(peripheral_id),
         }
     }
@@ -504,7 +497,7 @@ pub(crate) async fn serve(
         "persisted MQTT ownership requires a configured broker and --mqtt-discovery"
     );
     let mut state = match device_id {
-        Some(device_id) => ApiState::with_ble_device(DEFAULT_FRESHNESS_LIMIT, device_id, registry),
+        Some(device_id) => ApiState::with_ble_device(device_id, registry),
         None => ApiState::with_registry(registry),
     };
     if let Some(config) = quickconnect_config {
@@ -642,7 +635,6 @@ async fn device_state_v2_data(
 #[derive(Clone)]
 pub(crate) struct CachedV2ControlResult {
     pub(crate) response: DeviceControlV2Response,
-    pub(crate) legacy_response: Option<ControlResponse>,
 }
 
 const V2_CONTROL_MAX_AGE: Duration = Duration::from_secs(30);
@@ -749,49 +741,43 @@ async fn execute_v2_control(
     request: &DeviceControlV2Request,
 ) -> CachedV2ControlResult {
     let backend = state.registry.read().await.dispatch(id, request.command);
-    let (outcome, legacy_response) = match backend {
+    let outcome = match backend {
         Ok(DeviceBackend::LegacyBle) => execute_ble_v2_control(state, request).await,
-        Ok(DeviceBackend::QuickConnect) => {
-            (execute_cloud_v2_control(state, id, request).await, None)
-        }
-        Err(crate::backend::DeviceRegistryError::UnknownDevice) => ("unknown_device", None),
-        Err(crate::backend::DeviceRegistryError::UnsupportedCommand) => {
-            ("unsupported_command", None)
-        }
-        Err(_) => ("control_failed", None),
+        Ok(DeviceBackend::QuickConnect) => execute_cloud_v2_control(state, id, request).await,
+        Err(crate::backend::DeviceRegistryError::UnknownDevice) => "unknown_device",
+        Err(crate::backend::DeviceRegistryError::UnsupportedCommand) => "unsupported_command",
+        Err(_) => "control_failed",
     };
     CachedV2ControlResult {
         response: DeviceControlV2Response {
             request_id: request.request_id.as_str().to_owned(),
             status: outcome.into(),
         },
-        legacy_response,
     }
 }
 
 async fn execute_ble_v2_control(
     state: &ApiState,
     request: &DeviceControlV2Request,
-) -> (&'static str, Option<ControlResponse>) {
+) -> &'static str {
     if state.ble_device.is_none() {
-        return ("device_unavailable", None);
+        return "device_unavailable";
     }
     let DeviceCommand::LegacyPreset { preset } = request.command else {
-        return ("unsupported_command", None);
+        return "unsupported_command";
     };
     match state
         .execute_http_control(request.issued_at_unix_ms, preset)
         .await
     {
         Ok(response) => {
-            let status = if response.success {
+            if response.success {
                 "confirmed"
             } else {
                 "unconfirmed"
-            };
-            (status, Some(response))
+            }
         }
-        Err(error) => (error.status(), None),
+        Err(error) => error.status(),
     }
 }
 
@@ -915,7 +901,6 @@ fn cached_v2_result(request_id: CommandId, status: &'static str) -> CachedV2Cont
             request_id: request_id.as_str().to_owned(),
             status: status.into(),
         },
-        legacy_response: None,
     }
 }
 
@@ -1010,17 +995,6 @@ pub(crate) struct ControlResponse {
     state: Option<StateValues>,
 }
 
-impl ControlResponse {
-    pub(crate) fn rejected(preset: ControlPreset, message: &str) -> Self {
-        Self {
-            success: false,
-            preset,
-            message: message.to_owned(),
-            state: None,
-        }
-    }
-}
-
 async fn process_mqtt_controls(
     state: ApiState,
     controls: mpsc::Receiver<crate::mqtt::MqttControlWork>,
@@ -1053,36 +1027,9 @@ async fn reply_to_device_control(state: &ApiState, work: crate::mqtt::MqttContro
     let _ = work.reply.send(response);
 }
 
-async fn device_state_response(device: &LegacyBleRuntime) -> DeviceStateResponse {
-    let reconciler = device.reconciler.read().await;
-    let now = Instant::now();
-    let freshness = reconciler.freshness_at(now, device.freshness_limit);
-    let snapshot = reconciler.current_snapshot_at(now, device.freshness_limit);
-    DeviceStateResponse {
-        device_id: DEVICE_ID,
-        available: freshness == StateFreshness::Fresh,
-        freshness: freshness_name(freshness),
-        observed_at_unix_ms: reconciler
-            .latest_snapshot()
-            .and_then(|snapshot| unix_millis(snapshot.observed_at)),
-        last_error: reconciler.last_error().map(str::to_owned),
-        state: snapshot.and_then(StateValues::from_snapshot),
-    }
-}
-
 #[derive(Serialize)]
 struct HealthResponse {
     status: &'static str,
-}
-
-#[derive(Clone, Serialize)]
-struct DeviceStateResponse {
-    device_id: &'static str,
-    available: bool,
-    freshness: &'static str,
-    observed_at_unix_ms: Option<u64>,
-    last_error: Option<String>,
-    state: Option<StateValues>,
 }
 
 #[derive(Clone, Serialize)]
@@ -1097,12 +1044,6 @@ struct StateValues {
     control_preset: Option<&'static str>,
     timer_remaining_minutes: u16,
     timer_original_minutes: u16,
-}
-
-impl StateValues {
-    fn from_snapshot(snapshot: &DeviceSnapshot) -> Option<Self> {
-        project_legacy_snapshot(snapshot).map(|projection| projection.values)
-    }
 }
 
 struct LegacyStateProjection {
@@ -1260,17 +1201,13 @@ const fn fan_state_name(fan: updraft_protocol::FanState) -> &'static str {
     }
 }
 
-const fn freshness_name(freshness: StateFreshness) -> &'static str {
-    match freshness {
-        StateFreshness::Unknown => "unknown",
-        StateFreshness::Fresh => "fresh",
-        StateFreshness::Stale => "stale",
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use std::{fs, path::PathBuf, time::SystemTime};
+    use std::{
+        fs,
+        path::PathBuf,
+        time::{Instant, SystemTime},
+    };
 
     use crate::device::EntitySource;
     use axum::{body::Body, http::Request};
@@ -1278,6 +1215,30 @@ mod tests {
     use tower::ServiceExt;
 
     use super::*;
+
+    #[tokio::test]
+    async fn stale_mqtt_snapshot_cannot_restore_previous_entity_owner() {
+        let state =
+            ApiState::with_ble_device("no-physical-device".to_owned(), DeviceRegistry::new());
+        let old = state.mqtt_state_snapshot().await.unwrap();
+        state
+            .registry
+            .write()
+            .await
+            .set_entity_sources(
+                &DeviceId::configured_ble(),
+                EntitySource::Mqtt,
+                EntitySource::Mqtt,
+            )
+            .unwrap();
+        let current = state.mqtt_state_snapshot().await.unwrap();
+        let (updates, observed) = watch::channel(Arc::new(current));
+        assert!(!state.publish_current_mqtt_snapshot(&updates, old).await);
+        assert_eq!(
+            observed.borrow().devices[0].state_source,
+            EntitySource::Mqtt
+        );
+    }
 
     fn reservation_is_wait(reservation: V2ControlReservation) -> bool {
         match reservation {
@@ -1306,7 +1267,6 @@ mod tests {
     async fn source_route_persists_owner_and_rejects_split_or_unconfigured_mqtt() {
         let path = identity_store_path();
         let state = ApiState::with_ble_device(
-            DEFAULT_FRESHNESS_LIMIT,
             "no-physical-device".to_owned(),
             DeviceRegistry::load(&path).unwrap(),
         );
@@ -1355,7 +1315,6 @@ mod tests {
     async fn source_route_accepts_persistent_mqtt_owner_with_offline_broker() {
         let path = identity_store_path();
         let mut state = ApiState::with_ble_device(
-            DEFAULT_FRESHNESS_LIMIT,
             "no-physical-device".to_owned(),
             DeviceRegistry::load(&path).unwrap(),
         );
@@ -1403,7 +1362,8 @@ mod tests {
             watch::channel(Arc::new(crate::mqtt::MqttStateSnapshot {
                 devices: Vec::new(),
                 publications: Vec::new(),
-                legacy_discovery_enabled: false,
+                proxy_id: crate::device::ProxyId::default(),
+                discovery_identities: Vec::new(),
             }))
             .0,
         );
@@ -1415,7 +1375,8 @@ mod tests {
         let initial = crate::mqtt::MqttStateSnapshot {
             devices: Vec::new(),
             publications: Vec::new(),
-            legacy_discovery_enabled: false,
+            proxy_id: crate::device::ProxyId::default(),
+            discovery_identities: Vec::new(),
         };
         let (updates, mut current) = watch::channel(Arc::new(initial));
         let mut state = ApiState::with_registry(DeviceRegistry::new());
@@ -1620,11 +1581,8 @@ mod tests {
 
     #[tokio::test]
     async fn ble_stale_control_releases_its_admission_slot() {
-        let state = ApiState::with_ble_device(
-            DEFAULT_FRESHNESS_LIMIT,
-            "no-physical-device".to_owned(),
-            DeviceRegistry::new(),
-        );
+        let state =
+            ApiState::with_ble_device("no-physical-device".to_owned(), DeviceRegistry::new());
         let runtime = state.ble_device.as_ref().unwrap();
         assert_eq!(
             runtime
@@ -1642,11 +1600,8 @@ mod tests {
 
     #[tokio::test]
     async fn ble_http_admission_rejects_busy_before_waiting_or_touching_bluetooth() {
-        let state = ApiState::with_ble_device(
-            DEFAULT_FRESHNESS_LIMIT,
-            "no-physical-device".to_owned(),
-            DeviceRegistry::new(),
-        );
+        let state =
+            ApiState::with_ble_device("no-physical-device".to_owned(), DeviceRegistry::new());
         let runtime = state.ble_device.as_ref().unwrap();
         let permits = std::iter::repeat_with(|| runtime.device.try_reserve_control().unwrap())
             .take(8)
@@ -1772,7 +1727,6 @@ mod tests {
                 request_id: request_id.as_str().to_owned(),
                 status: "unconfirmed".into(),
             },
-            legacy_response: None,
         };
         let execution = spawn_v2_control_execution(
             Arc::clone(&history),
@@ -1838,11 +1792,8 @@ mod tests {
 
     #[tokio::test]
     async fn routes_report_health_v2_capabilities_and_unknown_state() {
-        let state = ApiState::with_ble_device(
-            DEFAULT_FRESHNESS_LIMIT,
-            "private-peripheral-id".to_owned(),
-            DeviceRegistry::new(),
-        );
+        let state =
+            ApiState::with_ble_device("private-peripheral-id".to_owned(), DeviceRegistry::new());
         let app = router(state);
 
         let health = app
@@ -2006,7 +1957,6 @@ mod tests {
             )
             .unwrap();
         let mixed = router(ApiState::with_ble_device(
-            DEFAULT_FRESHNESS_LIMIT,
             "private-ble-id".to_owned(),
             mixed_registry,
         ));
@@ -2047,7 +1997,6 @@ mod tests {
             .unwrap();
         registry.set_quickconnect_writes_enabled(true);
         let app = router(ApiState::with_ble_device(
-            DEFAULT_FRESHNESS_LIMIT,
             "synthetic-ble-id".to_owned(),
             registry,
         ));
@@ -2121,7 +2070,6 @@ mod tests {
     #[tokio::test]
     async fn v2_controls_reject_unknown_fields_and_unknown_device_ids() {
         let app = router(ApiState::with_ble_device(
-            DEFAULT_FRESHNESS_LIMIT,
             "synthetic-ble-id".to_owned(),
             DeviceRegistry::new(),
         ));
@@ -2171,7 +2119,6 @@ mod tests {
     #[tokio::test]
     async fn v2_control_replay_returns_the_same_result_and_rejects_command_reuse() {
         let app = router(ApiState::with_ble_device(
-            DEFAULT_FRESHNESS_LIMIT,
             "synthetic-ble-id".to_owned(),
             DeviceRegistry::new(),
         ));
@@ -2292,11 +2239,8 @@ mod tests {
 
     #[tokio::test]
     async fn state_route_reports_normalized_state_and_expired_state_as_unavailable() {
-        let state = ApiState::with_ble_device(
-            Duration::from_secs(60),
-            "private-peripheral-id".to_owned(),
-            DeviceRegistry::new(),
-        );
+        let state =
+            ApiState::with_ble_device("private-peripheral-id".to_owned(), DeviceRegistry::new());
         let projection =
             project_legacy_snapshot(&snapshot_at(Instant::now(), SystemTime::now())).unwrap();
         state
@@ -2336,11 +2280,8 @@ mod tests {
 
     #[tokio::test]
     async fn reusable_client_reads_the_actual_service_router_without_physical_access() {
-        let state = ApiState::with_ble_device(
-            Duration::from_secs(60),
-            "private-peripheral-id".to_owned(),
-            DeviceRegistry::new(),
-        );
+        let state =
+            ApiState::with_ble_device("private-peripheral-id".to_owned(), DeviceRegistry::new());
         let projection =
             project_legacy_snapshot(&snapshot_at(Instant::now(), SystemTime::now())).unwrap();
         state
@@ -2378,11 +2319,7 @@ mod tests {
 
     #[tokio::test]
     async fn initial_ble_poll_failure_reports_unavailable_inventory_and_error() {
-        let state = ApiState::with_ble_device(
-            DEFAULT_FRESHNESS_LIMIT,
-            "synthetic-ble-id".to_owned(),
-            DeviceRegistry::new(),
-        );
+        let state = ApiState::with_ble_device("synthetic-ble-id".to_owned(), DeviceRegistry::new());
         let ble = state.ble_device.as_ref().unwrap();
         let mut reconciler = ble.reconciler.write().await;
         let poll_id = reconciler.begin_poll();
@@ -2422,7 +2359,10 @@ mod tests {
                 .unwrap(),
         )
         .unwrap();
-        let projected = serde_json::to_string(&StateValues::from_snapshot(&snapshot)).unwrap();
+        let projected = serde_json::to_string(
+            &project_legacy_snapshot(&snapshot).map(|projection| projection.values),
+        )
+        .unwrap();
         assert!(!projected.contains("private-suffix"));
         assert!(!projected.contains("running"));
         assert!(projected.contains("\"controller_fan_flag\":\"off\""));

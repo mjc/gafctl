@@ -101,7 +101,7 @@ struct Service {
 async fn devices() -> Json<Value> {
     Json(
         json!({"devices":[{"id":"configured","name":"Attic fan","backend":"legacy_ble",
-        "capabilities":{"read_state":true,"commands":[{"kind":"legacy_preset","value":"timer_clear"}]},
+        "proxy_id":"550e8400-e29b-41d4-a716-446655440000","capabilities":{"read_state":true,"commands":[{"kind":"legacy_preset","value":"timer_clear"}]},
         "state_source":"http","command_source":"http"}]}),
     )
 }
@@ -394,7 +394,7 @@ async fn all_cloud_control_shapes_are_posted_through_the_service() {
     ] {
         let app=Router::new().route("/api/v2/devices",get(|| async { Json(json!({"devices":[{
             "id":"qc-local","name":"cloud fan","backend":"quick_connect",
-            "capabilities":{"read_state":true,"commands":[{"kind":"quick_connect_mode"},{"kind":"quick_connect_targets"},{"kind":"quick_connect_timer_duration"}]},
+            "proxy_id":"550e8400-e29b-41d4-a716-446655440000","capabilities":{"read_state":true,"commands":[{"kind":"quick_connect_mode"},{"kind":"quick_connect_targets"},{"kind":"quick_connect_timer_duration"}]},
             "state_source":"mqtt","command_source":"mqtt"}]})) }))
             .route("/api/v2/devices/qc-local/control",post(move |Json(request):Json<Value>| { let expected=expected.clone(); async move {
                 assert_eq!(request["command"],expected);

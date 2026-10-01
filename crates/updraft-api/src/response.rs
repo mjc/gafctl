@@ -45,6 +45,10 @@ where
 
 #[derive(Clone, Copy, Debug, Error, Eq, PartialEq)]
 pub enum ContractError {
+    #[error("device inventory contains inconsistent proxy identities")]
+    ProxyIdentity,
+    #[error("a device must have one Home Assistant entity source")]
+    EntityOwnership,
     #[error("device inventory contains duplicate local IDs")]
     DuplicateDevice,
     #[error("state availability does not match the snapshot")]
@@ -57,12 +61,22 @@ pub enum ContractError {
 
 impl DeviceListV2Response {
     pub fn validate(&self) -> Result<(), ContractError> {
-        let mut ids = HashSet::new();
-        if self.devices.iter().all(|device| ids.insert(&device.id)) {
-            Ok(())
-        } else {
-            Err(ContractError::DuplicateDevice)
-        }
+        let proxy_id = self.devices.first().map(|device| device.proxy_id);
+        self.devices
+            .iter()
+            .try_fold(HashSet::new(), |mut ids, device| {
+                if Some(device.proxy_id) != proxy_id {
+                    return Err(ContractError::ProxyIdentity);
+                }
+                if device.state_source != device.command_source {
+                    return Err(ContractError::EntityOwnership);
+                }
+                if !ids.insert(&device.id) {
+                    return Err(ContractError::DuplicateDevice);
+                }
+                Ok(ids)
+            })
+            .map(|_| ())
     }
 }
 
@@ -200,5 +214,26 @@ impl PartialEq<&str> for ControlStatus {
 impl std::fmt::Display for ControlStatus {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.write_str(self.as_str())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::EntitySource;
+
+    #[test]
+    fn inventory_rejects_mixed_proxy_identity_and_split_ownership() {
+        let first = DeviceDescriptor::configured_ble();
+        let mut second = DeviceDescriptor::configured_ble();
+        second.id = "another".parse().unwrap();
+        let mut inventory = DeviceListV2Response {
+            devices: vec![first, second],
+        };
+        assert!(inventory.validate().is_err());
+        inventory.devices[1].proxy_id = inventory.devices[0].proxy_id;
+        assert!(inventory.validate().is_ok());
+        inventory.devices[1].state_source = EntitySource::Mqtt;
+        assert!(inventory.validate().is_err());
     }
 }

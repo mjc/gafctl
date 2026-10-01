@@ -11,7 +11,7 @@ from .client import (
     normalize_api_url,
     select_device,
 )
-from .const import CONF_API_URL, CONF_DEVICE_ID, DEFAULT_API_URL, DOMAIN
+from .const import CONF_API_URL, CONF_DEVICE_ID, CONF_PROXY_ID, DEFAULT_API_URL, DOMAIN
 
 
 class UpdraftConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
@@ -31,13 +31,13 @@ class UpdraftConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                         api_url, async_get_clientsession(self.hass)
                     ).fetch_devices()
                     configured_ids = {
-                        entry.data.get(CONF_DEVICE_ID)
+                        (entry.data[CONF_PROXY_ID], entry.data[CONF_DEVICE_ID])
                         for entry in self._async_current_entries()
                     }
                     self._devices = {
                         device["id"]: device
                         for device in devices
-                        if device["id"] not in configured_ids
+                        if (device["proxy_id"], device["id"]) not in configured_ids
                         and entity_platforms(device)
                     }
                     if not self._devices:
@@ -60,13 +60,14 @@ class UpdraftConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 )
             except (ApiError, KeyError):
                 return self.async_abort(reason="device_unavailable")
-            await self.async_set_unique_id(f"updraft_{device['id']}")
+            await self.async_set_unique_id(f"updraft_{device['proxy_id']}_{device['id']}")
             self._abort_if_unique_id_configured()
             return self.async_create_entry(
                 title=device["name"],
                 data={
                     CONF_API_URL: self._api_url,
                     CONF_DEVICE_ID: device["id"],
+                    CONF_PROXY_ID: device["proxy_id"],
                     "backend": device["backend"],
                     "device_name": device["name"],
                     "capabilities": device["capabilities"],

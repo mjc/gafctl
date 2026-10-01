@@ -14,6 +14,19 @@ CLIENT_SPEC.loader.exec_module(CLIENT)
 ApiClient = CLIENT.ApiClient
 ApiError = CLIENT.ApiError
 normalize_api_url = CLIENT.normalize_api_url
+PROXY_ID = "550e8400-e29b-41d4-a716-446655440000"
+
+
+def inventory_device(**overrides):
+    return {
+        "proxy_id": PROXY_ID,
+        "id": "configured",
+        "name": "Vent",
+        "backend": "legacy_ble",
+        "capabilities": {"read_state": True, "commands": []},
+        "state_source": "http",
+        "command_source": "http",
+    } | overrides
 
 
 def legacy_state(**overrides):
@@ -123,6 +136,34 @@ class FailedSession:
 
 
 class ApiClientTests(unittest.TestCase):
+    def test_inventory_requires_proxy_identity_and_one_owner(self):
+        for fields in (
+            {"proxy_id": None},
+            {"proxy_id": "not-a-uuid"},
+            {"proxy_id": "00000000-0000-0000-0000-000000000000"},
+            {"state_source": "mqtt", "command_source": "http"},
+            {"state_source": None},
+        ):
+            with self.subTest(fields=fields):
+                client = ApiClient("http://127.0.0.1:8787", FakeSession([
+                    FakeResponse({"devices": [inventory_device(**fields)]})
+                ]))
+                with self.assertRaises(ApiError):
+                    asyncio.run(client.fetch_devices())
+
+    def test_inventory_preserves_proxy_identity_and_rejects_mixed_proxies(self):
+        client = ApiClient("http://127.0.0.1:8787", FakeSession([
+            FakeResponse({"devices": [inventory_device()]})
+        ]))
+        self.assertEqual(asyncio.run(client.fetch_devices())[0]["proxy_id"], PROXY_ID)
+        client = ApiClient("http://127.0.0.1:8787", FakeSession([
+            FakeResponse({"devices": [inventory_device(), inventory_device(
+                id="other", proxy_id="650e8400-e29b-41d4-a716-446655440000"
+            )]})
+        ]))
+        with self.assertRaises(ApiError):
+            asyncio.run(client.fetch_devices())
+
     def test_timer_preset_requires_matching_remaining_and_original_duration(self):
         for remaining, original, expected in (
             (0, 0, "timer_clear"),
@@ -156,6 +197,9 @@ class ApiClientTests(unittest.TestCase):
                     {
                         "devices": [
                             {
+                       "proxy_id": PROXY_ID,
+                       "state_source": "http",
+                       "command_source": "http",
                                 "id": "configured",
                                 "name": "GAF Wi-Fi Vent",
                                 "backend": "legacy_ble",
@@ -185,6 +229,9 @@ class ApiClientTests(unittest.TestCase):
                     {
                         "devices": [
                             {
+                       "proxy_id": PROXY_ID,
+                       "state_source": "http",
+                       "command_source": "http",
                                 "id": "ble-device",
                                 "name": "Legacy Vent",
                                 "backend": "legacy_ble",
@@ -196,6 +243,9 @@ class ApiClientTests(unittest.TestCase):
                                 },
                             },
                             {
+                       "proxy_id": PROXY_ID,
+                       "state_source": "http",
+                       "command_source": "http",
                                 "id": "cloud-device",
                                 "name": "QuickConnect Vent",
                                 "backend": "quick_connect",
@@ -331,6 +381,9 @@ class ApiClientTests(unittest.TestCase):
 
     def test_rejects_duplicate_inventory_ids(self):
         device = {
+            "proxy_id": PROXY_ID,
+            "state_source": "http",
+            "command_source": "http",
             "id": "same",
             "name": "Vent",
             "backend": "quick_connect",

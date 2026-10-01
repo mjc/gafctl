@@ -353,6 +353,15 @@ impl DeviceRegistry {
         self.identities.proxy_id
     }
 
+    pub fn discovery_identities(&self) -> impl Iterator<Item = (DeviceId, DeviceBackend)> + '_ {
+        std::iter::once((DeviceId::configured_ble(), DeviceBackend::LegacyBle)).chain(
+            self.identities
+                .bindings
+                .iter()
+                .map(|binding| (binding.local_id.clone(), DeviceBackend::QuickConnect)),
+        )
+    }
+
     pub fn mqtt_ownership_required(&self, ble_enabled: bool, account_id: Option<&str>) -> bool {
         self.identities.sources.iter().any(|(id, source)| {
             *source == EntitySource::Mqtt

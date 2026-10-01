@@ -6,7 +6,7 @@ import time
 from collections.abc import Mapping
 from typing import Any
 from urllib.parse import urljoin, urlparse
-from uuid import uuid4
+from uuid import UUID, RFC_4122, uuid4
 
 class ApiError(Exception):
     """A safe-to-display Updraft API error."""
@@ -43,6 +43,7 @@ class ApiClient:
             raise ApiError("proxy returned no devices")
         if any(
             not isinstance(device, Mapping)
+            or not _valid_proxy_id(device.get("proxy_id"))
             or not isinstance(device.get("id"), str)
             or not _valid_identifier(device["id"])
             or not isinstance(device.get("name"), str)
@@ -60,24 +61,27 @@ class ApiClient:
                 not isinstance(device.get(source), str)
                 or device[source] not in {"http", "mqtt"}
                 for source in ("state_source", "command_source")
-                if source in device
             )
+            or device["state_source"] != device["command_source"]
             for device in devices
         ):
             raise ApiError("proxy returned invalid device data")
         identifiers = [device["id"] for device in devices]
+        if len({device["proxy_id"] for device in devices}) > 1:
+            raise ApiError("proxy returned inconsistent proxy identities")
         if len(identifiers) != len(set(identifiers)):
             raise ApiError("proxy returned duplicate device identifiers")
         return [
             {
+                "proxy_id": device["proxy_id"],
                 "id": device["id"],
                 "name": device["name"],
                 "state": device["capabilities"]["read_state"],
                 "backend": device["backend"],
                 "commands": device["capabilities"]["commands"],
                 "capabilities": device["capabilities"],
-                "state_source": device.get("state_source", "http"),
-                "command_source": device.get("command_source", "http"),
+                "state_source": device["state_source"],
+                "command_source": device["command_source"],
             }
             for device in devices
         ]
@@ -327,6 +331,16 @@ def timer_control_preset(state: Mapping[str, Any]) -> str | None:
     return {(0, 0): "timer_clear", (1, 1): "timer_one_minute"}.get(
         (state.get("timer_remaining_minutes"), state.get("timer_original_minutes"))
     )
+
+
+def _valid_proxy_id(value: Any) -> bool:
+    if not isinstance(value, str):
+        return False
+    try:
+        parsed = UUID(value)
+    except ValueError:
+        return False
+    return parsed.version == 4 and parsed.variant == RFC_4122 and str(parsed) == value
 
 
 def _valid_identifier(value: str) -> bool:
