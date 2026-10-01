@@ -679,6 +679,8 @@ fn project_legacy_snapshot(snapshot: &DeviceSnapshot) -> Option<LegacyStateProje
             timer_remaining_minutes: Some(timer.remaining.value()),
             timer_original_minutes: Some(timer.original.value()),
         },
+        estimated_running: None,
+        diagnostics: None,
         provenance: StateProvenance {
             backend: DeviceBackend::LegacyBle,
             fetched_at_unix_ms: unix_millis(SystemTime::now()),

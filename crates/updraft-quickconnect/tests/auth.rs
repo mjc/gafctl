@@ -103,6 +103,43 @@ fn api_roots_require_tls_except_for_loopback_http() {
 }
 
 #[tokio::test]
+async fn read_only_poll_keeps_inventory_when_one_detail_fetch_fails() {
+    let failed_detail_requests = Arc::new(AtomicUsize::new(0));
+    let app = Router::new()
+        .route("/cognito/login", post(successful_login))
+        .route("/gaf/device/deviceList", get(two_device_inventory))
+        .route("/gaf/device", get(detail_by_id))
+        .with_state(Arc::clone(&failed_detail_requests));
+    let (base_url, server) = start_server(app).await;
+    let client = test_client(
+        base_url,
+        Credentials::new("user", "password", AccountRole::Contractor),
+    );
+
+    let polls = client.poll_devices().await.unwrap();
+
+    assert_eq!(polls.len(), 2);
+    assert_eq!(polls[0].inventory.provider_id(), "synthetic-failed-device");
+    assert_eq!(polls[0].inventory.name(), Some("Failed detail"));
+    assert_eq!(
+        polls[0].detail,
+        Err(updraft_quickconnect::ClientError::HttpStatus(503))
+    );
+    assert_eq!(polls[0].fetched_at_unix_ms, None);
+    let successful = polls[1].detail.as_ref().unwrap();
+    assert_eq!(polls[1].inventory.provider_id(), "synthetic-live-device");
+    assert_eq!(successful.temperature_f, Some(78.0));
+    assert_eq!(successful.humidity_percent, Some(44.0));
+    assert_eq!(successful.settings.automatic_temperature_f, Some(105));
+    assert_eq!(successful.settings.automatic_humidity_percent, Some(40));
+    assert_eq!(successful.settings.timer_duration_minutes, Some(60));
+    assert!(successful.fetched_at_unix_ms.is_some());
+    assert_eq!(successful.observed_at_unix_ms, None);
+    assert_eq!(failed_detail_requests.load(Ordering::SeqCst), 3);
+    server.abort();
+}
+
+#[tokio::test]
 async fn concurrent_unauthorized_reads_share_one_replacement_login() {
     let login_count = Arc::new(AtomicUsize::new(0));
     let app = Router::new()
@@ -605,6 +642,46 @@ fn test_client(base_url: reqwest::Url, credentials: Credentials) -> QuickConnect
 
 async fn successful_login() -> Json<Value> {
     Json(json!({"responseData": {"idToken": "SYNTHETIC_TOKEN_DO_NOT_USE"}}))
+}
+
+async fn two_device_inventory() -> Json<Value> {
+    Json(json!({"responseData": [
+        {"deviceId": "synthetic-failed-device", "name": "Failed detail"},
+        {"deviceId": "synthetic-live-device", "name": "Live detail"}
+    ]}))
+}
+
+async fn detail_by_id(
+    State(failed_detail_requests): State<Arc<AtomicUsize>>,
+    uri: Uri,
+) -> Response<Body> {
+    match uri.query() {
+        Some("deviceId=synthetic-failed-device") => {
+            failed_detail_requests.fetch_add(1, Ordering::SeqCst);
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({"statusCode": 503})),
+            )
+                .into_response()
+        }
+        Some("deviceId=synthetic-live-device") => Json(json!({
+            "responseData": {
+                "deviceConfig": {"setTemperature": 78.0, "setHumidity": 44.0},
+                "deviceSettings": {
+                    "automaticMode": true,
+                    "timerMode": false,
+                    "fanMode": false,
+                    "setTemperature": 105,
+                    "setHumidity": 40,
+                    "timerValue": 60,
+                    "humidityMonitor": true
+                },
+                "firmwareVersion": "synthetic-firmware"
+            }
+        }))
+        .into_response(),
+        _ => StatusCode::NOT_FOUND.into_response(),
+    }
 }
 
 async fn valid_empty_inventory() -> Json<Value> {

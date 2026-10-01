@@ -2001,6 +2001,7 @@ dependencies = [
  "clap",
  "futures-util",
  "http-body-util",
+ "reqwest",
  "rumqttc",
  "serde",
  "serde_json",
@@ -2011,6 +2012,7 @@ dependencies = [
  "tracing-subscriber",
  "updraft-bluetooth",
  "updraft-protocol",
+ "updraft-quickconnect",
  "uuid",
 ]
 
