@@ -1,0 +1,213 @@
+"""Capability-driven QuickConnect setting controls."""
+
+from typing import Any
+
+from homeassistant.components.number import NumberEntity, NumberMode
+from homeassistant.config_entries import ConfigEntry
+from homeassistant.const import PERCENTAGE, UnitOfTemperature, UnitOfTime
+from homeassistant.core import HomeAssistant
+from homeassistant.exceptions import HomeAssistantError
+from homeassistant.helpers import device_registry as dr
+from homeassistant.helpers.entity_platform import AddEntitiesCallback
+from homeassistant.helpers.update_coordinator import CoordinatorEntity
+
+from . import UpdraftCoordinator
+from .client import ApiError, QUICKCONNECT_NUMBER_RANGES, entity_keys
+from .const import DOMAIN
+
+
+CONTROLS = (
+    {
+        "capability": "quick_connect_targets",
+        "key": "automatic_temperature",
+        "name": "Target temperature",
+        "state_key": "automatic_temperature_f",
+        "minimum": QUICKCONNECT_NUMBER_RANGES["automatic_temperature"][0],
+        "maximum": QUICKCONNECT_NUMBER_RANGES["automatic_temperature"][1],
+        "step": QUICKCONNECT_NUMBER_RANGES["automatic_temperature"][2],
+        "unit": UnitOfTemperature.FAHRENHEIT,
+    },
+    {
+        "capability": "quick_connect_targets",
+        "key": "automatic_humidity",
+        "name": "Target humidity",
+        "state_key": "automatic_humidity_percent",
+        "minimum": QUICKCONNECT_NUMBER_RANGES["automatic_humidity"][0],
+        "maximum": QUICKCONNECT_NUMBER_RANGES["automatic_humidity"][1],
+        "step": QUICKCONNECT_NUMBER_RANGES["automatic_humidity"][2],
+        "unit": PERCENTAGE,
+    },
+    {
+        "capability": "quick_connect_timer_duration",
+        "key": "timer_duration",
+        "name": "Timer duration",
+        "state_key": "timer_duration_minutes",
+        "minimum": QUICKCONNECT_NUMBER_RANGES["timer_duration"][0],
+        "maximum": QUICKCONNECT_NUMBER_RANGES["timer_duration"][1],
+        "step": QUICKCONNECT_NUMBER_RANGES["timer_duration"][2],
+        "unit": UnitOfTime.MINUTES,
+    },
+)
+
+
+async def async_setup_entry(
+    hass: HomeAssistant,
+    entry: ConfigEntry,
+    async_add_entities: AddEntitiesCallback,
+) -> None:
+    coordinator: UpdraftCoordinator = hass.data[DOMAIN][entry.entry_id]
+    async_add_entities(
+        UpdraftNumber(coordinator, entry, control)
+        for control in CONTROLS
+        if control["key"] in entity_keys(coordinator.device).get("number", set())
+    )
+
+
+class UpdraftNumber(CoordinatorEntity[UpdraftCoordinator], NumberEntity):
+    """One validated number setting for the selected QuickConnect device."""
+
+    _attr_mode = NumberMode.BOX
+    _attr_has_entity_name = True
+    _attr_entity_category = None
+
+    def __init__(
+        self,
+        coordinator: UpdraftCoordinator,
+        entry: ConfigEntry,
+        control: dict[str, Any],
+    ) -> None:
+        super().__init__(coordinator)
+        self._entry = entry
+        self._control = control
+        self._attr_name = control["name"]
+        self._attr_unique_id = f"{entry.unique_id}_{control['key']}"
+        self._attr_native_min_value = control["minimum"]
+        self._attr_native_max_value = control["maximum"]
+        self._attr_native_step = control["step"]
+        self._attr_native_unit_of_measurement = control["unit"]
+
+    @property
+    def native_value(self) -> int | None:
+        state = self.coordinator.data.get("state") if self.coordinator.data else None
+        value = state.get(self._control["state_key"]) if state else None
+        return value if type(value) is int else None
+
+    @property
+    def available(self) -> bool:
+        data = self.coordinator.data or {}
+        state = data.get("state") or {}
+        value = state.get(self._control["state_key"])
+        current_targets_valid = all(
+            _valid_value(
+                state.get(key),
+                90 if key == "automatic_temperature_f" else 30,
+                120 if key == "automatic_temperature_f" else 80,
+                1,
+            )
+            for key in ("automatic_temperature_f", "automatic_humidity_percent")
+        )
+        return bool(
+            super().available
+            and self.coordinator.http_command_owned
+            and self.coordinator.supports(self._control["capability"])
+            and data.get("available") is True
+            and data.get("freshness") == "fresh"
+            and _valid_value(
+                value,
+                self._control["minimum"],
+                self._control["maximum"],
+                self._control["step"],
+            )
+            and (
+                self._control["capability"] != "quick_connect_targets"
+                or current_targets_valid
+            )
+        )
+
+    async def async_set_native_value(self, value: float) -> None:
+        control = self._control
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not control["minimum"] <= value <= control["maximum"]
+            or not float(value).is_integer()
+            or (value - control["minimum"]) % control["step"]
+        ):
+            raise HomeAssistantError("Value is outside the supported device range")
+        async with self.coordinator.command_lock:
+            try:
+                await self.coordinator.async_refresh()
+            except Exception as error:
+                raise HomeAssistantError("Could not refresh device state") from error
+            data = self.coordinator.data or {}
+            state = data.get("state")
+            if (
+                not self.coordinator.last_update_success
+                or data.get("available") is not True
+                or data.get("freshness") != "fresh"
+                or not isinstance(state, dict)
+                or not self.available
+            ):
+                raise HomeAssistantError("The selected device has no fresh state")
+            try:
+                command = self._command(state, int(value))
+                await self.coordinator.client.set_control(
+                    self.coordinator.device_id, command
+                )
+            except ApiError as error:
+                raise HomeAssistantError(str(error)) from error
+            try:
+                await self.coordinator.async_refresh()
+            except Exception as error:
+                raise HomeAssistantError(
+                    "Control was confirmed but state refresh failed"
+                ) from error
+            data = self.coordinator.data or {}
+            state = data.get("state") or {}
+            if (
+                not self.coordinator.last_update_success
+                or data.get("available") is not True
+                or data.get("freshness") != "fresh"
+                or state.get(control["state_key"]) != int(value)
+            ):
+                raise HomeAssistantError(
+                    "Control was confirmed but state refresh failed"
+                )
+
+    def _command(self, state: dict[str, Any], value: int) -> dict[str, Any]:
+        key = self._control["key"]
+        if key == "timer_duration":
+            return {
+                "kind": "quick_connect_timer_duration",
+                "minutes": value,
+            }
+        temperature = state.get("automatic_temperature_f")
+        humidity = state.get("automatic_humidity_percent")
+        if key == "automatic_temperature":
+            temperature = value
+        else:
+            humidity = value
+        if type(temperature) is not int or type(humidity) is not int:
+            raise HomeAssistantError("Current targets are missing or invalid")
+        return {
+            "kind": "quick_connect_targets",
+            "temperature_f": temperature,
+            "humidity_percent": humidity,
+        }
+
+    @property
+    def device_info(self) -> dr.DeviceInfo:
+        return dr.DeviceInfo(
+            identifiers={(DOMAIN, self._entry.unique_id)},
+            name=self.coordinator.device.get("name", "GAF Vent"),
+            manufacturer="GAF",
+            model="GAF QuickConnect Vent",
+        )
+
+
+def _valid_value(value: Any, minimum: int, maximum: int, step: int) -> bool:
+    return (
+        type(value) is int
+        and minimum <= value <= maximum
+        and (value - minimum) % step == 0
+    )

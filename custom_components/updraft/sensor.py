@@ -17,6 +17,7 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from . import UpdraftCoordinator
+from .client import entity_keys
 from .const import DOMAIN
 
 
@@ -82,8 +83,13 @@ SENSORS = (
         native_unit_of_measurement=UnitOfTime.MINUTES,
         entity_category=EntityCategory.DIAGNOSTIC,
     ),
+    UpdraftSensorDescription(
+        key="humidity_monitor",
+        name="Humidity monitoring",
+        value_key="humidity_monitor",
+        entity_category=EntityCategory.DIAGNOSTIC,
+    ),
 )
-
 
 async def async_setup_entry(
     hass: HomeAssistant,
@@ -91,8 +97,11 @@ async def async_setup_entry(
     async_add_entities: AddEntitiesCallback,
 ) -> None:
     coordinator: UpdraftCoordinator = hass.data[DOMAIN][entry.entry_id]
+    keys = entity_keys(coordinator.device).get("sensor", set())
     async_add_entities(
-        UpdraftSensor(coordinator, entry, description) for description in SENSORS
+        UpdraftSensor(coordinator, entry, description)
+        for description in SENSORS
+        if description.key in keys
     )
 
 
@@ -120,6 +129,7 @@ class UpdraftSensor(CoordinatorEntity[UpdraftCoordinator], SensorEntity):
     def available(self) -> bool:
         return bool(
             super().available
+            and self.coordinator.http_state_owned
             and self.coordinator.data
             and self.coordinator.data.get("available")
             and self.coordinator.data.get("state") is not None
@@ -139,8 +149,12 @@ class UpdraftSensor(CoordinatorEntity[UpdraftCoordinator], SensorEntity):
         state = self.coordinator.data.get("state") if self.coordinator.data else None
         return dr.DeviceInfo(
             identifiers={(DOMAIN, self._entry.unique_id)},
-            name="Updraft GAF Wi-Fi Vent",
+            name=self.coordinator.device.get("name", "GAF Vent"),
             manufacturer="GAF",
-            model="GAF Wi-Fi Vent",
+            model=(
+                "GAF QuickConnect Vent"
+                if self.coordinator.device["backend"] == "quick_connect"
+                else "GAF Wi-Fi Vent"
+            ),
             sw_version=state.get("firmware_version") if state else None,
         )

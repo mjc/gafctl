@@ -41,6 +41,34 @@ def legacy_state(**overrides):
     return state
 
 
+def quickconnect_state(**overrides):
+    state = {
+        "temperature_f": 101.4,
+        "humidity_percent": 37.0,
+        "settings": {
+            "backend": "quick_connect",
+            "mode": "automatic",
+            "automatic_temperature_f": 105,
+            "automatic_humidity_percent": 40,
+            "timer_duration_minutes": 60,
+            "humidity_monitor": True,
+        },
+        "estimated_running": True,
+        "diagnostics": {
+            "firmware_version": "1.2.3",
+            "signal_strength_raw": -45,
+            "verified_raw": True,
+        },
+        "provenance": {
+            "backend": "quick_connect",
+            "fetched_at_unix_ms": 2000,
+            "observed_at_unix_ms": None,
+        },
+    }
+    state.update(overrides)
+    return state
+
+
 def v2_state_payload(state=None, **overrides):
     payload = {
         "id": "configured",
@@ -150,12 +178,171 @@ class ApiClientTests(unittest.TestCase):
         self.assertNotIn("peripheral_id", devices[0])
         self.assertEqual(session.urls, ["http://127.0.0.1:8787/api/v2/devices"])
 
+    def test_inventory_keeps_capabilities_for_explicit_device_selection(self):
+        session = FakeSession(
+            [
+                FakeResponse(
+                    {
+                        "devices": [
+                            {
+                                "id": "ble-device",
+                                "name": "Legacy Vent",
+                                "backend": "legacy_ble",
+                                "capabilities": {
+                                    "read_state": True,
+                                    "commands": [
+                                        {"kind": "legacy_preset", "value": "timer_clear"}
+                                    ],
+                                },
+                            },
+                            {
+                                "id": "cloud-device",
+                                "name": "QuickConnect Vent",
+                                "backend": "quick_connect",
+                                "capabilities": {
+                                    "read_state": True,
+                                    "commands": [
+                                        {"kind": "quick_connect_mode"},
+                                        {"kind": "quick_connect_targets"},
+                                        {"kind": "quick_connect_timer_duration"},
+                                    ],
+                                },
+                            },
+                        ]
+                    }
+                )
+            ]
+        )
+
+        devices = asyncio.run(ApiClient("http://ha:8787", session).fetch_devices())
+
+        self.assertEqual(
+            CLIENT.select_device(devices, "cloud-device")["name"],
+            "QuickConnect Vent",
+        )
+        self.assertEqual(
+            CLIENT.entity_platforms(devices[1]),
+            {"sensor", "binary_sensor", "select", "number"},
+        )
+        self.assertEqual(
+            CLIENT.entity_keys(devices[1]),
+            {
+                "sensor": {
+                    "temperature",
+                    "humidity",
+                    "mode",
+                    "firmware_version",
+                    "humidity_monitor",
+                },
+                "binary_sensor": {"running_estimate"},
+                "select": {"mode"},
+                "number": {
+                    "automatic_temperature",
+                    "automatic_humidity",
+                    "timer_duration",
+                },
+            },
+        )
+        self.assertNotIn("number", CLIENT.entity_platforms(devices[0]))
+        self.assertEqual(
+            CLIENT.QUICKCONNECT_NUMBER_RANGES,
+            {
+                "automatic_temperature": (90, 120, 1),
+                "automatic_humidity": (30, 80, 1),
+                "timer_duration": (30, 360, 30),
+            },
+        )
+
+    def test_device_selection_never_falls_back_to_first_device(self):
+        devices = [
+            {"id": "first", "state": True, "backend": "legacy_ble", "commands": []},
+            {"id": "second", "state": True, "backend": "quick_connect", "commands": []},
+        ]
+
+        with self.assertRaisesRegex(ApiError, "selected device is unavailable"):
+            CLIENT.select_device(devices, "missing")
+
+    def test_maps_quickconnect_measurements_targets_mode_and_running_provenance(self):
+        client = ApiClient(
+            "http://ha:8787",
+            FakeSession(
+                [
+                    FakeResponse(
+                        v2_state_payload(
+                            quickconnect_state(), backend="quick_connect"
+                        )
+                    )
+                ]
+            ),
+        )
+
+        result = asyncio.run(client.fetch_state("configured"))
+
+        self.assertEqual(result["state"]["temperature_f"], 101.4)
+        self.assertEqual(result["state"]["automatic_temperature_f"], 105)
+        self.assertEqual(result["state"]["timer_duration_minutes"], 60)
+        self.assertEqual(result["state"]["mode"], "automatic")
+        self.assertEqual(result["state"]["humidity_monitor"], "on")
+        self.assertIs(result["state"]["running_estimate"], True)
+        self.assertEqual(result["state"]["running_estimate_provenance"], "inferred")
+        self.assertNotIn("timer_remaining_minutes", result["state"])
+        self.assertNotIn("signal_strength", result["state"])
+        self.assertNotIn("is_verified", result["state"])
+
+    def test_device_source_transition_removes_http_entity_ownership(self):
+        device = {
+            "id": "cloud-device",
+            "backend": "quick_connect",
+            "state": True,
+            "commands": [{"kind": "quick_connect_mode"}],
+            "state_source": "mqtt",
+            "command_source": "mqtt",
+        }
+
+        self.assertEqual(CLIENT.entity_platforms(device), set())
+
+    def test_mixed_sources_keep_only_the_http_owned_entity_sets(self):
+        device = {
+            "id": "cloud-device",
+            "backend": "quick_connect",
+            "state": True,
+            "commands": [
+                {"kind": "quick_connect_mode"},
+                {"kind": "quick_connect_targets"},
+                {"kind": "quick_connect_timer_duration"},
+            ],
+        }
+
+        self.assertEqual(
+            CLIENT.entity_platforms(device | {"state_source": "mqtt"}),
+            {"select", "number"},
+        )
+        self.assertEqual(
+            CLIENT.entity_platforms(device | {"command_source": "mqtt"}),
+            {"sensor", "binary_sensor"},
+        )
+
     def test_accepts_an_empty_device_inventory(self):
         client = ApiClient(
             "http://127.0.0.1:8787", FakeSession([FakeResponse({"devices": []})])
         )
 
         self.assertEqual(asyncio.run(client.fetch_devices()), [])
+
+    def test_rejects_duplicate_inventory_ids(self):
+        device = {
+            "id": "same",
+            "name": "Vent",
+            "backend": "quick_connect",
+            "capabilities": {"read_state": True, "commands": []},
+        }
+        client = ApiClient(
+            "http://ha:8787",
+            FakeSession([FakeResponse({"devices": [device, device]})]),
+        )
+
+        with self.assertRaisesRegex(ApiError, "duplicate device identifiers"):
+            asyncio.run(client.fetch_devices())
 
     def test_fetches_state_and_preserves_freshness(self):
         values = {
@@ -213,9 +400,8 @@ class ApiClientTests(unittest.TestCase):
         self.assertEqual(result["freshness"], "stale")
 
     def test_sends_only_supported_controls_and_requires_confirmation(self):
-        session = FakeSession(
-            [FakeResponse({"request_id": "$request_id", "status": "confirmed"})]
-        )
+        response = FakeResponse({"request_id": "$request_id", "status": "confirmed"})
+        session = FakeSession([response])
         client = ApiClient("http://127.0.0.1:8787", session)
 
         asyncio.run(client.set_control("configured", "timer_clear"))
@@ -234,6 +420,70 @@ class ApiClientTests(unittest.TestCase):
         self.assertEqual(session.posts[0]["timeout"], 90)
         with self.assertRaisesRegex(ApiError, "unsupported control preset"):
             asyncio.run(client.set_control("configured", "timer_999"))
+
+    def test_sends_quickconnect_mode_with_correlation_and_exact_command_shape(self):
+        response = FakeResponse({"request_id": "$request_id", "status": "confirmed"})
+        session = FakeSession([response])
+        client = ApiClient("http://ha:8787", session)
+
+        asyncio.run(
+            client.set_control("quick-device", {"kind": "quick_connect_mode", "mode": "manual"})
+        )
+
+        request = session.posts[0]["json"]
+        self.assertEqual(request["command"], {"kind": "quick_connect_mode", "mode": "manual"})
+        self.assertIsInstance(request["request_id"], str)
+        self.assertEqual(request["request_id"], response.request_id)
+
+    def test_rejects_invalid_quickconnect_values_before_post(self):
+        session = FakeSession([])
+        client = ApiClient("http://ha:8787", session)
+
+        for command in (
+            {"kind": "quick_connect_targets", "temperature_f": 90.5, "humidity_percent": 40},
+            {"kind": "quick_connect_targets", "temperature_f": 121, "humidity_percent": 40},
+            {"kind": "quick_connect_timer_duration", "minutes": 45},
+        ):
+            with self.subTest(command=command), self.assertRaises(ApiError):
+                asyncio.run(client.set_control("quick-device", command))
+        self.assertEqual(session.posts, [])
+
+    def test_sends_valid_quickconnect_targets_and_duration_as_typed_commands(self):
+        responses = [
+            FakeResponse({"request_id": "$request_id", "status": "confirmed"})
+            for _ in range(2)
+        ]
+        session = FakeSession(responses)
+        client = ApiClient("http://ha:8787", session)
+
+        asyncio.run(
+            client.set_control(
+                "quick-device",
+                {
+                    "kind": "quick_connect_targets",
+                    "temperature_f": 120,
+                    "humidity_percent": 80,
+                },
+            )
+        )
+        asyncio.run(
+            client.set_control(
+                "quick-device",
+                {"kind": "quick_connect_timer_duration", "minutes": 360},
+            )
+        )
+
+        self.assertEqual(
+            [post["json"]["command"] for post in session.posts],
+            [
+                {
+                    "kind": "quick_connect_targets",
+                    "temperature_f": 120,
+                    "humidity_percent": 80,
+                },
+                {"kind": "quick_connect_timer_duration", "minutes": 360},
+            ],
+        )
 
     def test_rejects_unconfirmed_control_readback(self):
         client = ApiClient(

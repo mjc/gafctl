@@ -5,15 +5,21 @@
         "title": "Connect to Updraft",
         "description": "Enter the local address of the Updraft API.",
         "data": { "api_url": "API address" }
+      },
+      "device": {
+        "title": "Choose a device",
+        "description": "Select the device this Home Assistant entry will own.",
+        "data": { "device_id": "Device" }
       }
     },
     "error": {
       "invalid_url": "Enter a valid HTTP or HTTPS address.",
       "cannot_connect": "Cannot reach the Updraft API or its response was invalid.",
-      "no_device": "The API did not report a BLE device with supported controls."
+      "no_device": "The API did not report an unconfigured device owned by HTTP."
     },
     "abort": {
-      "already_configured": "Updraft is already configured."
+      "already_configured": "This device is already configured.",
+      "device_unavailable": "The selected device is no longer available."
     }
   }
 }

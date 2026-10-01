@@ -56,9 +56,18 @@ class ApiClient:
                 and isinstance(command.get("kind"), str)
                 for command in device["capabilities"]["commands"]
             )
+            or any(
+                not isinstance(device.get(source), str)
+                or device[source] not in {"http", "mqtt"}
+                for source in ("state_source", "command_source")
+                if source in device
+            )
             for device in devices
         ):
             raise ApiError("proxy returned invalid device data")
+        identifiers = [device["id"] for device in devices]
+        if len(identifiers) != len(set(identifiers)):
+            raise ApiError("proxy returned duplicate device identifiers")
         return [
             {
                 "id": device["id"],
@@ -66,6 +75,9 @@ class ApiClient:
                 "state": device["capabilities"]["read_state"],
                 "backend": device["backend"],
                 "commands": device["capabilities"]["commands"],
+                "capabilities": device["capabilities"],
+                "state_source": device.get("state_source", "http"),
+                "command_source": device.get("command_source", "http"),
             }
             for device in devices
         ]
@@ -122,12 +134,11 @@ class ApiClient:
             "state": values,
         }
 
-    async def set_control(self, device_id: str, preset: str) -> None:
-        """Send one verified preset and reject mismatched or unverified readback."""
+    async def set_control(self, device_id: str, command: str | Mapping[str, Any]) -> None:
+        """Send one typed command and require a matching confirmed response."""
         if not _valid_identifier(device_id):
             raise ApiError("invalid configured device")
-        if preset not in CONTROL_PRESETS:
-            raise ApiError("unsupported control preset")
+        command = _control_command(command)
         request_id = uuid4().hex
         url = urljoin(self._base_url, f"api/v2/devices/{device_id}/control")
         try:
@@ -136,7 +147,7 @@ class ApiClient:
                 json={
                     "request_id": request_id,
                     "issued_at_unix_ms": time.time_ns() // 1_000_000,
-                    "command": {"kind": "legacy_preset", "preset": preset},
+                    "command": command,
                 },
                 timeout=90,
             ) as response:
@@ -177,6 +188,128 @@ CONTROL_PRESETS = frozenset(
         "timer_one_minute",
     }
 )
+
+QUICKCONNECT_MODES = frozenset({"off", "automatic", "timer", "manual"})
+QUICKCONNECT_NUMBER_RANGES = {
+    "automatic_temperature": (90, 120, 1),
+    "automatic_humidity": (30, 80, 1),
+    "timer_duration": (30, 360, 30),
+}
+QUICKCONNECT_SENSOR_KEYS = {
+    "temperature",
+    "humidity",
+    "mode",
+    "firmware_version",
+    "humidity_monitor",
+}
+LEGACY_SENSOR_KEYS = {
+    "temperature",
+    "humidity",
+    "mode",
+    "controller_fan_flag",
+    "firmware_version",
+    "automatic_temperature_threshold",
+    "automatic_humidity_threshold",
+    "timer_remaining",
+}
+
+
+def select_device(devices: list[dict[str, Any]], device_id: str) -> dict[str, Any]:
+    """Resolve the explicitly selected HTTP-owned device from current inventory."""
+    device = next((item for item in devices if item["id"] == device_id), None)
+    if device is None or not entity_platforms(device):
+        raise ApiError("selected device is unavailable")
+    return device
+
+
+def entity_platforms(device: Mapping[str, Any]) -> set[str]:
+    """Return HA platforms owned by this adapter for the device capabilities."""
+    return set(entity_keys(device))
+
+
+def entity_keys(device: Mapping[str, Any]) -> dict[str, set[str]]:
+    """Project device ownership and capabilities into exact HA entity keys."""
+    capabilities = device.get("capabilities")
+    commands = device.get("commands")
+    if isinstance(capabilities, Mapping):
+        commands = capabilities.get("commands")
+    command_kinds = {
+        command.get("kind")
+        for command in commands or []
+        if isinstance(command, Mapping)
+    }
+    backend = device.get("backend")
+    has_state = device.get("state") is True
+    state_owned = device.get("state_source", "http") == "http"
+    commands_owned = device.get("command_source", "http") == "http"
+    entities: dict[str, set[str]] = {}
+    if state_owned and has_state:
+        entities["sensor"] = (
+            set(LEGACY_SENSOR_KEYS)
+            if backend == "legacy_ble"
+            else set(QUICKCONNECT_SENSOR_KEYS)
+        )
+        if backend == "quick_connect":
+            entities["binary_sensor"] = {"running_estimate"}
+    if not commands_owned:
+        return entities
+    if backend == "legacy_ble" and "legacy_preset" in command_kinds:
+        entities["select"] = {"automatic_thresholds", "timer"}
+    if backend == "quick_connect":
+        if "quick_connect_mode" in command_kinds:
+            entities["select"] = {"mode"}
+        number_keys = {
+            key
+            for key, capability in (
+                ("automatic_temperature", "quick_connect_targets"),
+                ("automatic_humidity", "quick_connect_targets"),
+                ("timer_duration", "quick_connect_timer_duration"),
+            )
+            if capability in command_kinds
+        }
+        if number_keys:
+            entities["number"] = number_keys
+    return entities
+
+
+def _control_command(command: str | Mapping[str, Any]) -> dict[str, Any]:
+    if isinstance(command, str):
+        if command not in CONTROL_PRESETS:
+            raise ApiError("unsupported control preset")
+        return {"kind": "legacy_preset", "preset": command}
+    if not isinstance(command, Mapping):
+        raise ApiError("unsupported control command")
+    kind = command.get("kind")
+    if kind == "quick_connect_mode" and set(command) == {"kind", "mode"}:
+        if isinstance(command["mode"], str) and command["mode"] in QUICKCONNECT_MODES:
+            return dict(command)
+    if kind == "quick_connect_targets" and set(command) == {
+        "kind",
+        "temperature_f",
+        "humidity_percent",
+    }:
+        temperature = command["temperature_f"]
+        humidity = command["humidity_percent"]
+        temperature_min, temperature_max, _ = QUICKCONNECT_NUMBER_RANGES[
+            "automatic_temperature"
+        ]
+        humidity_min, humidity_max, _ = QUICKCONNECT_NUMBER_RANGES[
+            "automatic_humidity"
+        ]
+        if _integer_in_range(temperature, temperature_min, temperature_max) and (
+            _integer_in_range(humidity, humidity_min, humidity_max)
+        ):
+            return dict(command)
+    if kind == "quick_connect_timer_duration" and set(command) == {"kind", "minutes"}:
+        duration = command["minutes"]
+        minimum, maximum, step = QUICKCONNECT_NUMBER_RANGES["timer_duration"]
+        if _integer_in_range(duration, minimum, maximum) and duration % step == 0:
+            return dict(command)
+    raise ApiError("invalid QuickConnect control command")
+
+
+def _integer_in_range(value: Any, minimum: int, maximum: int) -> bool:
+    return type(value) is int and minimum <= value <= maximum
 
 
 def _control_error(payload: Any, status: int) -> str:
@@ -247,6 +380,13 @@ def _valid_state(state: Mapping[str, Any], backend: str) -> bool:
                 "automatic_humidity_percent",
                 "timer_duration_minutes",
             )
+        ) and (
+            settings.get("humidity_monitor") is None
+            or isinstance(settings.get("humidity_monitor"), bool)
+        ) and (
+            diagnostics is None
+            or diagnostics.get("firmware_version") is None
+            or isinstance(diagnostics.get("firmware_version"), str)
         )
     if fan_on is not None and not isinstance(fan_on, bool):
         return False
@@ -286,6 +426,26 @@ def _home_assistant_values(state: Mapping[str, Any], backend: str) -> dict[str, 
             ),
             timer_remaining_minutes=settings.get("timer_remaining_minutes"),
             timer_original_minutes=settings.get("timer_original_minutes"),
+        )
+    else:
+        diagnostics = state.get("diagnostics") or {}
+        values.update(
+            mode=settings["mode"],
+            automatic_temperature_f=settings.get("automatic_temperature_f"),
+            automatic_humidity_percent=settings.get("automatic_humidity_percent"),
+            timer_duration_minutes=settings.get("timer_duration_minutes"),
+            humidity_monitor=(
+                "on"
+                if settings.get("humidity_monitor") is True
+                else "off"
+                if settings.get("humidity_monitor") is False
+                else None
+            ),
+            running_estimate=state.get("estimated_running"),
+            running_estimate_provenance=(
+                "inferred" if state.get("estimated_running") is not None else None
+            ),
+            firmware_version=diagnostics.get("firmware_version"),
         )
     return values
 

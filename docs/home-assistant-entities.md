@@ -6,6 +6,8 @@ Updraft supports HTTP and MQTT for multiple registered devices. Each transport e
 
 Explicit MQTT discovery publishes the configured BLE entities. QuickConnect discovery follows each device's independently selected state and command sources; those sources default to HTTP.
 
+The Updraft Home Assistant integration creates one config entry per selected device. Add Updraft again to add another device. State entities follow each device's `state_source`; controls follow its `command_source`. HTTP only creates entities for the side it owns, so mixed ownership exposes only the HTTP-owned state or controls and does not duplicate MQTT entities. Existing legacy entries keep their unique IDs during migration, and new entries use the local device ID shared with MQTT discovery.
+
 MQTT state publishing can run beside the HTTP API without discovery. MQTT discovery is optional and follows the selected MQTT source. The legacy BLE topics remain aliases routed through the same control owner, so they do not create another device or submit commands twice.
 
 ## State and availability
@@ -27,6 +29,8 @@ Controls share a per-device transaction lock with state polling. Updraft does no
 MQTT results include a request ID and are not retained. Updraft caches the 64 most recent requests per local device ID. While a result is cached, repeating its ID with the same complete typed command returns that result; reusing it for a different command is rejected. An evicted ID can execute again if its timestamp is still fresh. The cache does not survive a process restart.
 
 The MQTT preset select resets to unknown when the current settings do not match a supported preset. An expired one-minute timer is not reported as an active one-minute preset.
+
+For QuickConnect over HTTP, Home Assistant exposes current temperature and humidity as measurements, a mode select, and target temperature, target humidity, and configured timer duration numbers when those commands are advertised. The number limits are 90–120 °F by 1 °F, 30–80% by 1%, and 30–360 minutes by 30 minutes. Configured duration is not a remaining countdown. Running estimate is a diagnostic binary sensor marked with inferred provenance. Unknown or stale settings remain unavailable; signal strength and verification flags are not presented as connectivity proof.
 
 ## Privacy
 
