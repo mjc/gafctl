@@ -10,7 +10,7 @@
     "error": {
       "invalid_url": "Enter a valid HTTP or HTTPS address.",
       "cannot_connect": "Cannot reach the Updraft API or its response was invalid.",
-      "no_device": "The API did not report a configured device with state support."
+      "no_device": "The API did not report a BLE device with supported controls."
     },
     "abort": {
       "already_configured": "Updraft is already configured."

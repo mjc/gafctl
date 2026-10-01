@@ -55,7 +55,7 @@ pub enum EntitySource {
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum DeviceCommand {
     LegacyPreset {
         preset: ControlPreset,

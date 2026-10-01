@@ -16,6 +16,44 @@ ApiError = CLIENT.ApiError
 normalize_api_url = CLIENT.normalize_api_url
 
 
+def legacy_state(**overrides):
+    state = {
+        "temperature_f": 98.6,
+        "humidity_percent": 42.1,
+        "settings": {
+            "backend": "legacy_ble",
+            "mode": "automatic",
+            "controller_fan_on": False,
+            "automatic_temperature_tenths_f": 1050,
+            "automatic_humidity_tenths_percent": 300,
+            "timer_remaining_minutes": 0,
+            "timer_original_minutes": 0,
+        },
+        "estimated_running": None,
+        "diagnostics": {"firmware_version": "3.0.0"},
+        "provenance": {
+            "backend": "legacy_ble",
+            "fetched_at_unix_ms": 2000,
+            "observed_at_unix_ms": 1234,
+        },
+    }
+    state.update(overrides)
+    return state
+
+
+def v2_state_payload(state=None, **overrides):
+    payload = {
+        "id": "configured",
+        "backend": "legacy_ble",
+        "available": state is not None,
+        "inventory_status": "present" if state is not None else "unknown",
+        "last_error": None,
+        "state": state,
+    }
+    payload.update(overrides)
+    return payload
+
+
 class FakeResponse:
     def __init__(self, payload, status=200):
         self.payload = payload
@@ -28,6 +66,8 @@ class FakeResponse:
         return None
 
     async def json(self):
+        if isinstance(self.payload, dict) and self.payload.get("request_id") == "$request_id":
+            return self.payload | {"request_id": self.request_id}
         return self.payload
 
 
@@ -44,7 +84,9 @@ class FakeSession:
     def post(self, url, **kwargs):
         self.urls.append(url)
         self.posts.append(kwargs)
-        return self.responses.pop(0)
+        response = self.responses.pop(0)
+        response.request_id = kwargs["json"]["request_id"]
+        return response
 
 
 class FailedSession:
@@ -79,7 +121,7 @@ class ApiClientTests(unittest.TestCase):
         with self.assertRaises(ApiError):
             normalize_api_url("http://user:secret@127.0.0.1:8787")
 
-    def test_discovers_configured_device_without_using_ble_identifier(self):
+    def test_discovers_devices_without_returning_private_identifiers(self):
         session = FakeSession(
             [
                 FakeResponse(
@@ -88,7 +130,11 @@ class ApiClientTests(unittest.TestCase):
                             {
                                 "id": "configured",
                                 "name": "GAF Wi-Fi Vent",
-                                "state": True,
+                                "backend": "legacy_ble",
+                                "capabilities": {
+                                    "read_state": True,
+                                    "commands": [{"kind": "legacy_preset", "value": "timer_clear"}],
+                                },
                                 "peripheral_id": "private-peripheral-id",
                             }
                         ]
@@ -102,7 +148,14 @@ class ApiClientTests(unittest.TestCase):
 
         self.assertEqual(devices[0]["id"], "configured")
         self.assertNotIn("peripheral_id", devices[0])
-        self.assertEqual(session.urls, ["http://127.0.0.1:8787/api/v1/devices"])
+        self.assertEqual(session.urls, ["http://127.0.0.1:8787/api/v2/devices"])
+
+    def test_accepts_an_empty_device_inventory(self):
+        client = ApiClient(
+            "http://127.0.0.1:8787", FakeSession([FakeResponse({"devices": []})])
+        )
+
+        self.assertEqual(asyncio.run(client.fetch_devices()), [])
 
     def test_fetches_state_and_preserves_freshness(self):
         values = {
@@ -116,15 +169,10 @@ class ApiClientTests(unittest.TestCase):
             "timer_remaining_minutes": 0,
             "timer_original_minutes": 0,
         }
-        payload = {
-            "device_id": "configured",
-            "available": True,
-            "freshness": "fresh",
-            "observed_at_unix_ms": 1234,
-            "last_error": None,
-            "state": values | {"identity_suffix": "private-suffix"},
-            "peripheral_id": "private-peripheral-id",
-        }
+        payload = v2_state_payload(
+            legacy_state() | {"identity_suffix": "private-suffix"},
+            peripheral_id="private-peripheral-id",
+        )
         session = FakeSession([FakeResponse(payload)])
         client = ApiClient("http://127.0.0.1:8787/", session)
 
@@ -136,7 +184,7 @@ class ApiClientTests(unittest.TestCase):
         self.assertNotIn("identity_suffix", result["state"])
         self.assertEqual(
             session.urls,
-            ["http://127.0.0.1:8787/api/v1/devices/configured/state"],
+            ["http://127.0.0.1:8787/api/v2/devices/configured/state"],
         )
 
     def test_rejects_path_injection_in_device_ids(self):
@@ -147,10 +195,10 @@ class ApiClientTests(unittest.TestCase):
 
     def test_preserves_stale_unavailable_state_without_inventing_values(self):
         payload = {
-            "device_id": "configured",
+            "id": "configured",
+            "backend": "legacy_ble",
             "available": False,
-            "freshness": "stale",
-            "observed_at_unix_ms": 1234,
+            "inventory_status": "present",
             "last_error": "BLE unavailable",
             "state": None,
         }
@@ -166,7 +214,7 @@ class ApiClientTests(unittest.TestCase):
 
     def test_sends_only_supported_controls_and_requires_confirmation(self):
         session = FakeSession(
-            [FakeResponse({"success": True, "preset": "timer_clear"})]
+            [FakeResponse({"request_id": "$request_id", "status": "confirmed"})]
         )
         client = ApiClient("http://127.0.0.1:8787", session)
 
@@ -174,9 +222,15 @@ class ApiClientTests(unittest.TestCase):
 
         self.assertEqual(
             session.urls,
-            ["http://127.0.0.1:8787/api/v1/devices/configured/control"],
+            ["http://127.0.0.1:8787/api/v2/devices/configured/control"],
         )
-        self.assertEqual(session.posts[0]["json"], {"preset": "timer_clear"})
+        request = session.posts[0]["json"]
+        self.assertEqual(
+            request["command"],
+            {"kind": "legacy_preset", "preset": "timer_clear"},
+        )
+        self.assertTrue(request["request_id"])
+        self.assertIsInstance(request["issued_at_unix_ms"], int)
         self.assertEqual(session.posts[0]["timeout"], 90)
         with self.assertRaisesRegex(ApiError, "unsupported control preset"):
             asyncio.run(client.set_control("configured", "timer_999"))
@@ -187,7 +241,12 @@ class ApiClientTests(unittest.TestCase):
             FakeSession(
                 [
                     FakeResponse(
-                        {"success": False, "message": "readback differed"}, status=502
+                        {
+                            "request_id": "ignored",
+                            "status": "unconfirmed",
+                            "message": "readback differed",
+                        },
+                        status=502,
                     )
                 ]
             ),
@@ -202,7 +261,7 @@ class ApiClientTests(unittest.TestCase):
             FakeSession(
                 [
                     FakeResponse(
-                        {"success": True, "preset": "timer_one_minute"}
+                        {"request_id": "wrong", "status": "confirmed"}
                     )
                 ]
             ),
@@ -213,23 +272,19 @@ class ApiClientTests(unittest.TestCase):
 
 
     def test_rejects_inconsistent_or_invalid_proxy_responses(self):
-        invalid = {
-            "device_id": "configured",
-            "freshness": "fresh",
-            "available": False,
-            "state": None,
-        }
+        invalid = v2_state_payload(legacy_state(), available=False)
         client = ApiClient("http://127.0.0.1:8787", FakeSession([FakeResponse(invalid)]))
 
         with self.assertRaisesRegex(ApiError, "inconsistent"):
             asyncio.run(client.fetch_state("configured"))
 
-    def test_rejects_non_string_freshness_values(self):
-        for freshness in ([], {}):
-            with self.subTest(freshness=freshness):
+    def test_rejects_invalid_inventory_status(self):
+        for inventory_status in ([], {}):
+            with self.subTest(inventory_status=inventory_status):
                 payload = {
-                    "device_id": "configured",
-                    "freshness": freshness,
+                    "id": "configured",
+                    "backend": "legacy_ble",
+                    "inventory_status": inventory_status,
                     "available": False,
                     "state": None,
                 }
@@ -241,12 +296,7 @@ class ApiClientTests(unittest.TestCase):
                     asyncio.run(client.fetch_state("configured"))
 
     def test_rejects_malformed_sensor_values(self):
-        payload = {
-            "device_id": "configured",
-            "freshness": "fresh",
-            "available": True,
-            "state": {"temperature_f": "unknown"},
-        }
+        payload = v2_state_payload(legacy_state(temperature_f="unknown"))
         client = ApiClient(
             "http://127.0.0.1:8787", FakeSession([FakeResponse(payload)])
         )
@@ -262,24 +312,12 @@ class ApiClientTests(unittest.TestCase):
             ("timer_remaining_minutes", 10**400),
         ):
             with self.subTest(field=field, value=type(value).__name__):
-                values = {
-                    "firmware_version": "3.0.0",
-                    "mode": "automatic",
-                    "controller_fan_flag": "off",
-                    "temperature_f": 98.6,
-                    "humidity_percent": 42.1,
-                    "automatic_temperature_threshold_f": 105.0,
-                    "automatic_humidity_threshold_percent": 30.0,
-                    "timer_remaining_minutes": 0,
-                    "timer_original_minutes": 0,
-                }
-                values[field] = value
-                payload = {
-                    "device_id": "configured",
-                    "freshness": "fresh",
-                    "available": True,
-                    "state": values,
-                }
+                state = legacy_state()
+                if field in {"temperature_f", "humidity_percent"}:
+                    state[field] = value
+                elif field == "timer_remaining_minutes":
+                    state["settings"][field] = value
+                payload = v2_state_payload(state)
                 client = ApiClient(
                     "http://127.0.0.1:8787",
                     FakeSession([FakeResponse(payload)]),

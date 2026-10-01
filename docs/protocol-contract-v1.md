@@ -52,9 +52,9 @@ The experimental BLE probe has a timer-write option, but that CLI capability doe
 
 ## Application identity and backend boundary
 
-The legacy BLE service keeps the stable local ID `configured` and preserves its v1 response fields, supported presets, and Home Assistant entity identifiers. The BLE peripheral identifier remains local and is never returned by the API.
+The BLE service uses the stable local ID `configured`. The BLE peripheral identifier remains local and is never returned by the API. HTTP clients use the normalized v2 device and state schemas in [the HTTP API guide](http-api.md).
 
-The service can start without `UPDRAFT_DEVICE_ID`. In that mode, v1 discovery returns an empty inventory, and the legacy configured state and control routes return 404. Cloud devices are not substituted for `configured`; their local IDs are generated independently and mapped to the private `(account, provider ID)` identity in the file selected by `UPDRAFT_IDENTITY_STORE`. The mapping is account-scoped, survives restarts and discovery reordering, and is not included in public device descriptions. New mapping files are created with owner-only permissions. Numeric provider ID `0` is valid.
+The service can start without `UPDRAFT_DEVICE_ID`. In that mode the device inventory is empty and unknown local IDs return 404. Cloud devices are not substituted for `configured`; their local IDs are generated independently and mapped to the private `(account, provider ID)` identity in the file selected by `UPDRAFT_IDENTITY_STORE`. The mapping is account-scoped, survives restarts and discovery reordering, and is not included in public device descriptions. New mapping files are created with owner-only permissions. Numeric provider ID `0` is valid.
 
 Application state uses optional measurements, backend-specific settings, capabilities, and source provenance. Each registered local device owns its state and command transaction lock. State and command entity sources are selectable independently per device so HTTP and MQTT do not create duplicate entities or route commands to another device. QuickConnect devices begin read-only; no cloud controls are enabled by this application-model change.
 

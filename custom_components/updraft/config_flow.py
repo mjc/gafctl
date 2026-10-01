@@ -24,7 +24,20 @@ class UpdraftConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 client = ApiClient(api_url, async_get_clientsession(self.hass))
                 try:
                     devices = await client.fetch_devices()
-                    device = next((item for item in devices if item["state"]), None)
+                    device = next(
+                        (
+                            item
+                            for item in devices
+                            if item["state"]
+                            and item["backend"] == "legacy_ble"
+                            and any(
+                                command.get("kind") == "legacy_preset"
+                                for command in item["commands"]
+                                if isinstance(command, dict)
+                            )
+                        ),
+                        None,
+                    )
                     if device is None:
                         errors["base"] = "no_device"
                     else:

@@ -13,7 +13,7 @@ The executable is `target/release/updraft`.
 
 ## Configure
 
-To enable the legacy BLE backend, set `UPDRAFT_DEVICE_ID` or pass `--device-id` in local service configuration. Keep the peripheral identifier out of tracked files. Without a BLE identifier the service starts without the legacy `configured` device; v1 discovery is empty and the configured state/control routes return 404.
+To enable the BLE backend, set `UPDRAFT_DEVICE_ID` or pass `--device-id` in local service configuration. Keep the peripheral identifier out of tracked files. Without a BLE identifier the service starts with an empty inventory. The v2 state and control routes return 404 for unregistered local IDs. See the [HTTP API](http-api.md) for request and response schemas.
 
 Set `UPDRAFT_IDENTITY_STORE` to a private local path when persisting cloud account/provider identity mappings. Newly created identity files use owner-only permissions. This setting alone does not enable cloud authentication or polling. Cloud credentials and provider identifiers must remain in local configuration, not tracked files or public API payloads.
 
@@ -47,13 +47,13 @@ Updraft's account must not publish commands. Avoid a publish grant for `updraft/
 
 The native HTTP integration is the default entity source. MQTT can publish state and availability without discovery. To use MQTT entities, enable discovery and remove the HTTP integration entry for the same device. Do not enable both entity sources at once.
 
-HTTP state includes availability, freshness, observation time, query errors, and the latest confirmed values. `/health` reports process health only; it does not confirm BLE availability.
+HTTP v2 state includes availability, inventory status, optional measurements and settings, diagnostics, and state provenance. `/health` reports process health only; it does not confirm device availability.
 
 MQTT publishes retained state and availability. The broker's last will marks Updraft offline after an unexpected disconnect. On reconnect, Updraft republishes discovery when enabled, availability, and the latest state.
 
 ## Controls
 
-HTTP and MQTT accept the same fixed control presets. They do not accept arbitrary threshold, timer, mode, or power values.
+HTTP v2 accepts strict tagged device commands listed by each device's capabilities. MQTT accepts its existing fixed BLE presets. Neither transport accepts arbitrary unsupported values.
 
 MQTT control requests use QoS 1 and must be non-retained JSON with a request ID, a Unix timestamp in milliseconds, and a supported preset. Updraft rejects malformed, stale, future-dated, retained, and unsupported requests before BLE access. The request queue is bounded. Controls share the BLE transaction lock with polling and report success only after acknowledgement and matching device readback.
 

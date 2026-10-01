@@ -1,6 +1,6 @@
 use std::{
     sync::Arc,
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use serde::{Deserialize, Deserializer, Serialize, de};
@@ -64,16 +64,14 @@ impl<'de> Deserialize<'de> for CommandId {
             where
                 E: de::Error,
             {
-                CommandId::from_str(value)
-                    .ok_or_else(|| E::custom("invalid MQTT control request ID"))
+                CommandId::from_str(value).ok_or_else(|| E::custom("invalid control request ID"))
             }
 
             fn visit_string<E>(self, value: String) -> Result<Self::Value, E>
             where
                 E: de::Error,
             {
-                CommandId::from_string(value)
-                    .ok_or_else(|| E::custom("invalid MQTT control request ID"))
+                CommandId::from_string(value).ok_or_else(|| E::custom("invalid control request ID"))
             }
         }
 
@@ -120,10 +118,26 @@ impl ControlRequest {
     }
 
     fn is_fresh_at(&self, now_unix_ms: u64) -> bool {
-        match self.issued_at_unix_ms.checked_sub(now_unix_ms) {
-            Some(future_ms) => future_ms <= MAX_COMMAND_CLOCK_SKEW_MS,
-            None => now_unix_ms - self.issued_at_unix_ms <= MAX_COMMAND_AGE_MS,
-        }
+        is_fresh_at(
+            self.issued_at_unix_ms,
+            now_unix_ms,
+            Duration::from_millis(MAX_COMMAND_AGE_MS),
+            Duration::from_millis(MAX_COMMAND_CLOCK_SKEW_MS),
+        )
+    }
+}
+
+pub(crate) fn is_fresh_at(
+    issued_at_unix_ms: u64,
+    now_unix_ms: u64,
+    max_age: Duration,
+    max_future_skew: Duration,
+) -> bool {
+    let max_age_ms = u64::try_from(max_age.as_millis()).unwrap_or(u64::MAX);
+    let max_future_skew_ms = u64::try_from(max_future_skew.as_millis()).unwrap_or(u64::MAX);
+    match issued_at_unix_ms.checked_sub(now_unix_ms) {
+        Some(future_ms) => future_ms <= max_future_skew_ms,
+        None => now_unix_ms - issued_at_unix_ms <= max_age_ms,
     }
 }
 

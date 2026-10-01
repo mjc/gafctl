@@ -23,7 +23,7 @@ devenv allow
 devenv shell -- cargo run -- serve
 ```
 
-For the legacy BLE controller, add `--device-id <peripheral-id>` or set `UPDRAFT_DEVICE_ID`. Without BLE configured, the service starts with an empty v1 inventory; the legacy `configured` state and control routes return 404. The API binds to loopback by default. Remote access requires `--allow-remote` and suitable access controls. The API does not provide authentication.
+For the BLE controller, add `--device-id <peripheral-id>` or set `UPDRAFT_DEVICE_ID`. Without BLE configured, the service starts with an empty device inventory. The API binds to loopback by default. Remote access requires `--allow-remote` and suitable access controls. The API does not provide authentication. See the [HTTP API](docs/http-api.md) for the v2 contract.
 
 Set `UPDRAFT_IDENTITY_STORE` to a private local file path when cloud-device identity persistence is configured. New identity files are created with owner-only permissions. Provider and account identifiers stay in that file and do not appear in public device payloads. This path alone does not enable cloud authentication or polling.
 
