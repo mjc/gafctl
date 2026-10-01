@@ -12,6 +12,7 @@
     cargo-machete
     bacon
     pkg-config
+    mosquitto
   ] ++ lib.optionals pkgs.stdenv.isLinux [
     dbus
   ];

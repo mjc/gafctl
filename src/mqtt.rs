@@ -1198,10 +1198,132 @@ fn discovery_device() -> Value {
 
 #[cfg(test)]
 mod tests {
-    use std::time::SystemTime;
+    use std::{
+        process::{Child, Command, Stdio},
+        time::SystemTime,
+    };
 
     use super::*;
     use crate::control::unix_millis;
+    use tokio::{
+        net::{TcpListener, TcpStream},
+        sync::mpsc,
+        time::sleep,
+    };
+
+    struct NativeBroker {
+        process: Child,
+        port: u16,
+    }
+
+    impl NativeBroker {
+        async fn restart(&mut self) {
+            let _ = self.process.kill();
+            let _ = self.process.wait();
+            sleep(Duration::from_millis(1_200)).await;
+            self.process = launch_native_broker(self.port);
+            wait_for_native_broker(self.port).await;
+        }
+    }
+
+    impl Drop for NativeBroker {
+        fn drop(&mut self) {
+            let _ = self.process.kill();
+            let _ = self.process.wait();
+        }
+    }
+
+    async fn start_native_broker() -> NativeBroker {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+
+        let broker = NativeBroker {
+            process: launch_native_broker(port),
+            port,
+        };
+        wait_for_native_broker(port).await;
+        broker
+    }
+
+    fn launch_native_broker(port: u16) -> Child {
+        Command::new("mosquitto")
+            .args(["-p", &port.to_string()])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("devenv supplies the native Mosquitto broker")
+    }
+
+    async fn wait_for_native_broker(port: u16) {
+        let attempts = stream::iter(0..50)
+            .then(|_| async {
+                sleep(Duration::from_millis(20)).await;
+                TcpStream::connect(("127.0.0.1", port)).await.ok()
+            })
+            .filter_map(future::ready);
+        tokio::pin!(attempts);
+        let ready = attempts.next().await;
+        assert!(ready.is_some(), "native Mosquitto did not start");
+        drop(ready);
+    }
+
+    fn test_mqtt_options(client_id: &str, port: u16) -> MqttOptions {
+        let mut options = MqttOptions::new(client_id, "127.0.0.1", port);
+        options.set_keep_alive(Duration::from_secs(5));
+        options.set_credentials("updraft-test", "updraft-test");
+        options
+    }
+
+    fn observed_client(
+        client_id: &str,
+        port: u16,
+    ) -> (AsyncClient, mpsc::UnboundedReceiver<Publish>) {
+        let (client, eventloop) = AsyncClient::new(test_mqtt_options(client_id, port), 16);
+        let (messages, received) = mpsc::unbounded_channel();
+        tokio::spawn(
+            mqtt_events(eventloop)
+                .filter_map(|event| async move { event.ok() })
+                .filter_map(|event| async move {
+                    match event {
+                        Event::Incoming(Packet::Publish(message)) => Some(message),
+                        _ => None,
+                    }
+                })
+                .for_each(move |message| {
+                    let _ = messages.send(message);
+                    future::ready(())
+                }),
+        );
+        (client, received)
+    }
+
+    async fn receive_topic(
+        received: &mut mpsc::UnboundedReceiver<Publish>,
+        topic: &'static str,
+    ) -> Publish {
+        let messages = stream::unfold(received, |received| async {
+            received.recv().await.map(|message| (message, received))
+        })
+        .filter(|message| future::ready(message.topic == topic));
+        tokio::pin!(messages);
+        timeout(Duration::from_secs(15), messages.next())
+            .await
+            .expect("timed out waiting for MQTT publication")
+            .expect("observer stream ended")
+    }
+
+    fn mqtt_device(id: &str) -> DeviceDescriptor {
+        DeviceDescriptor {
+            id: DeviceId::parse(id.to_owned()).unwrap(),
+            name: format!("Device {id}"),
+            backend: DeviceBackend::QuickConnect,
+            capabilities: crate::device::DeviceCapabilities::quickconnect_with_controls(),
+            state_source: EntitySource::Mqtt,
+            command_source: EntitySource::Mqtt,
+        }
+    }
 
     #[test]
     fn control_topics_route_by_local_device_id_and_accept_the_legacy_alias() {
@@ -1699,5 +1821,315 @@ mod tests {
                 .iter()
                 .any(|topic| { *topic == "homeassistant/select/updraft/control/config" })
         );
+    }
+
+    #[tokio::test]
+    async fn native_broker_retains_device_state_and_discovery_and_applies_source_tombstones() {
+        let broker = start_native_broker().await;
+        let (observer, mut received) = observed_client("mqtt-observer", broker.port);
+        observer
+            .subscribe(PROCESS_AVAILABILITY_TOPIC, QoS::AtLeastOnce)
+            .await
+            .unwrap();
+
+        let mut device = mqtt_device("qc-one");
+        let other_device = mqtt_device("qc-two");
+        let bridge = start(
+            MqttConfig {
+                host: "127.0.0.1".to_owned(),
+                port: broker.port,
+                username: "updraft-test".to_owned(),
+                password: "updraft-test".to_owned(),
+                discovery_enabled: true,
+            },
+            MqttStateSnapshot {
+                devices: vec![device.clone(), other_device.clone()],
+                publications: vec![
+                    MqttStatePublication {
+                        id: device.id.clone(),
+                        payload: r#"{"state":{"mode":"automatic"}}"#.to_owned(),
+                        available: true,
+                        legacy_payload: None,
+                    },
+                    MqttStatePublication {
+                        id: other_device.id.clone(),
+                        payload: r#"{"state":{"mode":"manual"}}"#.to_owned(),
+                        available: false,
+                        legacy_payload: None,
+                    },
+                ],
+                legacy_discovery_enabled: false,
+            },
+        );
+
+        let process_availability = receive_topic(&mut received, PROCESS_AVAILABILITY_TOPIC).await;
+        assert_eq!(process_availability.payload.as_ref(), b"online");
+        observer
+            .subscribe_many([Filter {
+                preserve_retain: true,
+                ..Filter::new("updraft/qc-one/state", QoS::AtLeastOnce)
+            }])
+            .await
+            .unwrap();
+        let retained_state = receive_topic(&mut received, "updraft/qc-one/state").await;
+        assert!(retained_state.retain);
+        assert_eq!(
+            serde_json::from_slice::<Value>(&retained_state.payload).unwrap()["state"]["mode"],
+            "automatic"
+        );
+        observer
+            .subscribe("updraft/qc-one/availability", QoS::AtLeastOnce)
+            .await
+            .unwrap();
+        let first_availability = receive_topic(&mut received, "updraft/qc-one/availability").await;
+        assert!(first_availability.retain);
+        assert_eq!(first_availability.payload.as_ref(), b"online");
+        observer
+            .subscribe("updraft/qc-two/availability", QoS::AtLeastOnce)
+            .await
+            .unwrap();
+        let other_availability = receive_topic(&mut received, "updraft/qc-two/availability").await;
+        assert!(other_availability.retain);
+        assert_eq!(other_availability.payload.as_ref(), b"offline");
+
+        let discovery_topic = "homeassistant/sensor/updraft_qc-one/temperature_v2/config";
+        observer
+            .subscribe_many([Filter {
+                preserve_retain: true,
+                ..Filter::new(discovery_topic, QoS::AtLeastOnce)
+            }])
+            .await
+            .unwrap();
+        let retained_discovery = receive_topic(&mut received, discovery_topic).await;
+        assert!(retained_discovery.retain);
+        let discovery: Value = serde_json::from_slice(&retained_discovery.payload).unwrap();
+        assert_eq!(discovery["unique_id"], "updraft_qc-one_temperature");
+        assert_eq!(discovery["device"]["identifiers"][0], "updraft_qc-one");
+        assert_eq!(
+            discovery["availability"][1]["topic"],
+            "updraft/qc-one/availability"
+        );
+        assert_eq!(
+            discovery["availability"][0]["topic"],
+            PROCESS_AVAILABILITY_TOPIC
+        );
+        assert_eq!(discovery["availability_mode"], "all");
+
+        let other_discovery_topic = "homeassistant/sensor/updraft_qc-two/temperature_v2/config";
+        observer
+            .subscribe_many([Filter {
+                preserve_retain: true,
+                ..Filter::new(other_discovery_topic, QoS::AtLeastOnce)
+            }])
+            .await
+            .unwrap();
+        let other_discovery = receive_topic(&mut received, other_discovery_topic).await;
+        assert!(other_discovery.retain);
+        let other_discovery: Value = serde_json::from_slice(&other_discovery.payload).unwrap();
+        assert_eq!(other_discovery["unique_id"], "updraft_qc-two_temperature");
+        assert_eq!(
+            other_discovery["device"]["identifiers"][0],
+            "updraft_qc-two"
+        );
+        assert_eq!(
+            other_discovery["availability"][1]["topic"],
+            "updraft/qc-two/availability"
+        );
+        assert_eq!(
+            other_discovery["availability"][0]["topic"],
+            PROCESS_AVAILABILITY_TOPIC
+        );
+        assert_eq!(other_discovery["availability_mode"], "all");
+        assert_ne!(discovery["unique_id"], other_discovery["unique_id"]);
+
+        device.state_source = EntitySource::Http;
+        device.command_source = EntitySource::Http;
+        bridge
+            .state_updates
+            .send_replace(Arc::new(MqttStateSnapshot {
+                devices: vec![device, other_device],
+                publications: vec![MqttStatePublication {
+                    id: DeviceId::parse("qc-two".to_owned()).unwrap(),
+                    payload: r#"{"state":{"mode":"manual"}}"#.to_owned(),
+                    available: false,
+                    legacy_payload: None,
+                }],
+                legacy_discovery_enabled: false,
+            }));
+        let tombstone = receive_topic(&mut received, discovery_topic).await;
+        assert!(tombstone.retain);
+        assert!(tombstone.payload.is_empty());
+    }
+
+    #[tokio::test]
+    async fn native_broker_preserves_retained_control_metadata_for_rejection() {
+        let broker = start_native_broker().await;
+        let (observer, mut received) = observed_client("mqtt-control-observer", broker.port);
+        observer
+            .subscribe(PROCESS_AVAILABILITY_TOPIC, QoS::AtLeastOnce)
+            .await
+            .unwrap();
+        observer
+            .subscribe("updraft/qc-one/control/result", QoS::AtLeastOnce)
+            .await
+            .unwrap();
+
+        let mut bridge = start(
+            MqttConfig {
+                host: "127.0.0.1".to_owned(),
+                port: broker.port,
+                username: "updraft-test".to_owned(),
+                password: "updraft-test".to_owned(),
+                discovery_enabled: false,
+            },
+            MqttStateSnapshot {
+                devices: Vec::new(),
+                publications: Vec::new(),
+                legacy_discovery_enabled: false,
+            },
+        );
+        let _ = receive_topic(&mut received, PROCESS_AVAILABILITY_TOPIC).await;
+
+        let request_id = CommandId::parse("retained-command-1").unwrap();
+        let request = json!({
+            "request_id": request_id.as_str(),
+            "issued_at_unix_ms": unix_millis(SystemTime::now()).unwrap(),
+            "command": {"kind": "quick_connect_mode", "mode": "automatic"}
+        });
+        observer
+            .publish(
+                "updraft/qc-one/control/set",
+                QoS::AtLeastOnce,
+                true,
+                serde_json::to_vec(&request).unwrap(),
+            )
+            .await
+            .unwrap();
+
+        let result = receive_topic(&mut received, "updraft/qc-one/control/result").await;
+        assert_eq!(result.qos, QoS::AtLeastOnce);
+        let result: Value = serde_json::from_slice(&result.payload).unwrap();
+        assert_eq!(result["request_id"], request_id.as_str());
+        assert_eq!(result["status"], "retained_request");
+        assert!(bridge.control_requests.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn native_broker_publishes_the_retained_process_will_on_unexpected_disconnect() {
+        let broker = start_native_broker().await;
+        let (observer, mut received) = observed_client("mqtt-will-observer", broker.port);
+        observer
+            .subscribe_many([Filter {
+                preserve_retain: true,
+                ..Filter::new(PROCESS_AVAILABILITY_TOPIC, QoS::AtLeastOnce)
+            }])
+            .await
+            .unwrap();
+
+        let config = MqttConfig {
+            host: "127.0.0.1".to_owned(),
+            port: broker.port,
+            username: "updraft-test".to_owned(),
+            password: "updraft-test".to_owned(),
+            discovery_enabled: false,
+        };
+        let (client, eventloop) = AsyncClient::new(mqtt_options(config), 16);
+        let (connected, mut connection_events) = mpsc::unbounded_channel();
+        let poll_task = tokio::spawn(mqtt_events(eventloop).for_each(move |event| {
+            if let Ok(Event::Incoming(Packet::ConnAck(_))) = event {
+                let _ = connected.send(());
+            }
+            future::ready(())
+        }));
+        timeout(Duration::from_secs(5), connection_events.recv())
+            .await
+            .expect("MQTT client did not connect")
+            .expect("MQTT event loop ended before connecting");
+        client
+            .publish(PROCESS_AVAILABILITY_TOPIC, QoS::AtLeastOnce, true, "online")
+            .await
+            .unwrap();
+        let online = receive_topic(&mut received, PROCESS_AVAILABILITY_TOPIC).await;
+        assert!(online.retain);
+        assert_eq!(online.payload.as_ref(), b"online");
+
+        poll_task.abort();
+        let _ = poll_task.await;
+        let offline = receive_topic(&mut received, PROCESS_AVAILABILITY_TOPIC).await;
+        assert!(offline.retain);
+        assert_eq!(offline.payload.as_ref(), b"offline");
+    }
+
+    #[tokio::test]
+    async fn native_broker_restart_reconnects_and_republishes_retained_state() {
+        let mut broker = start_native_broker().await;
+        let (observer, mut received) = observed_client("mqtt-reconnect-observer", broker.port);
+        observer
+            .subscribe(PROCESS_AVAILABILITY_TOPIC, QoS::AtLeastOnce)
+            .await
+            .unwrap();
+        let device = mqtt_device("qc-reconnect");
+        let bridge = start(
+            MqttConfig {
+                host: "127.0.0.1".to_owned(),
+                port: broker.port,
+                username: "updraft-test".to_owned(),
+                password: "updraft-test".to_owned(),
+                discovery_enabled: false,
+            },
+            MqttStateSnapshot {
+                devices: vec![device.clone()],
+                publications: vec![MqttStatePublication {
+                    id: device.id,
+                    payload: r#"{"state":{"mode":"timer"}}"#.to_owned(),
+                    available: true,
+                    legacy_payload: None,
+                }],
+                legacy_discovery_enabled: false,
+            },
+        );
+
+        let initial_availability = receive_topic(&mut received, PROCESS_AVAILABILITY_TOPIC).await;
+        assert_eq!(initial_availability.payload.as_ref(), b"online");
+        observer
+            .subscribe_many([Filter {
+                preserve_retain: true,
+                ..Filter::new("updraft/qc-reconnect/state", QoS::AtLeastOnce)
+            }])
+            .await
+            .unwrap();
+        let initial_state = receive_topic(&mut received, "updraft/qc-reconnect/state").await;
+        assert!(initial_state.retain);
+        assert_eq!(
+            serde_json::from_slice::<Value>(&initial_state.payload).unwrap()["state"]["mode"],
+            "timer"
+        );
+        sleep(Duration::from_millis(100)).await;
+        broker.restart().await;
+        let (reconnected_observer, mut reconnected_messages) =
+            observed_client("mqtt-reconnected-observer", broker.port);
+        reconnected_observer
+            .subscribe(PROCESS_AVAILABILITY_TOPIC, QoS::AtLeastOnce)
+            .await
+            .unwrap();
+        let reconnected_availability =
+            receive_topic(&mut reconnected_messages, PROCESS_AVAILABILITY_TOPIC).await;
+        assert_eq!(reconnected_availability.payload.as_ref(), b"online");
+
+        reconnected_observer
+            .subscribe_many([Filter {
+                preserve_retain: true,
+                ..Filter::new("updraft/qc-reconnect/state", QoS::AtLeastOnce)
+            }])
+            .await
+            .unwrap();
+        let restored_state =
+            receive_topic(&mut reconnected_messages, "updraft/qc-reconnect/state").await;
+        assert!(restored_state.retain);
+        assert_eq!(
+            serde_json::from_slice::<Value>(&restored_state.payload).unwrap()["state"]["mode"],
+            "timer"
+        );
+        drop(bridge);
     }
 }
