@@ -17,6 +17,8 @@ Select the controller locally. Keep its identifier and deployment settings in lo
 
 The HTTP API binds to loopback by default. Use `--allow-remote` only when the service is protected by appropriate network controls or an authenticated reverse proxy. The API has no built-in authentication.
 
+The broker must support MQTT 5. Updraft preserves the publisher's retain flag on command subscriptions so it can reject retained commands before BLE access.
+
 Set these variables to enable MQTT:
 
 - `UPDRAFT_MQTT_HOST`

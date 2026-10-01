@@ -8,8 +8,12 @@ use crate::{
     control::{CommandId, ControlPreset, ControlRequest, FreshControlRequest, unix_millis},
 };
 use futures_util::{Stream, StreamExt, future, stream};
-use rumqttc::{
-    AsyncClient, ConnectionError, Event, EventLoop, LastWill, MqttOptions, Packet, Publish, QoS,
+use rumqttc::v5::{
+    AsyncClient, ConnectionError, Event, EventLoop, MqttOptions,
+    mqttbytes::{
+        QoS,
+        v5::{Filter, LastWill, Packet, Publish},
+    },
 };
 use serde::Serialize;
 use serde_json::{Value, json};
@@ -112,6 +116,7 @@ fn mqtt_options(config: MqttConfig) -> MqttOptions {
         "offline",
         QoS::AtLeastOnce,
         true,
+        None,
     ));
     options
 }
@@ -146,11 +151,15 @@ async fn initialize_connection(client: &AsyncClient, discovery_enabled: bool) {
 }
 
 async fn subscribe_to_controls(client: &AsyncClient) {
-    if let Err(error) = client
-        .subscribe(CONTROL_REQUEST_TOPIC, QoS::AtLeastOnce)
-        .await
-    {
+    if let Err(error) = client.subscribe_many([control_subscription()]).await {
         tracing::warn!(%error, "could not subscribe to MQTT controls");
+    }
+}
+
+fn control_subscription() -> Filter {
+    Filter {
+        preserve_retain: true,
+        ..Filter::new(CONTROL_REQUEST_TOPIC, QoS::AtLeastOnce)
     }
 }
 
@@ -198,7 +207,9 @@ async fn handle_mqtt_event(
         Ok(Event::Incoming(Packet::ConnAck(_))) => {
             connected.send_replace(true);
         }
-        Ok(Event::Incoming(Packet::Publish(message))) if message.topic == CONTROL_REQUEST_TOPIC => {
+        Ok(Event::Incoming(Packet::Publish(message)))
+            if message.topic.as_ref() == CONTROL_REQUEST_TOPIC.as_bytes() =>
+        {
             dispatch_control(client, controls, pending_results, message);
         }
         Ok(_) => {}
@@ -492,7 +503,10 @@ fn discovery_tombstones() -> impl Iterator<Item = &'static str> {
 }
 
 async fn publish(client: &AsyncClient, topic: &str, payload: &str) {
-    if let Err(error) = client.publish(topic, QoS::AtLeastOnce, true, payload).await {
+    if let Err(error) = client
+        .publish(topic, QoS::AtLeastOnce, true, payload.as_bytes().to_owned())
+        .await
+    {
         tracing::warn!(%error, topic, "could not queue MQTT message");
     }
 }
@@ -737,6 +751,15 @@ mod tests {
     use super::*;
 
     #[test]
+    fn control_subscription_preserves_the_publishers_retain_flag_on_the_wire() {
+        let subscription = rumqttc::v5::mqttbytes::v5::Subscribe::new(control_subscription(), None);
+        let mut encoded = bytes::BytesMut::new();
+        subscription.write(&mut encoded).unwrap();
+
+        assert_eq!(encoded.last(), Some(&0x09));
+    }
+
+    #[test]
     fn discovery_configs_use_stable_topics_and_the_shared_device() {
         let configs = discovery_configs().collect::<Vec<_>>();
 
@@ -814,6 +837,7 @@ mod tests {
                     "preset": "timer_clear",
                 }))
                 .unwrap(),
+                None,
             )
         };
 
