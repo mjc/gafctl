@@ -208,18 +208,45 @@ impl QuickConnectClient {
         validate_device_response(self.get_url_with_retry(url).await?)
     }
 
+    /// Fetch and decode one device's current readings and settings.
+    pub async fn read_device_state(
+        &self,
+        provider_id: &str,
+    ) -> Result<QuickConnectDeviceState, ClientError> {
+        let payload = self.device_detail(provider_id).await?;
+        model::parse_device_state(payload, unix_millis(SystemTime::now()))
+    }
+
     /// POST device settings once. Writes are never retried or reauthenticated automatically.
     pub async fn save_device_settings(
         &self,
         provider_id: &str,
         body: &QuickConnectSettingsBody,
     ) -> Result<Value, ClientError> {
+        let prepared = self.prepare_settings_write().await?;
+        self.save_device_settings_prepared(provider_id, body, prepared)
+            .await
+    }
+
+    /// Complete account authentication before the caller performs its final admission check.
+    pub async fn prepare_settings_write(&self) -> Result<PreparedSettingsWrite, ClientError> {
+        self.current_token()
+            .await
+            .map(|token| PreparedSettingsWrite { token })
+    }
+
+    /// Submit one write with previously prepared authentication; this method never retries.
+    pub async fn save_device_settings_prepared(
+        &self,
+        provider_id: &str,
+        body: &QuickConnectSettingsBody,
+        prepared: PreparedSettingsWrite,
+    ) -> Result<Value, ClientError> {
         let url = settings_endpoint(&self.config.device_base_url, provider_id)?;
-        let token = self.current_token().await?;
         let response = self
             .http
             .post(url)
-            .header(reqwest::header::AUTHORIZATION, token.value)
+            .header(reqwest::header::AUTHORIZATION, prepared.token.value)
             .json(body)
             .send()
             .await
@@ -420,6 +447,11 @@ impl TokenState {
 struct TokenSnapshot {
     generation: u64,
     value: String,
+}
+
+/// One-use authentication prepared before the final command admission check.
+pub struct PreparedSettingsWrite {
+    token: TokenSnapshot,
 }
 
 #[derive(Serialize)]

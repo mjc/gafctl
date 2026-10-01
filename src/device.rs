@@ -130,6 +130,17 @@ impl DeviceCapabilities {
         }
     }
 
+    pub fn quickconnect_with_controls() -> Self {
+        Self {
+            read_state: true,
+            commands: vec![
+                CommandCapability::QuickConnectMode,
+                CommandCapability::QuickConnectTargets,
+                CommandCapability::QuickConnectTimerDuration,
+            ],
+        }
+    }
+
     pub fn supports(&self, command: DeviceCommand) -> bool {
         let capability = match command {
             DeviceCommand::LegacyPreset { preset } => CommandCapability::LegacyPreset(preset),

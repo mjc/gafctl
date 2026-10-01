@@ -4,20 +4,23 @@ use std::{
     io::{self, Write},
     path::{Path, PathBuf},
     sync::Arc,
+    sync::atomic::{AtomicU64, Ordering},
     time::{SystemTime, UNIX_EPOCH},
 };
 
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
-use tokio::sync::{Mutex, OwnedMutexGuard, RwLock};
+use tokio::sync::{Mutex, OwnedMutexGuard, OwnedSemaphorePermit, RwLock, Semaphore, watch};
 
 use crate::device::{
     DeviceBackend, DeviceCapabilities, DeviceCommand, DeviceDescriptor, DeviceDiagnostics,
     DeviceId, DeviceSettings, DeviceState, EntitySource, QuickConnectModeStatus, StateProvenance,
 };
+use updraft_quickconnect::QuickConnectCommand;
 
 const DEVICE_STATE_FRESHNESS_LIMIT_MS: u64 = 90_000;
+const CONTROL_QUEUE_CAPACITY: usize = 8;
 
 #[derive(Clone, Eq, Hash, Ord, PartialEq, PartialOrd, Deserialize, Serialize)]
 struct ProviderIdentity {
@@ -86,6 +89,7 @@ pub struct DeviceRegistry {
     identities: IdentityStore,
     devices: BTreeMap<DeviceId, DeviceDescriptor>,
     runtimes: BTreeMap<DeviceId, Arc<DeviceRuntime>>,
+    quickconnect_writes_enabled: bool,
 }
 
 impl Default for DeviceRegistry {
@@ -97,6 +101,10 @@ impl Default for DeviceRegistry {
 pub struct DeviceRuntime {
     snapshot: RwLock<DeviceRuntimeSnapshot>,
     transaction: Arc<Mutex<()>>,
+    state_generation: AtomicU64,
+    control_generation: AtomicU64,
+    control_changed: watch::Sender<u64>,
+    control_slots: Arc<Semaphore>,
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
@@ -119,9 +127,14 @@ pub struct DeviceRuntimeSnapshot {
 
 impl DeviceRuntime {
     fn new() -> Self {
+        let (control_changed, _) = watch::channel(0);
         Self {
             snapshot: RwLock::new(DeviceRuntimeSnapshot::default()),
             transaction: Arc::new(Mutex::new(())),
+            state_generation: AtomicU64::new(0),
+            control_generation: AtomicU64::new(0),
+            control_changed,
+            control_slots: Arc::new(Semaphore::new(CONTROL_QUEUE_CAPACITY)),
         }
     }
 
@@ -153,31 +166,136 @@ impl DeviceRuntime {
 
     pub async fn set_state(&self, state: DeviceState) {
         let mut snapshot = self.snapshot.write().await;
+        self.state_generation.fetch_add(1, Ordering::AcqRel);
         snapshot.state = Some(state.clone());
         snapshot.last_successful_state = Some(state);
         snapshot.inventory_status = DeviceInventoryStatus::Present;
         snapshot.last_error = None;
     }
 
-    async fn mark_detail_unavailable(&self) {
+    pub fn begin_state_read(&self) -> u64 {
+        self.state_generation
+            .fetch_add(1, Ordering::AcqRel)
+            .saturating_add(1)
+    }
+
+    pub async fn set_state_if_current(&self, generation: u64, state: DeviceState) -> bool {
         let mut snapshot = self.snapshot.write().await;
+        if self.state_generation.load(Ordering::Acquire) != generation {
+            return false;
+        }
+        snapshot.state = Some(state.clone());
+        snapshot.last_successful_state = Some(state);
+        snapshot.inventory_status = DeviceInventoryStatus::Present;
+        snapshot.last_error = None;
+        true
+    }
+
+    pub async fn mark_detail_unavailable_if_current(&self, generation: u64) -> bool {
+        self.update_error_if_current(
+            generation,
+            DeviceInventoryStatus::Present,
+            "QuickConnect device detail unavailable",
+        )
+        .await
+    }
+
+    async fn mark_missing_if_current(&self, generation: u64) -> bool {
+        self.update_error_if_current(
+            generation,
+            DeviceInventoryStatus::Missing,
+            "QuickConnect device absent from inventory",
+        )
+        .await
+    }
+
+    async fn mark_inventory_unavailable_if_current(&self, generation: u64) -> bool {
+        self.update_error_if_current(
+            generation,
+            DeviceInventoryStatus::Unavailable,
+            "QuickConnect inventory unavailable",
+        )
+        .await
+    }
+
+    async fn update_error_if_current(
+        &self,
+        generation: u64,
+        inventory_status: DeviceInventoryStatus,
+        message: &'static str,
+    ) -> bool {
+        let mut snapshot = self.snapshot.write().await;
+        if self.state_generation.load(Ordering::Acquire) != generation {
+            return false;
+        }
+        snapshot.state = None;
+        snapshot.inventory_status = inventory_status;
+        snapshot.last_error = Some(message.to_owned());
+        true
+    }
+
+    pub fn try_reserve_control(&self) -> Option<OwnedSemaphorePermit> {
+        Arc::clone(&self.control_slots).try_acquire_owned().ok()
+    }
+
+    pub fn begin_control_intent(&self) -> u64 {
+        self.state_generation.fetch_add(1, Ordering::AcqRel);
+        let generation = self.next_control_generation();
+        self.publish_control_generation(generation);
+        generation
+    }
+
+    fn next_control_generation(&self) -> u64 {
+        self.control_generation
+            .fetch_add(1, Ordering::AcqRel)
+            .saturating_add(1)
+    }
+
+    fn publish_control_generation(&self, generation: u64) {
+        self.control_changed.send_if_modified(|published| {
+            if *published < generation {
+                *published = generation;
+                true
+            } else {
+                false
+            }
+        });
+    }
+
+    pub fn is_current_control_intent(&self, generation: u64) -> bool {
+        self.control_generation.load(Ordering::Acquire) == generation
+    }
+
+    pub async fn wait_for_control_change(&self, generation: u64) {
+        let mut changed = self.control_changed.subscribe();
+        if *changed.borrow_and_update() == generation {
+            let _ = changed.changed().await;
+        }
+    }
+
+    pub async fn set_control_state_if_current(&self, generation: u64, state: DeviceState) -> bool {
+        let mut snapshot = self.snapshot.write().await;
+        if !self.is_current_control_intent(generation) {
+            return false;
+        }
+        self.state_generation.fetch_add(1, Ordering::AcqRel);
+        snapshot.state = Some(state.clone());
+        snapshot.last_successful_state = Some(state);
+        snapshot.inventory_status = DeviceInventoryStatus::Present;
+        snapshot.last_error = None;
+        true
+    }
+
+    pub async fn mark_control_state_unavailable_if_current(&self, generation: u64) -> bool {
+        let mut snapshot = self.snapshot.write().await;
+        if !self.is_current_control_intent(generation) {
+            return false;
+        }
+        self.state_generation.fetch_add(1, Ordering::AcqRel);
         snapshot.state = None;
         snapshot.inventory_status = DeviceInventoryStatus::Present;
-        snapshot.last_error = Some("QuickConnect device detail unavailable".to_owned());
-    }
-
-    async fn mark_missing(&self) {
-        let mut snapshot = self.snapshot.write().await;
-        snapshot.state = None;
-        snapshot.inventory_status = DeviceInventoryStatus::Missing;
-        snapshot.last_error = Some("QuickConnect device absent from inventory".to_owned());
-    }
-
-    async fn mark_inventory_unavailable(&self) {
-        let mut snapshot = self.snapshot.write().await;
-        snapshot.state = None;
-        snapshot.inventory_status = DeviceInventoryStatus::Unavailable;
-        snapshot.last_error = Some("QuickConnect inventory unavailable".to_owned());
+        snapshot.last_error = Some("QuickConnect control readback unavailable".to_owned());
+        true
     }
 
     pub async fn acquire_transaction(&self) -> OwnedMutexGuard<()> {
@@ -209,6 +327,7 @@ impl DeviceRegistry {
             identities: IdentityStore::in_memory(),
             devices: BTreeMap::new(),
             runtimes: BTreeMap::new(),
+            quickconnect_writes_enabled: false,
         }
     }
 
@@ -221,6 +340,7 @@ impl DeviceRegistry {
             identities: IdentityStore::load(path.into())?,
             devices: BTreeMap::new(),
             runtimes: BTreeMap::new(),
+            quickconnect_writes_enabled: false,
         })
     }
 
@@ -245,15 +365,81 @@ impl DeviceRegistry {
         Ok(ids)
     }
 
+    pub fn set_quickconnect_writes_enabled(&mut self, enabled: bool) {
+        self.quickconnect_writes_enabled = enabled;
+        self.devices
+            .values_mut()
+            .filter(|descriptor| descriptor.backend == DeviceBackend::QuickConnect)
+            .for_each(|descriptor| {
+                descriptor.capabilities = if enabled {
+                    DeviceCapabilities::quickconnect_with_controls()
+                } else {
+                    DeviceCapabilities::quickconnect_read_only()
+                };
+            });
+    }
+
+    pub(crate) fn quickconnect_control_target(
+        &self,
+        account_id: &str,
+        id: &DeviceId,
+        command: QuickConnectCommand,
+    ) -> Result<(Arc<DeviceRuntime>, String), DeviceRegistryError> {
+        let descriptor = self
+            .devices
+            .get(id)
+            .ok_or(DeviceRegistryError::UnknownDevice)?;
+        let capability = match command {
+            QuickConnectCommand::SetMode { .. } => {
+                crate::device::CommandCapability::QuickConnectMode
+            }
+            QuickConnectCommand::SetAutomaticTargets { .. } => {
+                crate::device::CommandCapability::QuickConnectTargets
+            }
+            QuickConnectCommand::SetTimerDuration { .. } => {
+                crate::device::CommandCapability::QuickConnectTimerDuration
+            }
+        };
+        if descriptor.backend != DeviceBackend::QuickConnect
+            || !descriptor.capabilities.commands.contains(&capability)
+        {
+            return Err(DeviceRegistryError::UnsupportedCommand);
+        }
+        let provider_id = self
+            .identities
+            .bindings
+            .iter()
+            .find(|binding| binding.local_id == *id && binding.identity.account_id == account_id)
+            .map(|binding| binding.identity.provider_id.clone())
+            .ok_or(DeviceRegistryError::UnknownDevice)?;
+        let runtime = self
+            .runtimes
+            .get(id)
+            .cloned()
+            .ok_or(DeviceRegistryError::UnknownDevice)?;
+        Ok((runtime, provider_id))
+    }
+
     pub async fn poll_quickconnect(
         &mut self,
         account_id: &str,
         client: &updraft_quickconnect::QuickConnectClient,
     ) -> Result<Vec<DeviceId>, QuickConnectPollingError> {
+        let generations = self
+            .identities
+            .bindings
+            .iter()
+            .filter(|binding| binding.identity.account_id == account_id)
+            .filter_map(|binding| {
+                self.runtime(&binding.local_id)
+                    .map(|runtime| (binding.local_id.clone(), runtime.begin_state_read()))
+            })
+            .collect::<BTreeMap<_, _>>();
         let polls = match client.poll_devices().await {
             Ok(polls) => polls,
             Err(error) => {
-                self.mark_account_inventory_unavailable(account_id).await;
+                self.mark_account_inventory_unavailable(account_id, &generations)
+                    .await;
                 return Err(error.into());
             }
         };
@@ -272,7 +458,8 @@ impl DeviceRegistry {
         let ids = match self.reconcile_quickconnect(account_id, &inputs) {
             Ok(ids) => ids,
             Err(error) => {
-                self.mark_account_inventory_unavailable(account_id).await;
+                self.mark_account_inventory_unavailable(account_id, &generations)
+                    .await;
                 return Err(error.into());
             }
         };
@@ -284,7 +471,15 @@ impl DeviceRegistry {
             .iter()
             .cloned()
             .zip(polls)
-            .filter_map(|(id, poll)| self.runtime(&id).map(|runtime| (runtime, poll)))
+            .filter_map(|(id, poll)| {
+                self.runtime(&id).map(|runtime| {
+                    let generation = generations
+                        .get(&id)
+                        .copied()
+                        .unwrap_or_else(|| runtime.begin_state_read());
+                    (runtime, generation, poll)
+                })
+            })
             .collect::<Vec<_>>();
         let missing = self
             .identities
@@ -292,34 +487,58 @@ impl DeviceRegistry {
             .iter()
             .filter(|binding| binding.identity.account_id == account_id)
             .filter(|binding| !present.contains(&binding.identity.provider_id))
-            .filter_map(|binding| self.runtimes.get(&binding.local_id))
-            .cloned()
+            .filter_map(|binding| {
+                self.runtimes
+                    .get(&binding.local_id)
+                    .zip(generations.get(&binding.local_id))
+                    .map(|(runtime, generation)| (Arc::clone(runtime), *generation))
+            })
             .collect::<Vec<_>>();
         futures_util::stream::iter(missing)
-            .for_each(|runtime| async move { runtime.mark_missing().await })
+            .for_each(|(runtime, generation)| async move {
+                runtime.mark_missing_if_current(generation).await;
+            })
             .await;
         futures_util::stream::iter(runtimes)
-            .for_each(|(runtime, poll)| async move {
+            .for_each(|(runtime, generation, poll)| async move {
                 match poll.detail {
-                    Ok(state) => runtime.set_state(common_state(state)).await,
-                    Err(_) => runtime.mark_detail_unavailable().await,
+                    Ok(state) => {
+                        runtime
+                            .set_state_if_current(generation, common_state(state))
+                            .await;
+                    }
+                    Err(_) => {
+                        runtime.mark_detail_unavailable_if_current(generation).await;
+                    }
                 }
             })
             .await;
         Ok(ids)
     }
 
-    async fn mark_account_inventory_unavailable(&self, account_id: &str) {
+    async fn mark_account_inventory_unavailable(
+        &self,
+        account_id: &str,
+        generations: &BTreeMap<DeviceId, u64>,
+    ) {
         let unavailable = self
             .identities
             .bindings
             .iter()
             .filter(|binding| binding.identity.account_id == account_id)
-            .filter_map(|binding| self.runtimes.get(&binding.local_id))
-            .cloned()
+            .filter_map(|binding| {
+                self.runtimes
+                    .get(&binding.local_id)
+                    .zip(generations.get(&binding.local_id))
+                    .map(|(runtime, generation)| (Arc::clone(runtime), *generation))
+            })
             .collect::<Vec<_>>();
         futures_util::stream::iter(unavailable)
-            .for_each(|runtime| async move { runtime.mark_inventory_unavailable().await })
+            .for_each(|(runtime, generation)| async move {
+                runtime
+                    .mark_inventory_unavailable_if_current(generation)
+                    .await;
+            })
             .await;
     }
 
@@ -372,6 +591,9 @@ impl DeviceRegistry {
     }
 
     fn register(&mut self, mut descriptor: DeviceDescriptor) -> Arc<DeviceRuntime> {
+        if self.quickconnect_writes_enabled && descriptor.backend == DeviceBackend::QuickConnect {
+            descriptor.capabilities = DeviceCapabilities::quickconnect_with_controls();
+        }
         let id = descriptor.id.clone();
         if let Some(existing) = self.devices.get(&id)
             && existing.backend == descriptor.backend
@@ -393,7 +615,7 @@ impl DeviceRegistry {
     }
 }
 
-fn common_state(state: updraft_quickconnect::QuickConnectDeviceState) -> DeviceState {
+pub(crate) fn common_state(state: updraft_quickconnect::QuickConnectDeviceState) -> DeviceState {
     use updraft_quickconnect::DeviceModeStatus;
 
     DeviceState {
@@ -958,6 +1180,32 @@ mod tests {
         }
     }
 
+    #[test]
+    fn control_generation_publication_stays_monotonic_when_calls_reorder() {
+        let runtime = Arc::new(DeviceRuntime::new());
+        let first_generation = runtime.next_control_generation();
+        let later_generation = runtime.next_control_generation();
+        let barrier = Arc::new(std::sync::Barrier::new(3));
+        let later_runtime = Arc::clone(&runtime);
+        let later_barrier = Arc::clone(&barrier);
+        let later = std::thread::spawn(move || {
+            later_barrier.wait();
+            later_runtime.publish_control_generation(later_generation);
+        });
+        let first_runtime = Arc::clone(&runtime);
+        let first_barrier = Arc::clone(&barrier);
+        let first = std::thread::spawn(move || {
+            first_barrier.wait();
+            first_runtime.publish_control_generation(first_generation);
+        });
+
+        barrier.wait();
+        later.join().unwrap();
+        first.join().unwrap();
+
+        assert_eq!(*runtime.control_changed.borrow(), later_generation);
+    }
+
     #[tokio::test]
     async fn each_device_owns_independent_state_and_transaction_lock() {
         let path = registry_path();
@@ -978,26 +1226,32 @@ mod tests {
         assert!(second.try_acquire_transaction().is_some());
         drop(first_transaction);
 
-        first
-            .set_state(DeviceState {
-                temperature_f: Some(102.0),
-                humidity_percent: None,
-                settings: DeviceSettings::QuickConnect {
-                    mode: QuickConnectModeStatus::Automatic,
-                    automatic_temperature_f: None,
-                    automatic_humidity_percent: None,
-                    timer_duration_minutes: None,
-                    humidity_monitor: None,
-                },
-                estimated_running: Some(true),
-                diagnostics: None,
-                provenance: StateProvenance {
-                    backend: DeviceBackend::QuickConnect,
-                    fetched_at_unix_ms: Some(1),
-                    observed_at_unix_ms: None,
-                },
-            })
-            .await;
+        let stale_poll = first.begin_state_read();
+        let control_generation = first.begin_control_intent();
+        let confirmed = DeviceState {
+            temperature_f: Some(102.0),
+            humidity_percent: None,
+            settings: DeviceSettings::QuickConnect {
+                mode: QuickConnectModeStatus::Automatic,
+                automatic_temperature_f: None,
+                automatic_humidity_percent: None,
+                timer_duration_minutes: None,
+                humidity_monitor: None,
+            },
+            estimated_running: Some(true),
+            diagnostics: None,
+            provenance: StateProvenance {
+                backend: DeviceBackend::QuickConnect,
+                fetched_at_unix_ms: Some(1),
+                observed_at_unix_ms: None,
+            },
+        };
+        assert!(
+            first
+                .set_control_state_if_current(control_generation, confirmed.clone())
+                .await
+        );
+        assert!(!first.set_state_if_current(stale_poll, confirmed).await);
         assert_eq!(
             first.snapshot_at(50_000).await.state.unwrap().temperature_f,
             Some(102.0)
@@ -1011,6 +1265,11 @@ mod tests {
         assert!(first.snapshot_at(0).await.state.is_none());
         assert!(first.snapshot_at_option(None).await.state.is_none());
         assert!(second.state().await.is_none());
+        let permits = std::iter::repeat_with(|| first.try_reserve_control().unwrap())
+            .take(CONTROL_QUEUE_CAPACITY)
+            .collect::<Vec<_>>();
+        assert!(first.try_reserve_control().is_none());
+        drop(permits);
         fs::remove_dir_all(path.parent().unwrap()).ok();
     }
 

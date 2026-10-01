@@ -51,6 +51,39 @@ pub enum QuickConnectSettingsBody {
     SetTimerDuration(SetTimerDurationBody),
 }
 
+impl QuickConnectSettingsBody {
+    /// Compare a readback with requested values and settings the request preserves.
+    pub fn matches_readback(
+        &self,
+        before: &QuickConnectSettings,
+        after: &QuickConnectSettings,
+    ) -> bool {
+        match self {
+            Self::SetMode(body) => {
+                after.mode == body.mode()
+                    && after.automatic_temperature_f == Some(body.desired_temp)
+                    && after.automatic_humidity_percent == Some(body.desired_humidity)
+                    && after.timer_duration_minutes == Some(body.timer_value)
+                    && after.humidity_monitor == before.humidity_monitor
+            }
+            Self::SetAutomaticTargets(body) => {
+                after.mode == before.mode
+                    && after.automatic_temperature_f == Some(body.desired_temp)
+                    && after.automatic_humidity_percent == Some(body.desired_humidity)
+                    && after.timer_duration_minutes == before.timer_duration_minutes
+                    && after.humidity_monitor == before.humidity_monitor
+            }
+            Self::SetTimerDuration(body) => {
+                after.mode == before.mode
+                    && after.automatic_temperature_f == before.automatic_temperature_f
+                    && after.automatic_humidity_percent == before.automatic_humidity_percent
+                    && after.timer_duration_minutes == Some(body.timer_value)
+                    && after.humidity_monitor == before.humidity_monitor
+            }
+        }
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SetModeBody {
@@ -60,6 +93,18 @@ pub struct SetModeBody {
     timer_mode: bool,
     timer_value: u16,
     fan_mode: bool,
+}
+
+impl SetModeBody {
+    fn mode(&self) -> DeviceModeStatus {
+        match (self.automatic_mode, self.timer_mode, self.fan_mode) {
+            (false, false, false) => DeviceModeStatus::Off,
+            (true, false, false) => DeviceModeStatus::Automatic,
+            (false, true, false) => DeviceModeStatus::Timer,
+            (false, false, true) => DeviceModeStatus::Manual,
+            _ => DeviceModeStatus::Conflicting,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
