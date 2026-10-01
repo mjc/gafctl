@@ -5,15 +5,20 @@ use btleplug::{
     api::{Central as _, Peripheral as _},
     platform::{Adapter, Peripheral},
 };
-use tokio::{
-    runtime::Handle,
-    time::{sleep, timeout},
-};
+use tokio::time::{sleep, timeout};
 
-use crate::{DisconnectOutcome, ProbeError, error::CleanupFailed};
+use crate::{
+    DisconnectOutcome, ProbeError,
+    error::{CleanupFailed, cleanup_is_complete},
+};
 
 const CONNECTION_RETRY_DELAYS: [Duration; 2] =
     [Duration::from_millis(100), Duration::from_millis(300)];
+
+pub(super) fn platform_timeout(response_timeout: Duration) -> Duration {
+    // BlueZ allows 30 seconds for Connect, then five for service resolution.
+    response_timeout.max(Duration::from_secs(40))
+}
 
 pub(super) const fn connection_retry_delay(retry_index: usize) -> Option<Duration> {
     if retry_index < CONNECTION_RETRY_DELAYS.len() {
@@ -44,90 +49,6 @@ where
     }
 }
 
-pub(super) struct ScanCleanup {
-    adapter: Adapter,
-    operation_timeout: Duration,
-    runtime: Handle,
-    armed: bool,
-}
-
-impl ScanCleanup {
-    pub(super) fn new(adapter: Adapter, operation_timeout: Duration) -> Self {
-        Self {
-            adapter,
-            operation_timeout,
-            runtime: Handle::current(),
-            armed: true,
-        }
-    }
-
-    pub(super) async fn run(&mut self) -> Result<()> {
-        stop_ble_scan(&self.adapter, self.operation_timeout).await?;
-        self.armed = false;
-        Ok(())
-    }
-}
-
-impl Drop for ScanCleanup {
-    fn drop(&mut self) {
-        if self.armed {
-            let adapter = self.adapter.clone();
-            let operation_timeout = self.operation_timeout;
-            self.runtime.spawn(async move {
-                report_cleanup_failure(
-                    "stop BLE scan",
-                    stop_ble_scan(&adapter, operation_timeout).await,
-                );
-            });
-        }
-    }
-}
-
-pub(super) struct DisconnectCleanup {
-    peripheral: Peripheral,
-    operation_timeout: Duration,
-    runtime: Handle,
-    armed: bool,
-}
-
-impl DisconnectCleanup {
-    pub(super) fn new(peripheral: Peripheral, operation_timeout: Duration) -> Self {
-        Self {
-            peripheral,
-            operation_timeout,
-            runtime: Handle::current(),
-            armed: true,
-        }
-    }
-
-    pub(super) async fn run(&mut self) -> Result<()> {
-        disconnect_peripheral(&self.peripheral, self.operation_timeout).await?;
-        self.armed = false;
-        Ok(())
-    }
-}
-
-impl Drop for DisconnectCleanup {
-    fn drop(&mut self) {
-        if self.armed {
-            let peripheral = self.peripheral.clone();
-            let operation_timeout = self.operation_timeout;
-            self.runtime.spawn(async move {
-                report_cleanup_failure(
-                    "disconnect from GAF BLE peripheral",
-                    disconnect_peripheral(&peripheral, operation_timeout).await,
-                );
-            });
-        }
-    }
-}
-
-fn report_cleanup_failure(operation: &'static str, result: Result<()>) {
-    if let Err(error) = result {
-        tracing::warn!(operation, %error, "best-effort BLE cleanup failed");
-    }
-}
-
 pub(super) async fn complete_before<T>(
     duration: Duration,
     operation: &'static str,
@@ -143,6 +64,13 @@ pub(super) async fn stop_ble_scan(adapter: &Adapter, operation_timeout: Duration
         adapter.stop_scan().await.context("stop BLE scan")
     })
     .await
+    .or_else(|error| {
+        if cleanup_is_complete(&error) {
+            Ok(())
+        } else {
+            Err(error)
+        }
+    })
 }
 
 pub(super) async fn disconnect_peripheral(
@@ -157,9 +85,47 @@ pub(super) async fn disconnect_peripheral(
                 .disconnect()
                 .await
                 .context("disconnect from GAF BLE peripheral")
+                .or_else(|error| {
+                    if cleanup_is_complete(&error) {
+                        Ok(())
+                    } else {
+                        Err(error)
+                    }
+                })?;
+            if connected_or_absent(peripheral).await? {
+                anyhow::bail!("GAF BLE peripheral remains connected after disconnect");
+            }
+            Ok(())
         },
     )
     .await
+}
+
+pub(super) async fn recover_disconnect(
+    peripheral: &Peripheral,
+    operation_timeout: Duration,
+) -> Result<()> {
+    complete_before(operation_timeout, "recover BLE disconnect", async {
+        if connected_or_absent(peripheral).await? {
+            disconnect_peripheral(peripheral, operation_timeout).await?;
+        }
+        Ok(())
+    })
+    .await
+}
+
+async fn connected_or_absent(peripheral: &Peripheral) -> Result<bool> {
+    peripheral
+        .is_connected()
+        .await
+        .context("check BLE connection")
+        .or_else(|error| {
+            if cleanup_is_complete(&error) {
+                Ok(false)
+            } else {
+                Err(error)
+            }
+        })
 }
 
 pub(super) fn finish_with_cleanup<T>(
@@ -193,6 +159,15 @@ mod tests {
 
     use super::*;
     use futures_util::future;
+
+    #[test]
+    fn platform_deadline_allows_connect_and_service_resolution() {
+        assert!(platform_timeout(Duration::from_secs(3)) >= Duration::from_secs(35));
+        assert_eq!(
+            platform_timeout(Duration::from_secs(60)),
+            Duration::from_secs(60)
+        );
+    }
 
     #[tokio::test]
     async fn platform_operation_deadline_names_the_timed_out_operation() {

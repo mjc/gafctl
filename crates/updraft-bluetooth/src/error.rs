@@ -75,6 +75,59 @@ impl ProbeError {
     }
 }
 
+pub(super) fn cleanup_is_complete(source: &Error) -> bool {
+    source.chain().any(|cause| {
+        cause
+            .downcast_ref::<btleplug::Error>()
+            .is_some_and(is_absent_peripheral)
+            || is_platform_cleanup_complete(cause)
+    })
+}
+
+fn is_absent_peripheral(error: &btleplug::Error) -> bool {
+    if let btleplug::Error::NotConnected = error {
+        return true;
+    }
+    if let btleplug::Error::DeviceNotFound = error {
+        return true;
+    }
+    false
+}
+
+#[cfg(target_os = "linux")]
+fn is_platform_cleanup_complete(cause: &(dyn StdError + 'static)) -> bool {
+    let error = cause
+        .downcast_ref::<bluez_async::BluetoothError>()
+        .or_else(|| {
+            let btleplug::Error::Other(source) = cause.downcast_ref::<btleplug::Error>()? else {
+                return None;
+            };
+            source.downcast_ref::<bluez_async::BluetoothError>()
+        });
+    let Some(bluez_async::BluetoothError::DbusError(error)) = error else {
+        return false;
+    };
+    dbus_cleanup_is_complete(error.name(), error.message())
+}
+
+#[cfg(not(target_os = "linux"))]
+fn is_platform_cleanup_complete(_cause: &(dyn StdError + 'static)) -> bool {
+    false
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn dbus_cleanup_is_complete(name: Option<&str>, message: Option<&str>) -> bool {
+    match name {
+        Some(
+            "org.bluez.Error.NotConnected"
+            | "org.bluez.Error.DoesNotExist"
+            | "org.freedesktop.DBus.Error.UnknownObject",
+        ) => true,
+        Some("org.bluez.Error.Failed") => message == Some("No discovery started"),
+        _ => false,
+    }
+}
+
 #[derive(Debug)]
 pub(super) struct CleanupFailed {
     pub(super) operation: Error,
@@ -252,6 +305,38 @@ mod tests {
     fn dbus_access_denial_is_reported_as_authentication() {
         assert!(super::is_dbus_authentication_error(
             "org.freedesktop.DBus.Error.AccessDenied"
+        ));
+    }
+
+    #[test]
+    fn cleanup_accepts_only_established_absence_or_stopped_state() {
+        assert!(super::dbus_cleanup_is_complete(
+            Some("org.bluez.Error.NotConnected"),
+            None
+        ));
+        assert!(super::dbus_cleanup_is_complete(
+            Some("org.freedesktop.DBus.Error.UnknownObject"),
+            None
+        ));
+        assert!(super::dbus_cleanup_is_complete(
+            Some("org.bluez.Error.DoesNotExist"),
+            None
+        ));
+        assert!(super::dbus_cleanup_is_complete(
+            Some("org.bluez.Error.Failed"),
+            Some("No discovery started")
+        ));
+        assert!(!super::dbus_cleanup_is_complete(
+            Some("org.bluez.Error.Failed"),
+            Some("le-connection-abort-by-local")
+        ));
+        assert!(!super::dbus_cleanup_is_complete(
+            Some("org.freedesktop.DBus.Error.NoReply"),
+            None
+        ));
+        assert!(!super::dbus_cleanup_is_complete(
+            Some("org.bluez.Error.NotReady"),
+            None
         ));
     }
 

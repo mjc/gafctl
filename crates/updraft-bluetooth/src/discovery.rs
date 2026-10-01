@@ -15,7 +15,7 @@ use tokio::time::sleep;
 
 use crate::{
     GAF_SERVICE_UUID, ProbeResult,
-    lifecycle::{ScanCleanup, complete_before, fail_with_cleanup},
+    lifecycle::{complete_before, fail_with_cleanup, stop_ble_scan},
 };
 
 /// A peripheral selected for a GAF query.
@@ -133,6 +133,7 @@ pub(super) async fn discover_candidates(
     scan_duration: Duration,
     operation_timeout: Duration,
     requested_device_id: Option<&str>,
+    scan_pending: &mut bool,
 ) -> Result<DiscoveryReport<Candidate>> {
     #[cfg(target_os = "linux")]
     let existing_devices =
@@ -156,7 +157,7 @@ pub(super) async fn discover_candidates(
     })
     .await?;
 
-    let mut scan_cleanup = ScanCleanup::new(adapter.clone(), operation_timeout);
+    *scan_pending = true;
     let scan_start = complete_before(operation_timeout, "start BLE scan", async {
         adapter
             .start_scan(scan_filter(requested_device_id))
@@ -165,7 +166,9 @@ pub(super) async fn discover_candidates(
     })
     .await;
     if let Err(error) = scan_start {
-        return fail_with_cleanup(error, scan_cleanup.run().await);
+        let cleanup = stop_ble_scan(adapter, operation_timeout).await;
+        *scan_pending = cleanup.is_err();
+        return fail_with_cleanup(error, cleanup);
     }
     #[cfg(target_os = "linux")]
     let fresh_devices = events
@@ -175,7 +178,8 @@ pub(super) async fn discover_candidates(
         .await;
     #[cfg(not(target_os = "linux"))]
     sleep(scan_duration).await;
-    scan_cleanup.run().await?;
+    stop_ble_scan(adapter, operation_timeout).await?;
+    *scan_pending = false;
 
     #[cfg(target_os = "linux")]
     let fresh_devices = Some(&fresh_devices);

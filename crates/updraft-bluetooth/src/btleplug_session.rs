@@ -10,8 +10,8 @@ use super::request_session::{GattTransport, RequestSession};
 use crate::{
     GAF_CHARACTERISTIC_UUID, GAF_SERVICE_UUID, QueryResult,
     lifecycle::{
-        DisconnectCleanup, complete_before, fail_with_cleanup, finish_with_cleanup,
-        retry_connection,
+        complete_before, disconnect_peripheral, fail_with_cleanup, finish_with_cleanup,
+        platform_timeout, retry_connection,
     },
 };
 
@@ -20,7 +20,7 @@ pub(super) const BACKEND: &str = "btleplug";
 
 struct ConnectedPeripheral<'a> {
     peripheral: &'a Peripheral,
-    cleanup: DisconnectCleanup,
+    operation_timeout: Duration,
 }
 
 struct BtleplugTransport<'a> {
@@ -34,8 +34,10 @@ pub async fn query_peripheral(
     response_timeout: Duration,
     control_command: Option<ControlCommand>,
 ) -> Result<QueryResult> {
-    let mut connected =
-        retry_connection(|| ConnectedPeripheral::connect(peripheral, response_timeout)).await?;
+    let connected = retry_connection(|| {
+        ConnectedPeripheral::connect(peripheral, platform_timeout(response_timeout))
+    })
+    .await?;
     let query = async {
         request_session(&connected, response_timeout)
             .await?
@@ -50,7 +52,6 @@ pub async fn query_peripheral(
 
 impl<'a> ConnectedPeripheral<'a> {
     async fn connect(peripheral: &'a Peripheral, operation_timeout: Duration) -> Result<Self> {
-        let mut cleanup = DisconnectCleanup::new(peripheral.clone(), operation_timeout);
         let connection =
             complete_before(operation_timeout, "connect to GAF BLE peripheral", async {
                 peripheral
@@ -62,14 +63,17 @@ impl<'a> ConnectedPeripheral<'a> {
         match connection {
             Ok(()) => Ok(Self {
                 peripheral,
-                cleanup,
+                operation_timeout,
             }),
-            Err(error) => fail_with_cleanup(error, cleanup.run().await),
+            Err(error) => fail_with_cleanup(
+                error,
+                disconnect_peripheral(peripheral, operation_timeout).await,
+            ),
         }
     }
 
-    async fn disconnect(&mut self) -> Result<()> {
-        self.cleanup.run().await
+    async fn disconnect(&self) -> Result<()> {
+        disconnect_peripheral(self.peripheral, self.operation_timeout).await
     }
 }
 

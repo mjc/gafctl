@@ -25,7 +25,8 @@ pub const GAF_CHARACTERISTIC_UUID: Uuid = Uuid::from_u128(0x0000ff01_0000_1000_8
 pub struct ProbeOptions {
     /// How long to scan for the GAF service before selecting a peripheral.
     pub scan_duration: Duration,
-    /// Maximum time for each BLE operation and each command response.
+    /// Maximum time for GATT setup, each command write, and each response.
+    /// Manager setup, scanning, connection, and cleanup allow at least 40 seconds.
     pub response_timeout: Duration,
     /// Action to take after scanning.
     pub mode: ProbeMode,
