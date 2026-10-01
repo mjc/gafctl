@@ -58,6 +58,42 @@ async fn login_trims_username_encodes_utf8_password_and_sends_literal_token_head
     server.abort();
 }
 
+#[test]
+fn api_roots_require_tls_except_for_loopback_http() {
+    let credentials = || Credentials::new("user", "password", AccountRole::Contractor);
+    let https = reqwest::Url::parse("https://api.example.invalid/root/").unwrap();
+    let loopback = reqwest::Url::parse("http://127.0.0.1:8080/root/").unwrap();
+    let localhost = reqwest::Url::parse("http://localhost:8080/root/").unwrap();
+    let public_http = reqwest::Url::parse("http://api.example.invalid/root/").unwrap();
+    let other_scheme = reqwest::Url::parse("ftp://api.example.invalid/root/").unwrap();
+
+    assert!(
+        QuickConnectClient::new(
+            credentials(),
+            QuickConnectConfig::new(https.clone(), https.clone()),
+        )
+        .is_ok()
+    );
+    assert!(
+        QuickConnectClient::new(
+            credentials(),
+            QuickConnectConfig::new(loopback.clone(), localhost),
+        )
+        .is_ok()
+    );
+    assert!(
+        QuickConnectClient::new(
+            credentials(),
+            QuickConnectConfig::new(public_http.clone(), https.clone()),
+        )
+        .is_err()
+    );
+    assert!(
+        QuickConnectClient::new(credentials(), QuickConnectConfig::new(https, other_scheme),)
+            .is_err()
+    );
+}
+
 #[tokio::test]
 async fn concurrent_unauthorized_reads_share_one_replacement_login() {
     let login_count = Arc::new(AtomicUsize::new(0));

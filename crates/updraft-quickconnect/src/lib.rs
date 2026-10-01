@@ -140,6 +140,8 @@ pub struct QuickConnectClient {
 impl QuickConnectClient {
     /// Build a client with TLS verification enabled and redirects disabled.
     pub fn new(credentials: Credentials, config: QuickConnectConfig) -> Result<Self, ClientError> {
+        validate_api_root(&config.auth_base_url)?;
+        validate_api_root(&config.device_base_url)?;
         let http = Client::builder()
             .redirect(Policy::none())
             .timeout(config.timeout)
@@ -505,6 +507,20 @@ fn endpoint(base: &Url, path: &str) -> Result<Url, ClientError> {
         return Err(ClientError::InvalidEndpoint);
     }
     Ok(joined)
+}
+
+fn validate_api_root(url: &Url) -> Result<(), ClientError> {
+    let is_loopback = url.host_str().is_some_and(|host| {
+        host.eq_ignore_ascii_case("localhost")
+            || host
+                .parse::<std::net::IpAddr>()
+                .is_ok_and(|address| address.is_loopback())
+    });
+    if url.scheme() == "https" || (url.scheme() == "http" && is_loopback) {
+        Ok(())
+    } else {
+        Err(ClientError::InvalidEndpoint)
+    }
 }
 
 fn settings_endpoint(base: &Url, provider_id: &str) -> Result<Url, ClientError> {
