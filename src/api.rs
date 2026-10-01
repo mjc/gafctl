@@ -2,7 +2,7 @@ use std::{
     collections::VecDeque,
     net::SocketAddr,
     sync::Arc,
-    time::{Duration, Instant, SystemTime},
+    time::{Duration, Instant},
 };
 
 use crate::control::{CommandId, ControlPreset, FreshControlRequest, unix_millis};
@@ -13,16 +13,16 @@ use axum::{
     http::StatusCode,
     routing::{get, post},
 };
-use futures_util::{StreamExt, stream};
+use futures_util::{Stream, StreamExt, stream};
 use serde::{Deserialize, Serialize};
 use tokio::{
     net::TcpListener,
     sync::{Mutex, RwLock, mpsc, watch},
-    time::{MissedTickBehavior, interval},
+    time::{Interval, MissedTickBehavior, interval},
 };
 use updraft_bluetooth::{
     DisconnectOutcome, ProbeClient, ProbeError, ProbeErrorKind, ProbeMode, ProbeOptions,
-    ProbeResult,
+    ProbeResult, QueryResult,
 };
 use updraft_protocol::{DeviceSnapshot, StateFreshness, StateReconciler};
 
@@ -66,9 +66,7 @@ impl ApiState {
 
     async fn execute_mqtt_control(&self, request: &FreshControlRequest) -> ControlResponse {
         let _ble_guard = self.ble_lock.lock().await;
-        let fresh = unix_millis(SystemTime::now())
-            .is_some_and(|now_unix_ms| request.is_fresh_at(now_unix_ms));
-        if !fresh {
+        if !request.is_fresh_now() {
             return ControlResponse::rejected(
                 request.preset(),
                 "stale or future-dated control request",
@@ -81,7 +79,7 @@ impl ApiState {
         let poll_id = self.reconciler.write().await.begin_poll();
         let outcome = control_outcome(self.probe(Some(preset)).await);
         outcome.log_warnings();
-        let (success, message, snapshot) = outcome.into_response();
+        let (success, message, snapshot) = outcome.into_response_parts();
         let state = self
             .reconcile_control_snapshot(poll_id, snapshot, message)
             .await;
@@ -96,16 +94,18 @@ impl ApiState {
     }
 
     async fn probe(&self, preset: Option<ControlPreset>) -> Result<ProbeResult, ProbeError> {
-        self.ble_client
-            .probe(ProbeOptions {
-                scan_duration: Duration::from_secs(6),
-                response_timeout: Duration::from_secs(3),
-                mode: ProbeMode::Query {
-                    device_id: self.device_id.as_deref().map(str::to_owned),
-                    control_command: preset.map(ControlPreset::command),
-                },
-            })
-            .await
+        self.ble_client.probe(self.probe_options(preset)).await
+    }
+
+    fn probe_options(&self, preset: Option<ControlPreset>) -> ProbeOptions {
+        ProbeOptions {
+            scan_duration: Duration::from_secs(6),
+            response_timeout: Duration::from_secs(3),
+            mode: ProbeMode::Query {
+                device_id: self.device_id.as_deref().map(str::to_owned),
+                control_command: preset.map(ControlPreset::command),
+            },
+        }
     }
 
     async fn reconcile_control_snapshot(
@@ -126,6 +126,51 @@ impl ApiState {
                 None
             }
         }
+    }
+
+    async fn replay_or_execute_control(
+        &self,
+        request: &FreshControlRequest,
+        recent: &mut RecentControlResults,
+    ) -> Arc<ControlResponse> {
+        if !request.is_fresh_now() {
+            return Arc::new(ControlResponse::rejected(
+                request.preset(),
+                "stale or future-dated control request",
+            ));
+        }
+        if let Some(response) = recent.get(request.request_id(), request.preset()) {
+            return response;
+        }
+        let response = Arc::new(self.execute_mqtt_control(request).await);
+        recent.insert(
+            request.request_id().clone(),
+            request.preset(),
+            Arc::clone(&response),
+        );
+        response
+    }
+
+    async fn poll_and_publish_state(&self) {
+        let _ble_guard = self.ble_lock.lock().await;
+        let poll_id = self.reconciler.write().await.begin_poll();
+        let result = self.probe(None).await;
+        self.reconcile_poll_result(poll_id, result).await;
+        self.publish_state().await;
+    }
+
+    async fn reconcile_poll_result(&self, poll_id: u64, result: Result<ProbeResult, ProbeError>) {
+        let mut reconciler = self.reconciler.write().await;
+        record_poll_result(&mut reconciler, poll_id, result);
+    }
+
+    async fn start_mqtt(&mut self, config: crate::mqtt::MqttConfig) -> Result<()> {
+        let initial_state = serde_json::to_string(&device_state_response(self).await)
+            .context("could not serialize initial MQTT state")?;
+        let bridge = crate::mqtt::start(config, initial_state);
+        self.mqtt_updates = Some(bridge.state_updates);
+        tokio::spawn(process_mqtt_controls(self.clone(), bridge.control_requests));
+        Ok(())
     }
 
     async fn publish_state(&self) {
@@ -149,6 +194,29 @@ enum ControlStatus {
     BleRequestFailed(ProbeError),
 }
 
+impl ControlStatus {
+    fn from_readback(
+        control: Option<&updraft_protocol::ControlOutcome>,
+        state_error: Option<String>,
+    ) -> Self {
+        match (
+            control.is_some_and(updraft_protocol::ControlOutcome::is_confirmed),
+            state_error,
+        ) {
+            (true, _) => Self::Confirmed,
+            (false, Some(error)) => Self::ReadbackFailed(error),
+            (false, None) => Self::Mismatch,
+        }
+    }
+}
+
+fn disconnect_error(outcome: DisconnectOutcome) -> Option<String> {
+    match outcome {
+        DisconnectOutcome::Failed(error) => Some(error),
+        DisconnectOutcome::Disconnected => None,
+    }
+}
+
 struct ControlOutcome {
     status: ControlStatus,
     snapshot: Option<DeviceSnapshot>,
@@ -156,6 +224,14 @@ struct ControlOutcome {
 }
 
 impl ControlOutcome {
+    fn from_query(result: QueryResult) -> Self {
+        Self {
+            status: ControlStatus::from_readback(result.control.as_ref(), result.state_error),
+            snapshot: result.snapshot,
+            disconnect_error: disconnect_error(result.disconnect),
+        }
+    }
+
     fn log_warnings(&self) {
         if let Some(error) = &self.disconnect_error {
             tracing::warn!(%error, "BLE disconnect failed after control request");
@@ -173,7 +249,7 @@ impl ControlOutcome {
         }
     }
 
-    fn into_response(self) -> (bool, &'static str, Option<DeviceSnapshot>) {
+    fn into_response_parts(self) -> (bool, &'static str, Option<DeviceSnapshot>) {
         let (success, message) = match self.status {
             ControlStatus::Confirmed => (true, "command acknowledged and readback matched"),
             ControlStatus::ReadbackFailed(_) => {
@@ -196,26 +272,7 @@ impl ControlOutcome {
 
 fn control_outcome(result: Result<ProbeResult, ProbeError>) -> ControlOutcome {
     match result {
-        Ok(ProbeResult::Queried { result, .. }) => {
-            let disconnect_error = match result.disconnect {
-                DisconnectOutcome::Failed(error) => Some(error),
-                DisconnectOutcome::Disconnected => None,
-            };
-            let confirmed = result
-                .control
-                .as_ref()
-                .is_some_and(|control| control.is_confirmed());
-            let status = match (confirmed, result.state_error) {
-                (true, _) => ControlStatus::Confirmed,
-                (false, Some(error)) => ControlStatus::ReadbackFailed(error),
-                (false, None) => ControlStatus::Mismatch,
-            };
-            ControlOutcome {
-                status,
-                snapshot: result.snapshot,
-                disconnect_error,
-            }
-        }
+        Ok(ProbeResult::Queried { result, .. }) => ControlOutcome::from_query(result),
         Ok(
             ProbeResult::NoDevices
             | ProbeResult::Discovered { .. }
@@ -246,14 +303,7 @@ pub(crate) async fn serve(
         .context("could not bind HTTP listener")?;
     let mut state = ApiState::for_device(DEFAULT_FRESHNESS_LIMIT, device_id);
     if let Some(config) = mqtt_config {
-        let initial_state = serde_json::to_string(&device_state_response(&state).await)
-            .context("could not serialize initial MQTT state")?;
-        let bridge = crate::mqtt::start(config, initial_state);
-        state.mqtt_updates = Some(bridge.state_updates);
-        tokio::spawn(process_mqtt_controls(
-            state.clone(),
-            bridge.control_requests,
-        ));
+        state.start_mqtt(config).await?;
     }
     let app = router(state.clone());
     tokio::spawn(poll_device(state, DEFAULT_POLL_INTERVAL));
@@ -373,40 +423,39 @@ async fn process_mqtt_controls(
     state: ApiState,
     controls: mpsc::Receiver<crate::mqtt::MqttControlWork>,
 ) {
-    stream::unfold(controls, |mut controls| async move {
-        let work = controls.recv().await?;
-        Some((work, controls))
-    })
-    .fold(RecentControlResults::default(), |mut recent, work| {
-        let state = &state;
-        async move {
-            let preset = work.request.preset();
-            let fresh = unix_millis(SystemTime::now())
-                .is_some_and(|now_unix_ms| work.request.is_fresh_at(now_unix_ms));
-            if !fresh {
-                let _ = work.reply.send(Arc::new(ControlResponse::rejected(
-                    preset,
-                    "stale or future-dated control request",
-                )));
-                return recent;
-            }
-            let response = match recent.get(work.request.request_id(), preset) {
-                Some(response) => response,
-                None => {
-                    let response = Arc::new(state.execute_mqtt_control(&work.request).await);
-                    recent.insert(
-                        work.request.request_id().clone(),
-                        preset,
-                        Arc::clone(&response),
-                    );
-                    response
-                }
-            };
-            let _ = work.reply.send(response);
-            recent
-        }
-    })
-    .await;
+    control_requests(controls)
+        .fold(RecentControlResults::default(), |recent, work| {
+            reply_to_control_request(&state, recent, work)
+        })
+        .await;
+}
+
+fn control_requests(
+    controls: mpsc::Receiver<crate::mqtt::MqttControlWork>,
+) -> impl Stream<Item = crate::mqtt::MqttControlWork> {
+    stream::unfold(controls, receive_control_request)
+}
+
+async fn receive_control_request(
+    mut controls: mpsc::Receiver<crate::mqtt::MqttControlWork>,
+) -> Option<(
+    crate::mqtt::MqttControlWork,
+    mpsc::Receiver<crate::mqtt::MqttControlWork>,
+)> {
+    let work = controls.recv().await?;
+    Some((work, controls))
+}
+
+async fn reply_to_control_request(
+    state: &ApiState,
+    mut recent: RecentControlResults,
+    work: crate::mqtt::MqttControlWork,
+) -> RecentControlResults {
+    let response = state
+        .replay_or_execute_control(&work.request, &mut recent)
+        .await;
+    let _ = work.reply.send(response);
+    recent
 }
 
 async fn device_state(State(state): State<ApiState>) -> Json<DeviceStateResponse> {
@@ -482,19 +531,12 @@ impl StateValues {
         let version = identity.firmware_version;
         Some(Self {
             firmware_version: format!("{}.{}.{}", version.major, version.minor, version.patch),
-            mode: match mode.mode {
-                updraft_protocol::OperatingMode::Automatic => "automatic",
-                updraft_protocol::OperatingMode::Timer => "timer",
-                updraft_protocol::OperatingMode::Ota => "ota",
-            },
-            controller_fan_flag: match mode.fan {
-                updraft_protocol::FanState::On => "on",
-                updraft_protocol::FanState::Off => "off",
-            },
-            temperature_f: f64::from(sensors.temperature.value()) / 10.0,
-            humidity_percent: f64::from(sensors.humidity.value()) / 10.0,
-            automatic_temperature_threshold_f: f64::from(thresholds.temperature.value()) / 10.0,
-            automatic_humidity_threshold_percent: f64::from(thresholds.humidity.value()) / 10.0,
+            mode: operating_mode_name(mode.mode),
+            controller_fan_flag: fan_state_name(mode.fan),
+            temperature_f: tenths_to_decimal(sensors.temperature.value()),
+            humidity_percent: tenths_to_decimal(sensors.humidity.value()),
+            automatic_temperature_threshold_f: tenths_to_decimal(thresholds.temperature.value()),
+            automatic_humidity_threshold_percent: tenths_to_decimal(thresholds.humidity.value()),
             control_preset: ControlPreset::from_readback(mode.mode, *thresholds, *timer)
                 .map(ControlPreset::as_str),
             timer_remaining_minutes: timer.remaining.value(),
@@ -504,63 +546,92 @@ impl StateValues {
 }
 
 async fn poll_device(state: ApiState, poll_interval: Duration) {
+    poll_ticks(poll_interval)
+        .for_each(|()| state.poll_and_publish_state())
+        .await;
+}
+
+fn poll_ticks(poll_interval: Duration) -> impl Stream<Item = ()> {
     let mut ticker = interval(poll_interval);
     ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
-    stream::unfold(ticker, |mut ticker| async move {
-        ticker.tick().await;
-        Some(((), ticker))
-    })
-    .for_each(|()| async {
-        let _ble_guard = state.ble_lock.lock().await;
-        let poll_id = state.reconciler.write().await.begin_poll();
-        let result = state.probe(None).await;
-        {
-            let mut reconciler = state.reconciler.write().await;
-            match result {
-                Ok(ProbeResult::Queried { result, .. }) => {
-                    if let DisconnectOutcome::Failed(error) = &result.disconnect {
-                        tracing::warn!(%error, "BLE disconnect failed after state poll");
-                    }
-                    match result.snapshot {
-                        Some(snapshot) => {
-                            reconciler.apply_success(poll_id, snapshot);
-                        }
-                        None => {
-                            reconciler.apply_failure(
-                                poll_id,
-                                result.state_error.unwrap_or_else(|| {
-                                    "state query returned no snapshot".to_owned()
-                                }),
-                            );
-                        }
-                    }
-                }
-                Ok(ProbeResult::NoDevices) => {
-                    reconciler.apply_failure(poll_id, "no compatible device found");
-                }
-                Ok(ProbeResult::Ambiguous { .. }) => {
-                    reconciler.apply_failure(poll_id, "device selection was ambiguous");
-                }
-                Ok(ProbeResult::DiscoveryIncomplete { .. }) => {
-                    reconciler.apply_failure(poll_id, "device discovery was incomplete");
-                }
-                Ok(ProbeResult::Discovered { .. }) => {
-                    reconciler.apply_failure(poll_id, "device was not queried");
-                }
-                Err(error) => {
-                    tracing::warn!(%error, "BLE state poll failed");
-                    let message = match error.kind() {
-                        ProbeErrorKind::Unavailable => "BLE unavailable",
-                        ProbeErrorKind::Authentication => "BLE permission or authentication failed",
-                        ProbeErrorKind::Protocol => "GAF protocol error",
-                    };
-                    reconciler.apply_failure(poll_id, message);
-                }
-            }
+    stream::unfold(ticker, wait_for_poll_tick)
+}
+
+async fn wait_for_poll_tick(mut ticker: Interval) -> Option<((), Interval)> {
+    ticker.tick().await;
+    Some(((), ticker))
+}
+
+fn record_poll_result(
+    reconciler: &mut StateReconciler,
+    poll_id: u64,
+    result: Result<ProbeResult, ProbeError>,
+) {
+    match result {
+        Ok(ProbeResult::Queried { result, .. }) => record_query_result(reconciler, poll_id, result),
+        Ok(ProbeResult::NoDevices) => {
+            reconciler.apply_failure(poll_id, "no compatible device found");
         }
-        state.publish_state().await;
-    })
-    .await;
+        Ok(ProbeResult::Ambiguous { .. }) => {
+            reconciler.apply_failure(poll_id, "device selection was ambiguous");
+        }
+        Ok(ProbeResult::DiscoveryIncomplete { .. }) => {
+            reconciler.apply_failure(poll_id, "device discovery was incomplete");
+        }
+        Ok(ProbeResult::Discovered { .. }) => {
+            reconciler.apply_failure(poll_id, "device was not queried");
+        }
+        Err(error) => {
+            tracing::warn!(%error, "BLE state poll failed");
+            reconciler.apply_failure(poll_id, probe_error_message(&error));
+        }
+    }
+}
+
+fn record_query_result(reconciler: &mut StateReconciler, poll_id: u64, result: QueryResult) {
+    if let DisconnectOutcome::Failed(error) = &result.disconnect {
+        tracing::warn!(%error, "BLE disconnect failed after state poll");
+    }
+    match result.snapshot {
+        Some(snapshot) => {
+            reconciler.apply_success(poll_id, snapshot);
+        }
+        None => {
+            reconciler.apply_failure(
+                poll_id,
+                result
+                    .state_error
+                    .unwrap_or_else(|| "state query returned no snapshot".to_owned()),
+            );
+        }
+    }
+}
+
+fn probe_error_message(error: &ProbeError) -> &'static str {
+    match error.kind() {
+        ProbeErrorKind::Unavailable => "BLE unavailable",
+        ProbeErrorKind::Authentication => "BLE permission or authentication failed",
+        ProbeErrorKind::Protocol => "GAF protocol error",
+    }
+}
+
+fn tenths_to_decimal(value: u16) -> f64 {
+    f64::from(value) / 10.0
+}
+
+const fn operating_mode_name(mode: updraft_protocol::OperatingMode) -> &'static str {
+    match mode {
+        updraft_protocol::OperatingMode::Automatic => "automatic",
+        updraft_protocol::OperatingMode::Timer => "timer",
+        updraft_protocol::OperatingMode::Ota => "ota",
+    }
+}
+
+const fn fan_state_name(fan: updraft_protocol::FanState) -> &'static str {
+    match fan {
+        updraft_protocol::FanState::On => "on",
+        updraft_protocol::FanState::Off => "off",
+    }
 }
 
 const fn freshness_name(freshness: StateFreshness) -> &'static str {
@@ -573,6 +644,8 @@ const fn freshness_name(freshness: StateFreshness) -> &'static str {
 
 #[cfg(test)]
 mod tests {
+    use std::time::SystemTime;
+
     use axum::{body::Body, http::Request};
     use http_body_util::BodyExt;
     use tower::ServiceExt;

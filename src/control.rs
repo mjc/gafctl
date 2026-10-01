@@ -136,6 +136,10 @@ impl FreshControlRequest {
         self.0.preset
     }
 
+    pub(crate) fn is_fresh_now(&self) -> bool {
+        unix_millis(SystemTime::now()).is_some_and(|now| self.is_fresh_at(now))
+    }
+
     pub(crate) fn is_fresh_at(&self, now_unix_ms: u64) -> bool {
         self.0.is_fresh_at(now_unix_ms)
     }

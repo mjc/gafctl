@@ -168,13 +168,7 @@ pub(crate) async fn run() -> Result<()> {
 
 impl ServeOptions {
     async fn run(self) -> Result<()> {
-        let mqtt_password = match std::env::var("UPDRAFT_MQTT_PASSWORD") {
-            Ok(password) => Some(password),
-            Err(std::env::VarError::NotPresent) => None,
-            Err(std::env::VarError::NotUnicode(_)) => {
-                bail!("UPDRAFT_MQTT_PASSWORD must be valid UTF-8")
-            }
-        };
+        let mqtt_password = read_mqtt_password()?;
         let mqtt_config = mqtt_config(
             self.mqtt_host,
             self.mqtt_port,
@@ -183,6 +177,16 @@ impl ServeOptions {
             self.mqtt_discovery,
         )?;
         crate::api::serve(self.device_id, self.bind, self.allow_remote, mqtt_config).await
+    }
+}
+
+fn read_mqtt_password() -> Result<Option<String>> {
+    match std::env::var("UPDRAFT_MQTT_PASSWORD") {
+        Ok(password) => Ok(Some(password)),
+        Err(std::env::VarError::NotPresent) => Ok(None),
+        Err(std::env::VarError::NotUnicode(_)) => {
+            bail!("UPDRAFT_MQTT_PASSWORD must be valid UTF-8")
+        }
     }
 }
 
