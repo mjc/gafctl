@@ -1,19 +1,18 @@
 use std::{
     sync::Arc,
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime},
 };
 
 use crate::{
     api::ControlResponse,
-    control::{CommandId, ControlPreset, ControlRequest, FreshControlRequest},
+    control::{CommandId, ControlPreset, ControlRequest, FreshControlRequest, unix_millis},
 };
-use rumqttc::{AsyncClient, Event, LastWill, MqttOptions, Packet, Publish, QoS};
-use serde::Deserialize;
+use rumqttc::{AsyncClient, Event, EventLoop, LastWill, MqttOptions, Packet, Publish, QoS};
 use serde::Serialize;
 use serde_json::{Value, json};
 use thiserror::Error;
 use tokio::{
-    sync::{mpsc, oneshot, watch},
+    sync::{Semaphore, mpsc, oneshot, watch},
     time::{sleep, timeout},
 };
 
@@ -23,6 +22,7 @@ const CONTROL_REQUEST_TOPIC: &str = "updraft/gaf_vent/control/set";
 const CONTROL_RESULT_TOPIC: &str = "updraft/gaf_vent/control/result";
 const DEVICE_IDENTIFIER: &str = "updraft_gaf_vent";
 const CONTROL_QUEUE_CAPACITY: usize = 8;
+const MAX_PENDING_CONTROL_RESULTS: usize = 32;
 const CONTROL_RESPONSE_TIMEOUT: Duration = Duration::from_secs(120);
 const MAX_CONTROL_REQUEST_BYTES: usize = 1024;
 const DISCOVERY_TOPICS: [&str; 13] = [
@@ -42,13 +42,13 @@ const DISCOVERY_TOPICS: [&str; 13] = [
 ];
 
 pub(crate) struct MqttControlWork {
-    pub request: FreshControlRequest,
-    pub reply: oneshot::Sender<Arc<ControlResponse>>,
+    pub(crate) request: FreshControlRequest,
+    pub(crate) reply: oneshot::Sender<Arc<ControlResponse>>,
 }
 
 pub(crate) struct MqttBridge {
-    pub state_updates: watch::Sender<Arc<String>>,
-    pub control_requests: mpsc::Receiver<MqttControlWork>,
+    pub(crate) state_updates: watch::Sender<Arc<String>>,
+    pub(crate) control_requests: mpsc::Receiver<MqttControlWork>,
 }
 
 #[derive(Debug, Error)]
@@ -64,28 +64,15 @@ fn parse_control_request(payload: &[u8]) -> Result<ControlRequest, MqttControlPa
         return Err(MqttControlParseError::PayloadTooLarge);
     }
 
-    #[derive(Deserialize)]
-    #[serde(deny_unknown_fields)]
-    struct WireRequest {
-        request_id: CommandId,
-        issued_at_unix_ms: u64,
-        preset: ControlPreset,
-    }
-
-    let request: WireRequest = serde_json::from_slice(payload)?;
-    Ok(ControlRequest::new(
-        request.request_id,
-        request.preset,
-        request.issued_at_unix_ms,
-    ))
+    Ok(serde_json::from_slice(payload)?)
 }
 
 pub(crate) struct MqttConfig {
-    pub host: String,
-    pub port: u16,
-    pub username: String,
-    pub password: String,
-    pub discovery_enabled: bool,
+    pub(crate) host: String,
+    pub(crate) port: u16,
+    pub(crate) username: String,
+    pub(crate) password: String,
+    pub(crate) discovery_enabled: bool,
 }
 
 pub(crate) fn start(config: MqttConfig, initial_state: String) -> MqttBridge {
@@ -99,82 +86,22 @@ pub(crate) fn start(config: MqttConfig, initial_state: String) -> MqttBridge {
         true,
     ));
     let discovery_enabled = config.discovery_enabled;
-    let (client, mut eventloop) = AsyncClient::new(options, 32);
-    let (state_tx, mut state_rx) = watch::channel(Arc::new(initial_state));
+    let (client, eventloop) = AsyncClient::new(options, 32);
+    let (state_tx, state_rx) = watch::channel(Arc::new(initial_state));
     let (connected_tx, connected_rx) = watch::channel(false);
     let (control_tx, control_rx) = mpsc::channel(CONTROL_QUEUE_CAPACITY);
-    let event_client = client.clone();
-
-    let setup_client = client.clone();
-    let mut setup_connected_rx = connected_rx.clone();
-    tokio::spawn(async move {
-        while setup_connected_rx.changed().await.is_ok() {
-            if !*setup_connected_rx.borrow() {
-                continue;
-            }
-            if let Err(error) = setup_client
-                .subscribe(CONTROL_REQUEST_TOPIC, QoS::AtLeastOnce)
-                .await
-            {
-                tracing::warn!(%error, "could not subscribe to MQTT controls");
-            }
-            if discovery_enabled {
-                publish_discovery(&setup_client).await;
-            } else {
-                clear_discovery(&setup_client).await;
-            }
-            publish(&setup_client, AVAILABILITY_TOPIC, "online").await;
-        }
-    });
-
-    tokio::spawn(async move {
-        loop {
-            match eventloop.poll().await {
-                Ok(Event::Incoming(Packet::ConnAck(_))) => {
-                    connected_tx.send_replace(true);
-                }
-                Ok(Event::Incoming(Packet::Publish(message)))
-                    if message.topic == CONTROL_REQUEST_TOPIC =>
-                {
-                    dispatch_control(event_client.clone(), control_tx.clone(), message);
-                }
-                Ok(_) => {}
-                Err(error) => {
-                    connected_tx.send_replace(false);
-                    tracing::warn!(%error, "MQTT connection lost; reconnecting");
-                    sleep(Duration::from_secs(1)).await;
-                }
-            }
-        }
-    });
-
-    let update_client = client;
-    tokio::spawn(async move {
-        let client = update_client;
-        let mut connected_rx = connected_rx;
-        loop {
-            tokio::select! {
-                changed = state_rx.changed() => {
-                    if changed.is_err() {
-                        return;
-                    }
-                    if *connected_rx.borrow() {
-                        let payload = Arc::clone(&*state_rx.borrow());
-                        publish(&client, STATE_TOPIC, &payload).await;
-                    }
-                }
-                changed = connected_rx.changed() => {
-                    if changed.is_err() {
-                        return;
-                    }
-                    if *connected_rx.borrow() {
-                        let payload = Arc::clone(&*state_rx.borrow());
-                        publish(&client, STATE_TOPIC, &payload).await;
-                    }
-                }
-            }
-        }
-    });
+    tokio::spawn(setup_connection(
+        client.clone(),
+        connected_rx.clone(),
+        discovery_enabled,
+    ));
+    tokio::spawn(run_event_loop(
+        eventloop,
+        client.clone(),
+        connected_tx,
+        control_tx,
+    ));
+    tokio::spawn(publish_state_updates(client, state_rx, connected_rx));
 
     MqttBridge {
         state_updates: state_tx,
@@ -182,9 +109,82 @@ pub(crate) fn start(config: MqttConfig, initial_state: String) -> MqttBridge {
     }
 }
 
-fn dispatch_control(
+async fn setup_connection(
     client: AsyncClient,
-    control_tx: mpsc::Sender<MqttControlWork>,
+    mut connected: watch::Receiver<bool>,
+    discovery_enabled: bool,
+) {
+    while connected.changed().await.is_ok() {
+        if !*connected.borrow_and_update() {
+            continue;
+        }
+        if let Err(error) = client
+            .subscribe(CONTROL_REQUEST_TOPIC, QoS::AtLeastOnce)
+            .await
+        {
+            tracing::warn!(%error, "could not subscribe to MQTT controls");
+        }
+        if discovery_enabled {
+            publish_discovery(&client).await;
+        } else {
+            clear_discovery(&client).await;
+        }
+        publish(&client, AVAILABILITY_TOPIC, "online").await;
+    }
+}
+
+async fn run_event_loop(
+    mut eventloop: EventLoop,
+    client: AsyncClient,
+    connected: watch::Sender<bool>,
+    controls: mpsc::Sender<MqttControlWork>,
+) {
+    let pending_results = Arc::new(Semaphore::new(MAX_PENDING_CONTROL_RESULTS));
+    loop {
+        match eventloop.poll().await {
+            Ok(Event::Incoming(Packet::ConnAck(_))) => {
+                connected.send_replace(true);
+            }
+            Ok(Event::Incoming(Packet::Publish(message)))
+                if message.topic == CONTROL_REQUEST_TOPIC =>
+            {
+                dispatch_control(&client, &controls, &pending_results, message);
+            }
+            Ok(_) => {}
+            Err(error) => {
+                connected.send_replace(false);
+                tracing::warn!(%error, "MQTT connection lost; reconnecting");
+                sleep(Duration::from_secs(1)).await;
+            }
+        }
+    }
+}
+
+async fn publish_state_updates(
+    client: AsyncClient,
+    mut state: watch::Receiver<Arc<String>>,
+    mut connected: watch::Receiver<bool>,
+) {
+    loop {
+        let changed = tokio::select! {
+            changed = state.changed() => changed,
+            changed = connected.changed() => changed,
+        };
+        if changed.is_err() {
+            return;
+        }
+        if !*connected.borrow_and_update() {
+            continue;
+        }
+        let payload = Arc::clone(&*state.borrow_and_update());
+        publish(&client, STATE_TOPIC, &payload).await;
+    }
+}
+
+fn dispatch_control(
+    client: &AsyncClient,
+    control_tx: &mpsc::Sender<MqttControlWork>,
+    pending_results: &Arc<Semaphore>,
     message: Publish,
 ) {
     let request = match parse_control_request(&message.payload) {
@@ -194,22 +194,21 @@ fn dispatch_control(
             return;
         }
     };
-    let request_id = request.request_id().clone();
     let preset = request.preset();
-    let Some(now_unix_ms) = unix_millis_now() else {
+    let Some(now_unix_ms) = unix_millis(SystemTime::now()) else {
         try_publish_ack(
-            &client,
-            &request_id,
+            client,
+            request.request_id(),
             ControlResponse::rejected(preset, "system clock is unavailable"),
         );
         return;
     };
     let request = match request.validate_fresh_at(now_unix_ms) {
         Ok(request) => request,
-        Err(_) => {
+        Err(request) => {
             try_publish_ack(
-                &client,
-                &request_id,
+                client,
+                request.request_id(),
                 ControlResponse::rejected(preset, "stale or future-dated control request"),
             );
             return;
@@ -217,43 +216,55 @@ fn dispatch_control(
     };
     if message.retain {
         try_publish_ack(
-            &client,
-            &request_id,
+            client,
+            request.request_id(),
             ControlResponse::rejected(preset, "retained control requests are rejected"),
         );
         return;
     }
 
+    let Ok(permit) = Arc::clone(pending_results).try_acquire_owned() else {
+        try_publish_ack(
+            client,
+            request.request_id(),
+            ControlResponse::rejected(preset, "control results are busy"),
+        );
+        return;
+    };
+
+    let request_id = request.request_id().clone();
     let (reply, response) = oneshot::channel();
     match control_tx.try_send(MqttControlWork { request, reply }) {
         Ok(()) => {
+            let client = client.clone();
             tokio::spawn(async move {
-                let response = match timeout(CONTROL_RESPONSE_TIMEOUT, response).await {
-                    Ok(Ok(response)) => response,
-                    Ok(Err(_)) => {
-                        tracing::warn!("MQTT control worker ended before returning a result");
-                        return;
-                    }
-                    Err(_) => {
-                        tracing::warn!(
-                            "MQTT control request timed out waiting for device readback"
-                        );
-                        return;
+                let _permit = permit;
+                let acknowledge = async {
+                    match response.await {
+                        Ok(response) => publish_ack(&client, &request_id, &response).await,
+                        Err(_) => {
+                            tracing::warn!("MQTT control worker ended before returning a result")
+                        }
                     }
                 };
-                publish_ack(&client, &request_id, response).await;
+                if timeout(CONTROL_RESPONSE_TIMEOUT, acknowledge)
+                    .await
+                    .is_err()
+                {
+                    tracing::warn!("MQTT control response or publication timed out");
+                }
             });
         }
         Err(mpsc::error::TrySendError::Full(_)) => {
             try_publish_ack(
-                &client,
+                client,
                 &request_id,
                 ControlResponse::rejected(preset, "control queue is full"),
             );
         }
         Err(mpsc::error::TrySendError::Closed(_)) => {
             try_publish_ack(
-                &client,
+                client,
                 &request_id,
                 ControlResponse::rejected(preset, "control worker is unavailable"),
             );
@@ -261,15 +272,8 @@ fn dispatch_control(
     }
 }
 
-fn unix_millis_now() -> Option<u64> {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .ok()
-        .and_then(|elapsed| elapsed.as_millis().try_into().ok())
-}
-
-async fn publish_ack(client: &AsyncClient, request_id: &CommandId, result: Arc<ControlResponse>) {
-    match control_acknowledgement_payload(request_id, &result) {
+async fn publish_ack(client: &AsyncClient, request_id: &CommandId, result: &ControlResponse) {
+    match control_acknowledgement_payload(request_id, result) {
         Ok(payload) => {
             if let Err(error) = client
                 .publish(CONTROL_RESULT_TOPIC, QoS::AtLeastOnce, false, payload)
@@ -348,7 +352,15 @@ async fn publish(client: &AsyncClient, topic: &str, payload: &str) {
     }
 }
 
-fn discovery_configs() -> impl Iterator<Item = (String, Value)> {
+fn discovery_configs() -> impl Iterator<Item = (&'static str, Value)> {
+    DISCOVERY_TOPICS.into_iter().zip(
+        sensor_discovery_configs()
+            .chain(std::iter::once_with(control_discovery_config))
+            .chain(std::iter::once_with(result_discovery_config)),
+    )
+}
+
+fn sensor_discovery_configs() -> impl Iterator<Item = Value> {
     let sensors = [
         (
             "temperature",
@@ -451,7 +463,7 @@ fn discovery_configs() -> impl Iterator<Item = (String, Value)> {
         ),
     ];
 
-    let sensor_configs = sensors
+    sensors
         .into_iter()
         .map(
             |(key, name, field, unit, device_class, state_class, entity_category)| {
@@ -479,12 +491,7 @@ fn discovery_configs() -> impl Iterator<Item = (String, Value)> {
                     "payload_available": "online",
                     "payload_not_available": "offline",
                     "value_template": format!("{{{{ value_json.{value_path} }}}}"),
-                    "device": {
-                        "identifiers": [DEVICE_IDENTIFIER],
-                        "name": "Updraft GAF Wi-Fi Vent",
-                        "manufacturer": "GAF",
-                        "model": "GAF Wi-Fi Vent"
-                    }
+                    "device": discovery_device()
                 });
                 if let Some(unit) = unit {
                     payload["unit_of_measurement"] = json!(unit);
@@ -498,17 +505,13 @@ fn discovery_configs() -> impl Iterator<Item = (String, Value)> {
                 if let Some(entity_category) = entity_category {
                     payload["entity_category"] = json!(entity_category);
                 }
-                (
-                    format!("homeassistant/sensor/updraft/{key}/config"),
-                    payload,
-                )
+                payload
             },
         )
-        ;
+}
 
-    let control_config = (
-        "homeassistant/select/updraft/control/config".to_owned(),
-        json!({
+fn control_discovery_config() -> Value {
+    json!({
             "name": "Controller preset",
             "unique_id": format!("{DEVICE_IDENTIFIER}_control_preset"),
             "command_topic": CONTROL_REQUEST_TOPIC,
@@ -532,18 +535,13 @@ fn discovery_configs() -> impl Iterator<Item = (String, Value)> {
             "availability_mode": "all",
             "payload_available": "online",
             "payload_not_available": "offline",
-            "device": {
-                "identifiers": [DEVICE_IDENTIFIER],
-                "name": "Updraft GAF Wi-Fi Vent",
-                "manufacturer": "GAF",
-                "model": "GAF Wi-Fi Vent"
-            },
+            "device": discovery_device(),
             "entity_category": "config"
-        }),
-    );
-    let result_config = (
-        "homeassistant/sensor/updraft/control_result/config".to_owned(),
-        json!({
+    })
+}
+
+fn result_discovery_config() -> Value {
+    json!({
             "name": "Last control result",
             "unique_id": format!("{DEVICE_IDENTIFIER}_control_result"),
             "state_topic": CONTROL_RESULT_TOPIC,
@@ -551,17 +549,18 @@ fn discovery_configs() -> impl Iterator<Item = (String, Value)> {
             "availability_topic": AVAILABILITY_TOPIC,
             "payload_available": "online",
             "payload_not_available": "offline",
-            "device": {
-                "identifiers": [DEVICE_IDENTIFIER],
-                "name": "Updraft GAF Wi-Fi Vent",
-                "manufacturer": "GAF",
-                "model": "GAF Wi-Fi Vent"
-            },
+            "device": discovery_device(),
             "entity_category": "diagnostic"
-        }),
-    );
+    })
+}
 
-    sensor_configs.chain([control_config, result_config])
+fn discovery_device() -> Value {
+    json!({
+        "identifiers": [DEVICE_IDENTIFIER],
+        "name": "Updraft GAF Wi-Fi Vent",
+        "manufacturer": "GAF",
+        "model": "GAF Wi-Fi Vent"
+    })
 }
 
 #[cfg(test)]
@@ -579,13 +578,13 @@ mod tests {
                 && payload["device"]["identifiers"][0] == DEVICE_IDENTIFIER
         }));
         assert!(configs.iter().any(|(topic, payload)| {
-            topic == "homeassistant/sensor/updraft/temperature/config"
+            *topic == "homeassistant/sensor/updraft/temperature/config"
                 && payload["value_template"] == "{{ value_json.state.temperature_f }}"
                 && payload["unit_of_measurement"] == "°F"
                 && payload["availability"].as_array().unwrap().len() == 2
         }));
         assert!(configs.iter().any(|(topic, payload)| {
-            topic == "homeassistant/sensor/updraft/freshness/config"
+            *topic == "homeassistant/sensor/updraft/freshness/config"
                 && payload["value_template"] == "{{ value_json.freshness }}"
                 && payload["availability"].as_array().unwrap().len() == 1
         }));
@@ -631,15 +630,55 @@ mod tests {
         assert!(parse_control_request(&oversized).is_err());
     }
 
+    #[tokio::test]
+    async fn stalled_result_publication_bounds_accepted_controls() {
+        let (client, eventloop) = AsyncClient::new(MqttOptions::new("test", "localhost", 1883), 1);
+        let (controls, mut queued) = mpsc::channel(CONTROL_QUEUE_CAPACITY);
+        let pending = Arc::new(Semaphore::new(2));
+        let request = |index| {
+            Publish::new(
+                CONTROL_REQUEST_TOPIC,
+                QoS::AtLeastOnce,
+                serde_json::to_vec(&json!({
+                    "request_id": format!("request-{index}"),
+                    "issued_at_unix_ms": unix_millis(SystemTime::now()).unwrap(),
+                    "preset": "timer_clear",
+                }))
+                .unwrap(),
+            )
+        };
+
+        // One result fills the MQTT queue; two more wait for publication.
+        for index in 0..3 {
+            dispatch_control(&client, &controls, &pending, request(index));
+            let work = queued.try_recv().expect("control should be accepted");
+            assert!(
+                work.reply
+                    .send(Arc::new(ControlResponse::rejected(
+                        work.request.preset(),
+                        "test result",
+                    )))
+                    .is_ok()
+            );
+            tokio::task::yield_now().await;
+        }
+        dispatch_control(&client, &controls, &pending, request(3));
+        assert!(
+            queued.try_recv().is_err(),
+            "stalled results must bound new device work"
+        );
+        drop(eventloop);
+    }
+
     #[test]
     fn discovery_exposes_one_correlated_control_select_on_the_updraft_device() {
         let configs = discovery_configs().collect::<Vec<_>>();
         let (topic, control) = configs
             .iter()
-            .find(|(topic, _)| topic == "homeassistant/select/updraft/control/config")
+            .find(|(topic, _)| *topic == "homeassistant/select/updraft/control/config")
             .expect("control select discovery is present");
 
-        assert_eq!(topic, "homeassistant/select/updraft/control/config");
+        assert_eq!(*topic, "homeassistant/select/updraft/control/config");
         assert_eq!(control["command_topic"], "updraft/gaf_vent/control/set");
         assert_eq!(control["qos"], 1);
         assert!(control.get("command_qos").is_none());
@@ -673,7 +712,7 @@ mod tests {
 
         let result = configs
             .iter()
-            .find(|(topic, _)| topic == "homeassistant/sensor/updraft/control_result/config")
+            .find(|(topic, _)| *topic == "homeassistant/sensor/updraft/control_result/config")
             .expect("control result sensor discovery is present");
         assert_eq!(result.1["state_topic"], "updraft/gaf_vent/control/result");
     }

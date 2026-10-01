@@ -2,11 +2,11 @@ use std::{
     collections::VecDeque,
     net::SocketAddr,
     sync::Arc,
-    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime},
 };
 
-use crate::control::{CommandId, ControlPreset, FreshControlRequest};
-use anyhow::Result;
+use crate::control::{CommandId, ControlPreset, FreshControlRequest, unix_millis};
+use anyhow::{Context, Result};
 use axum::{
     Json, Router,
     extract::State,
@@ -78,7 +78,7 @@ impl ApiState {
 
     async fn execute_control_locked(&self, preset: ControlPreset) -> ControlResponse {
         let poll_id = self.reconciler.write().await.begin_poll();
-        let outcome = control_outcome(self.probe_control(preset).await);
+        let outcome = control_outcome(self.probe(Some(preset)).await);
         outcome.log_warnings();
         let (success, message, snapshot) = outcome.into_response();
         let state = self
@@ -94,14 +94,14 @@ impl ApiState {
         }
     }
 
-    async fn probe_control(&self, preset: ControlPreset) -> Result<ProbeResult, ProbeError> {
+    async fn probe(&self, preset: Option<ControlPreset>) -> Result<ProbeResult, ProbeError> {
         self.ble_client
             .probe(ProbeOptions {
                 scan_duration: Duration::from_secs(6),
                 response_timeout: Duration::from_secs(3),
                 mode: ProbeMode::Query {
                     device_id: self.device_id.as_deref().map(str::to_owned),
-                    control_command: Some(preset.command()),
+                    control_command: preset.map(ControlPreset::command),
                 },
             })
             .await
@@ -113,20 +113,15 @@ impl ApiState {
         snapshot: Option<DeviceSnapshot>,
         message: &'static str,
     ) -> Option<StateValues> {
+        let mut reconciler = self.reconciler.write().await;
         match snapshot {
             Some(snapshot) => {
                 let state = StateValues::from_snapshot(&snapshot);
-                self.reconciler
-                    .write()
-                    .await
-                    .apply_success(poll_id, snapshot);
+                reconciler.apply_success(poll_id, snapshot);
                 state
             }
             None => {
-                self.reconciler
-                    .write()
-                    .await
-                    .apply_failure(poll_id, message);
+                reconciler.apply_failure(poll_id, message);
                 None
             }
         }
@@ -220,7 +215,12 @@ fn control_outcome(result: Result<ProbeResult, ProbeError>) -> ControlOutcome {
                 disconnect_error,
             }
         }
-        Ok(_) => ControlOutcome {
+        Ok(
+            ProbeResult::NoDevices
+            | ProbeResult::Discovered { .. }
+            | ProbeResult::Ambiguous { .. }
+            | ProbeResult::DiscoveryIncomplete { .. },
+        ) => ControlOutcome {
             status: ControlStatus::DeviceSelectionFailed,
             snapshot: None,
             disconnect_error: None,
@@ -240,10 +240,13 @@ pub(crate) async fn serve(
     mqtt_config: Option<crate::mqtt::MqttConfig>,
 ) -> Result<()> {
     validate_bind_address(address, allow_remote)?;
-    let listener = TcpListener::bind(address).await?;
+    let listener = TcpListener::bind(address)
+        .await
+        .context("could not bind HTTP listener")?;
     let mut state = ApiState::for_device(DEFAULT_FRESHNESS_LIMIT, device_id);
     if let Some(config) = mqtt_config {
-        let initial_state = serde_json::to_string(&device_state_response(&state).await)?;
+        let initial_state = serde_json::to_string(&device_state_response(&state).await)
+            .context("could not serialize initial MQTT state")?;
         let bridge = crate::mqtt::start(config, initial_state);
         state.mqtt_updates = Some(bridge.state_updates);
         tokio::spawn(process_mqtt_controls(
@@ -255,8 +258,9 @@ pub(crate) async fn serve(
     tokio::spawn(poll_device(state, DEFAULT_POLL_INTERVAL));
 
     tracing::info!(%address, "Updraft API listening");
-    axum::serve(listener, app).await?;
-    Ok(())
+    axum::serve(listener, app)
+        .await
+        .context("HTTP server failed")
 }
 
 fn validate_bind_address(address: SocketAddr, allow_remote: bool) -> Result<()> {
@@ -336,19 +340,18 @@ struct RecentControlResults(VecDeque<(CommandId, ControlPreset, Arc<ControlRespo
 
 impl RecentControlResults {
     fn get(&self, request_id: &CommandId, preset: ControlPreset) -> Option<Arc<ControlResponse>> {
-        self.0
+        let (_, seen_preset, response) = self
+            .0
             .iter()
-            .find(|(seen_id, _, _)| seen_id == request_id)
-            .map(|(_, seen_preset, response)| {
-                if *seen_preset == preset {
-                    response.clone()
-                } else {
-                    Arc::new(ControlResponse::rejected(
-                        preset,
-                        "request_id was reused for another preset",
-                    ))
-                }
-            })
+            .find(|(seen_id, _, _)| seen_id == request_id)?;
+        Some(if *seen_preset == preset {
+            Arc::clone(response)
+        } else {
+            Arc::new(ControlResponse::rejected(
+                preset,
+                "request_id was reused for another preset",
+            ))
+        })
     }
 
     fn insert(
@@ -371,25 +374,26 @@ async fn process_mqtt_controls(
 ) {
     let mut recent = RecentControlResults::default();
     while let Some(work) = controls.recv().await {
+        let preset = work.request.preset();
         let fresh = unix_millis(SystemTime::now())
             .is_some_and(|now_unix_ms| work.request.is_fresh_at(now_unix_ms));
-        let response = if !fresh {
-            Arc::new(ControlResponse::rejected(
-                work.request.preset(),
+        if !fresh {
+            let _ = work.reply.send(Arc::new(ControlResponse::rejected(
+                preset,
                 "stale or future-dated control request",
-            ))
-        } else {
-            match recent.get(work.request.request_id(), work.request.preset()) {
-                Some(response) => response,
-                None => {
-                    let response = Arc::new(state.execute_mqtt_control(&work.request).await);
-                    recent.insert(
-                        work.request.request_id().clone(),
-                        work.request.preset(),
-                        Arc::clone(&response),
-                    );
-                    response
-                }
+            )));
+            continue;
+        }
+        let response = match recent.get(work.request.request_id(), preset) {
+            Some(response) => response,
+            None => {
+                let response = Arc::new(state.execute_mqtt_control(&work.request).await);
+                recent.insert(
+                    work.request.request_id().clone(),
+                    preset,
+                    Arc::clone(&response),
+                );
+                response
             }
         };
         let _ = work.reply.send(response);
@@ -497,82 +501,51 @@ async fn poll_device(state: ApiState, poll_interval: Duration) {
         ticker.tick().await;
         let _ble_guard = state.ble_lock.lock().await;
         let poll_id = state.reconciler.write().await.begin_poll();
-        let result = state
-            .ble_client
-            .probe(ProbeOptions {
-                scan_duration: Duration::from_secs(6),
-                response_timeout: Duration::from_secs(3),
-                mode: ProbeMode::Query {
-                    device_id: state.device_id.as_deref().map(str::to_owned),
-                    control_command: None,
-                },
-            })
-            .await;
-
-        match result {
-            Ok(ProbeResult::Queried { result, .. }) => {
-                if let DisconnectOutcome::Failed(error) = &result.disconnect {
-                    tracing::warn!(%error, "BLE disconnect failed after state poll");
-                }
-                match result.snapshot {
-                    Some(snapshot) => {
-                        state
-                            .reconciler
-                            .write()
-                            .await
-                            .apply_success(poll_id, snapshot);
+        let result = state.probe(None).await;
+        {
+            let mut reconciler = state.reconciler.write().await;
+            match result {
+                Ok(ProbeResult::Queried { result, .. }) => {
+                    if let DisconnectOutcome::Failed(error) = &result.disconnect {
+                        tracing::warn!(%error, "BLE disconnect failed after state poll");
                     }
-                    None => {
-                        let error = result
-                            .state_error
-                            .unwrap_or_else(|| "state query returned no snapshot".to_owned());
-                        state.reconciler.write().await.apply_failure(poll_id, error);
+                    match result.snapshot {
+                        Some(snapshot) => {
+                            reconciler.apply_success(poll_id, snapshot);
+                        }
+                        None => {
+                            reconciler.apply_failure(
+                                poll_id,
+                                result.state_error.unwrap_or_else(|| {
+                                    "state query returned no snapshot".to_owned()
+                                }),
+                            );
+                        }
                     }
                 }
-            }
-            Ok(ProbeResult::NoDevices) => {
-                state
-                    .reconciler
-                    .write()
-                    .await
-                    .apply_failure(poll_id, "no compatible device found");
-            }
-            Ok(ProbeResult::Ambiguous { .. }) => {
-                state
-                    .reconciler
-                    .write()
-                    .await
-                    .apply_failure(poll_id, "device selection was ambiguous");
-            }
-            Ok(ProbeResult::DiscoveryIncomplete { .. }) => {
-                state
-                    .reconciler
-                    .write()
-                    .await
-                    .apply_failure(poll_id, "device discovery was incomplete");
-            }
-            Ok(ProbeResult::Discovered { .. }) => {
-                state
-                    .reconciler
-                    .write()
-                    .await
-                    .apply_failure(poll_id, "device was not queried");
-            }
-            Err(error) => {
-                tracing::warn!(%error, "BLE state poll failed");
-                let message = match error.kind() {
-                    ProbeErrorKind::Unavailable => "BLE unavailable",
-                    ProbeErrorKind::Authentication => "BLE permission or authentication failed",
-                    ProbeErrorKind::Protocol => "GAF protocol error",
-                };
-                state
-                    .reconciler
-                    .write()
-                    .await
-                    .apply_failure(poll_id, message);
+                Ok(ProbeResult::NoDevices) => {
+                    reconciler.apply_failure(poll_id, "no compatible device found");
+                }
+                Ok(ProbeResult::Ambiguous { .. }) => {
+                    reconciler.apply_failure(poll_id, "device selection was ambiguous");
+                }
+                Ok(ProbeResult::DiscoveryIncomplete { .. }) => {
+                    reconciler.apply_failure(poll_id, "device discovery was incomplete");
+                }
+                Ok(ProbeResult::Discovered { .. }) => {
+                    reconciler.apply_failure(poll_id, "device was not queried");
+                }
+                Err(error) => {
+                    tracing::warn!(%error, "BLE state poll failed");
+                    let message = match error.kind() {
+                        ProbeErrorKind::Unavailable => "BLE unavailable",
+                        ProbeErrorKind::Authentication => "BLE permission or authentication failed",
+                        ProbeErrorKind::Protocol => "GAF protocol error",
+                    };
+                    reconciler.apply_failure(poll_id, message);
+                }
             }
         }
-
         state.publish_state().await;
     }
 }
@@ -583,13 +556,6 @@ const fn freshness_name(freshness: StateFreshness) -> &'static str {
         StateFreshness::Fresh => "fresh",
         StateFreshness::Stale => "stale",
     }
-}
-
-fn unix_millis(timestamp: SystemTime) -> Option<u64> {
-    timestamp
-        .duration_since(UNIX_EPOCH)
-        .ok()
-        .and_then(|duration| duration.as_millis().try_into().ok())
 }
 
 #[cfg(test)]
@@ -739,7 +705,7 @@ mod tests {
 
     #[test]
     fn mqtt_control_request_ids_replay_once_and_reject_preset_changes() {
-        let id = CommandId::parse("ha-command-1".to_owned()).unwrap();
+        let id = CommandId::parse("ha-command-1").unwrap();
         let mut recent = RecentControlResults::default();
         let response = ControlResponse {
             success: true,
@@ -767,7 +733,7 @@ mod tests {
 
         for index in 0..=CONTROL_REPLAY_CAPACITY {
             recent.insert(
-                CommandId::parse(format!("command-{index}")).unwrap(),
+                CommandId::parse(&format!("command-{index}")).unwrap(),
                 ControlPreset::TimerClear,
                 Arc::new(ControlResponse::rejected(
                     ControlPreset::TimerClear,

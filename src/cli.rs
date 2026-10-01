@@ -159,32 +159,30 @@ impl BleOptions {
 pub(crate) async fn run() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
-        Command::Serve(options) => {
-            let mqtt_password = match std::env::var("UPDRAFT_MQTT_PASSWORD") {
-                Ok(password) => Some(password),
-                Err(std::env::VarError::NotPresent) => None,
-                Err(std::env::VarError::NotUnicode(_)) => {
-                    anyhow::bail!("UPDRAFT_MQTT_PASSWORD must be valid UTF-8")
-                }
-            };
-            let mqtt_config = mqtt_config(
-                options.mqtt_host,
-                options.mqtt_port,
-                options.mqtt_username,
-                mqtt_password,
-                options.mqtt_discovery,
-            )?;
-            crate::api::serve(
-                options.device_id,
-                options.bind,
-                options.allow_remote,
-                mqtt_config,
-            )
-            .await
-        }
+        Command::Serve(options) => options.run().await,
         Command::Probe(ProbeCommand {
             transport: ProbeTransport::Ble(options),
         }) => run_ble_probe(options).await,
+    }
+}
+
+impl ServeOptions {
+    async fn run(self) -> Result<()> {
+        let mqtt_password = match std::env::var("UPDRAFT_MQTT_PASSWORD") {
+            Ok(password) => Some(password),
+            Err(std::env::VarError::NotPresent) => None,
+            Err(std::env::VarError::NotUnicode(_)) => {
+                bail!("UPDRAFT_MQTT_PASSWORD must be valid UTF-8")
+            }
+        };
+        let mqtt_config = mqtt_config(
+            self.mqtt_host,
+            self.mqtt_port,
+            self.mqtt_username,
+            mqtt_password,
+            self.mqtt_discovery,
+        )?;
+        crate::api::serve(self.device_id, self.bind, self.allow_remote, mqtt_config).await
     }
 }
 
@@ -208,10 +206,8 @@ fn mqtt_config(
             }))
         }
         (None, None, None) if !discovery_enabled => Ok(None),
-        (None, None, None) => anyhow::bail!("MQTT discovery requires MQTT broker credentials"),
-        _ => anyhow::bail!(
-            "MQTT host, username, and UPDRAFT_MQTT_PASSWORD must be configured together"
-        ),
+        (None, None, None) => bail!("MQTT discovery requires MQTT broker credentials"),
+        _ => bail!("MQTT host, username, and UPDRAFT_MQTT_PASSWORD must be configured together"),
     }
 }
 
@@ -316,10 +312,8 @@ mod tests {
         ])
         .unwrap();
 
-        let options = if let Command::Serve(options) = cli.command {
-            options
-        } else {
-            return;
+        let Command::Serve(options) = cli.command else {
+            unreachable!("serve arguments must parse as the serve command");
         };
         assert_eq!(options.bind, "0.0.0.0:8787".parse().unwrap());
         assert!(options.allow_remote);
