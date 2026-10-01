@@ -1,0 +1,5 @@
+{
+  "evidence": "synthetic",
+  "http_status": 417,
+  "body": {"statusCode": 4444, "statusInfo": "synthetic-settings-rejected"}
+}

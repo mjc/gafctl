@@ -1,0 +1,5 @@
+{
+  "evidence": "synthetic",
+  "http_status": 200,
+  "body": {"responseData": {"idToken": "SYNTHETIC_TOKEN_DO_NOT_USE"}}
+}

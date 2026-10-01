@@ -1,0 +1,5 @@
+{
+  "evidence": "synthetic",
+  "http_status": 200,
+  "body": {"responseData": [{"deviceId": "synthetic-vent-1", "name": "Synthetic vent"}]}
+}

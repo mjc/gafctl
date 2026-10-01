@@ -1,0 +1,5 @@
+{
+  "evidence": "synthetic",
+  "http_status": 200,
+  "body": {"responseData": "synthetic-wrong-inventory-shape"}
+}

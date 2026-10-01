@@ -1,0 +1,4 @@
+{
+  "evidence": "synthetic",
+  "body": {"automaticMode": true, "desiredTemp": 105, "desiredHumidity": 40}
+}
