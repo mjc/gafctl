@@ -69,6 +69,23 @@ struct LegacyBleRuntime {
     peripheral_id: Arc<str>,
 }
 
+#[derive(Debug, Eq, PartialEq)]
+enum ControlAdmissionError {
+    BackendUnavailable,
+    StaleRequest,
+    Busy,
+}
+
+impl ControlAdmissionError {
+    const fn status(self) -> &'static str {
+        match self {
+            Self::BackendUnavailable => "backend_unavailable",
+            Self::StaleRequest => "stale_request",
+            Self::Busy => "busy",
+        }
+    }
+}
+
 impl ApiState {
     fn with_registry(registry: DeviceRegistry) -> Self {
         Self {
@@ -107,8 +124,11 @@ impl ApiState {
         &self,
         issued_at_unix_ms: u64,
         preset: ControlPreset,
-    ) -> Result<ControlResponse, ()> {
-        let device = self.ble_device.as_ref().ok_or(())?;
+    ) -> Result<ControlResponse, ControlAdmissionError> {
+        let device = self
+            .ble_device
+            .as_ref()
+            .ok_or(ControlAdmissionError::BackendUnavailable)?;
         device
             .execute_http_control(self, issued_at_unix_ms, preset)
             .await
@@ -255,10 +275,14 @@ impl LegacyBleRuntime {
         state: &ApiState,
         issued_at_unix_ms: u64,
         preset: ControlPreset,
-    ) -> Result<ControlResponse, ()> {
+    ) -> Result<ControlResponse, ControlAdmissionError> {
+        let _permit = self
+            .device
+            .try_reserve_control()
+            .ok_or(ControlAdmissionError::Busy)?;
         let _transaction = self.device.acquire_transaction().await;
         if !v2_request_is_fresh_at(issued_at_unix_ms, unix_millis(SystemTime::now())) {
-            return Err(());
+            return Err(ControlAdmissionError::StaleRequest);
         }
         Ok(self.execute_control_locked(state, preset).await)
     }
@@ -573,6 +597,7 @@ pub(crate) struct CachedV2ControlResult {
 const V2_CONTROL_MAX_AGE: Duration = Duration::from_secs(30);
 const V2_CONTROL_MAX_FUTURE_SKEW: Duration = Duration::from_secs(5);
 const V2_REPLAY_CAPACITY: usize = 64;
+const V2_IN_FLIGHT_CAPACITY: usize = 8;
 
 #[derive(Default)]
 struct RecentV2ControlResults(HashMap<DeviceId, Arc<tokio::sync::Mutex<V2DeviceControlHistory>>>);
@@ -674,46 +699,10 @@ async fn execute_v2_control(
 ) -> CachedV2ControlResult {
     let backend = state.registry.read().await.dispatch(id, request.command);
     let (outcome, legacy_response) = match backend {
-        Ok(DeviceBackend::LegacyBle) => {
-            if state.ble_device.is_none() {
-                ("device_unavailable", None)
-            } else if let DeviceCommand::LegacyPreset { preset } = request.command {
-                match state
-                    .execute_http_control(request.issued_at_unix_ms, preset)
-                    .await
-                {
-                    Ok(response) => {
-                        let status = if response.success {
-                            "confirmed"
-                        } else {
-                            "unconfirmed"
-                        };
-                        (status, Some(response))
-                    }
-                    Err(()) => ("stale_request", None),
-                }
-            } else {
-                ("unsupported_command", None)
-            }
+        Ok(DeviceBackend::LegacyBle) => execute_ble_v2_control(state, request).await,
+        Ok(DeviceBackend::QuickConnect) => {
+            (execute_cloud_v2_control(state, id, request).await, None)
         }
-        Ok(DeviceBackend::QuickConnect) => match (
-            state.quickconnect_control.as_ref(),
-            quickconnect_command(request.command),
-        ) {
-            (Some(service), Some(command)) => {
-                let Some(intent) = QuickConnectControlIntent::new(
-                    request.request_id.as_str(),
-                    request.issued_at_unix_ms,
-                    command,
-                ) else {
-                    return cached_v2_result(request.request_id.clone(), "invalid_request_id");
-                };
-                let result = service.execute(id, intent).await;
-                (quickconnect_status_name(result.status()), None)
-            }
-            (None, _) => ("backend_unavailable", None),
-            (_, None) => ("unsupported_command", None),
-        },
         Err(crate::backend::DeviceRegistryError::UnknownDevice) => ("unknown_device", None),
         Err(crate::backend::DeviceRegistryError::UnsupportedCommand) => {
             ("unsupported_command", None)
@@ -729,6 +718,53 @@ async fn execute_v2_control(
     }
 }
 
+async fn execute_ble_v2_control(
+    state: &ApiState,
+    request: &DeviceControlV2Request,
+) -> (&'static str, Option<ControlResponse>) {
+    if state.ble_device.is_none() {
+        return ("device_unavailable", None);
+    }
+    let DeviceCommand::LegacyPreset { preset } = request.command else {
+        return ("unsupported_command", None);
+    };
+    match state
+        .execute_http_control(request.issued_at_unix_ms, preset)
+        .await
+    {
+        Ok(response) => {
+            let status = if response.success {
+                "confirmed"
+            } else {
+                "unconfirmed"
+            };
+            (status, Some(response))
+        }
+        Err(error) => (error.status(), None),
+    }
+}
+
+async fn execute_cloud_v2_control(
+    state: &ApiState,
+    id: &DeviceId,
+    request: &DeviceControlV2Request,
+) -> &'static str {
+    let Some(service) = state.quickconnect_control.as_ref() else {
+        return "backend_unavailable";
+    };
+    let Some(command) = quickconnect_command(request.command) else {
+        return "unsupported_command";
+    };
+    let Some(intent) = QuickConnectControlIntent::new(
+        request.request_id.as_str(),
+        request.issued_at_unix_ms,
+        command,
+    ) else {
+        return "invalid_request_id";
+    };
+    quickconnect_status_name(service.execute(id, intent).await.status())
+}
+
 fn spawn_v2_control_execution(
     history: Arc<tokio::sync::Mutex<V2DeviceControlHistory>>,
     request_id: CommandId,
@@ -741,7 +777,12 @@ fn spawn_v2_control_execution(
         {
             let mut history = history.lock().await;
             history.in_flight.remove(&request_id);
-            remember_v2_control_result(&mut history, request_id, command, response.clone());
+            remember_v2_control_result(
+                &mut history.completed,
+                request_id,
+                command,
+                response.clone(),
+            );
         }
         sender.send_replace(Some(response));
     })
@@ -752,6 +793,7 @@ fn reserve_v2_control(
     request_id: &CommandId,
     command: DeviceCommand,
 ) -> V2ControlReservation {
+    reap_abandoned_v2_controls(history);
     if let Some((_, previous_command, response)) = history
         .completed
         .iter()
@@ -775,10 +817,18 @@ fn reserve_v2_control(
         }
         history.in_flight.remove(request_id);
         let result = cached_v2_result(request_id.clone(), "control_failed");
-        remember_v2_control_result(history, request_id.clone(), command, result.clone());
+        remember_v2_control_result(
+            &mut history.completed,
+            request_id.clone(),
+            command,
+            result.clone(),
+        );
         return V2ControlReservation::Completed(result);
     }
 
+    if history.in_flight.len() >= V2_IN_FLIGHT_CAPACITY {
+        return V2ControlReservation::Completed(cached_v2_result(request_id.clone(), "busy"));
+    }
     let (sender, receiver) = tokio::sync::watch::channel(None);
     history
         .in_flight
@@ -786,15 +836,25 @@ fn reserve_v2_control(
     V2ControlReservation::Execute(sender)
 }
 
+fn reap_abandoned_v2_controls(history: &mut V2DeviceControlHistory) {
+    history
+        .in_flight
+        .extract_if(|_, (_, receiver)| receiver.has_changed().is_err())
+        .for_each(|(request_id, (command, _))| {
+            let result = cached_v2_result(request_id.clone(), "control_failed");
+            remember_v2_control_result(&mut history.completed, request_id, command, result);
+        });
+}
+
 fn remember_v2_control_result(
-    history: &mut V2DeviceControlHistory,
+    completed: &mut VecDeque<(CommandId, DeviceCommand, CachedV2ControlResult)>,
     request_id: CommandId,
     command: DeviceCommand,
     response: CachedV2ControlResult,
 ) {
-    history.completed.push_back((request_id, command, response));
-    if history.completed.len() > V2_REPLAY_CAPACITY {
-        history.completed.pop_front();
+    completed.push_back((request_id, command, response));
+    if completed.len() > V2_REPLAY_CAPACITY {
+        completed.pop_front();
     }
 }
 
@@ -877,6 +937,7 @@ fn status_for_v2_outcome(outcome: &str) -> StatusCode {
         "confirmed" => StatusCode::OK,
         "unknown_device" | "device_unavailable" => StatusCode::NOT_FOUND,
         "backend_unavailable" => StatusCode::SERVICE_UNAVAILABLE,
+        "busy" => StatusCode::TOO_MANY_REQUESTS,
         "invalid_request_id" => StatusCode::BAD_REQUEST,
         "control_failed" => StatusCode::INTERNAL_SERVER_ERROR,
         "unconfirmed" | "submitted_unconfirmed" | "readback_mismatch" | "readback_unavailable" => {
@@ -1279,6 +1340,202 @@ mod tests {
             V2ControlReservation::Execute(sender) => Some(sender),
             V2ControlReservation::Wait(_) | V2ControlReservation::Completed(_) => None,
         }
+    }
+
+    #[test]
+    fn v2_control_admission_bounds_distinct_requests_and_keeps_duplicate_joining() {
+        let mut history = V2DeviceControlHistory::default();
+        let command = DeviceCommand::LegacyPreset {
+            preset: ControlPreset::TimerClear,
+        };
+        let senders = (0..8)
+            .map(|index| {
+                let id = CommandId::parse(&format!("pending-{index}")).unwrap();
+                reservation_is_execute(reserve_v2_control(&mut history, &id, command)).unwrap()
+            })
+            .collect::<Vec<_>>();
+        let extra = CommandId::parse("excess-request").unwrap();
+        assert!(reservation_has_status(
+            reserve_v2_control(&mut history, &extra, command),
+            "busy"
+        ));
+        assert_eq!(history.in_flight.len(), 8);
+        assert!(reservation_is_wait(reserve_v2_control(
+            &mut history,
+            &CommandId::parse("pending-0").unwrap(),
+            command
+        )));
+        drop(senders);
+    }
+
+    #[test]
+    fn abandoned_control_reservations_release_capacity_without_replaying_writes() {
+        let mut history = V2DeviceControlHistory::default();
+        let command = DeviceCommand::LegacyPreset {
+            preset: ControlPreset::TimerClear,
+        };
+        let senders = (0..V2_IN_FLIGHT_CAPACITY)
+            .map(|index| {
+                let id = CommandId::parse(&format!("abandoned-{index}")).unwrap();
+                reservation_is_execute(reserve_v2_control(&mut history, &id, command)).unwrap()
+            })
+            .collect::<Vec<_>>();
+        drop(senders);
+        let new_id = CommandId::parse("new-after-abandoned").unwrap();
+        let sender = reservation_is_execute(reserve_v2_control(&mut history, &new_id, command));
+        assert!(sender.is_some());
+        assert_eq!(history.in_flight.len(), 1);
+        assert!(reservation_has_status(
+            reserve_v2_control(
+                &mut history,
+                &CommandId::parse("abandoned-0").unwrap(),
+                command
+            ),
+            "control_failed"
+        ));
+        assert!(reservation_is_reused(reserve_v2_control(
+            &mut history,
+            &CommandId::parse("abandoned-0").unwrap(),
+            DeviceCommand::LegacyPreset {
+                preset: ControlPreset::TimerOneMinute
+            }
+        )));
+    }
+
+    #[test]
+    fn control_admission_prunes_only_abandoned_reservations() {
+        let mut history = V2DeviceControlHistory::default();
+        let command = DeviceCommand::LegacyPreset {
+            preset: ControlPreset::TimerClear,
+        };
+        let mut senders = (0..V2_IN_FLIGHT_CAPACITY)
+            .map(|index| {
+                let id = CommandId::parse(&format!("mixed-{index}")).unwrap();
+                reservation_is_execute(reserve_v2_control(&mut history, &id, command)).unwrap()
+            })
+            .collect::<Vec<_>>();
+        drop(senders.pop());
+        let new_id = CommandId::parse("replacement").unwrap();
+        let replacement =
+            reservation_is_execute(reserve_v2_control(&mut history, &new_id, command));
+        assert!(replacement.is_some());
+        assert!(reservation_is_wait(reserve_v2_control(
+            &mut history,
+            &CommandId::parse("mixed-0").unwrap(),
+            command
+        )));
+        assert!(reservation_has_status(
+            reserve_v2_control(
+                &mut history,
+                &CommandId::parse("still-full").unwrap(),
+                command
+            ),
+            "busy"
+        ));
+    }
+
+    #[tokio::test]
+    async fn completed_execution_frees_capacity_for_a_previously_busy_id() {
+        let history = Arc::new(tokio::sync::Mutex::new(V2DeviceControlHistory::default()));
+        let command = DeviceCommand::LegacyPreset {
+            preset: ControlPreset::TimerClear,
+        };
+        let mut senders = {
+            let mut history = history.lock().await;
+            (0..V2_IN_FLIGHT_CAPACITY)
+                .map(|index| {
+                    let id = CommandId::parse(&format!("complete-{index}")).unwrap();
+                    reservation_is_execute(reserve_v2_control(&mut history, &id, command)).unwrap()
+                })
+                .collect::<Vec<_>>()
+        };
+        let extra = CommandId::parse("try-after-completion").unwrap();
+        assert!(reservation_has_status(
+            reserve_v2_control(&mut *history.lock().await, &extra, command),
+            "busy"
+        ));
+        let id = CommandId::parse(&format!("complete-{}", V2_IN_FLIGHT_CAPACITY - 1)).unwrap();
+        let response = cached_v2_result(id.clone(), "confirmed");
+        spawn_v2_control_execution(
+            Arc::clone(&history),
+            id.clone(),
+            command,
+            senders.pop().unwrap(),
+            async { response },
+        )
+        .await
+        .unwrap();
+        let mut history = history.lock().await;
+        let sender = reservation_is_execute(reserve_v2_control(&mut history, &extra, command));
+        assert!(sender.is_some());
+        assert!(reservation_has_status(
+            reserve_v2_control(&mut history, &id, command),
+            "confirmed"
+        ));
+    }
+
+    #[tokio::test]
+    async fn ble_stale_control_releases_its_admission_slot() {
+        let state = ApiState::with_ble_device(
+            DEFAULT_FRESHNESS_LIMIT,
+            "no-physical-device".to_owned(),
+            DeviceRegistry::new(),
+        );
+        let runtime = state.ble_device.as_ref().unwrap();
+        assert_eq!(
+            runtime
+                .execute_http_control(&state, 0, ControlPreset::TimerClear)
+                .await
+                .err(),
+            Some(ControlAdmissionError::StaleRequest)
+        );
+        let permits = std::iter::repeat_with(|| runtime.device.try_reserve_control().unwrap())
+            .take(8)
+            .collect::<Vec<_>>();
+        assert!(runtime.device.try_reserve_control().is_none());
+        drop(permits);
+    }
+
+    #[tokio::test]
+    async fn ble_http_admission_rejects_busy_before_waiting_or_touching_bluetooth() {
+        let state = ApiState::with_ble_device(
+            DEFAULT_FRESHNESS_LIMIT,
+            "no-physical-device".to_owned(),
+            DeviceRegistry::new(),
+        );
+        let runtime = state.ble_device.as_ref().unwrap();
+        let permits = std::iter::repeat_with(|| runtime.device.try_reserve_control().unwrap())
+            .take(8)
+            .collect::<Vec<_>>();
+        let _transaction = runtime.device.acquire_transaction().await;
+        let request = DeviceControlV2Request {
+            request_id: CommandId::parse("busy-ble-request").unwrap(),
+            issued_at_unix_ms: unix_millis(SystemTime::now()).unwrap(),
+            command: DeviceCommand::LegacyPreset {
+                preset: ControlPreset::TimerClear,
+            },
+        };
+        let result = tokio::time::timeout(
+            Duration::from_millis(100),
+            router(state.clone()).oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v2/devices/configured/control")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&request).unwrap()))
+                    .unwrap(),
+            ),
+        )
+        .await
+        .expect("busy admission must not wait for the device transaction");
+        let result = result.unwrap();
+        assert_eq!(result.status(), StatusCode::TOO_MANY_REQUESTS);
+        let body = result.into_body().collect().await.unwrap().to_bytes();
+        let response: DeviceControlV2Response = serde_json::from_slice(&body).unwrap();
+        assert_eq!(response.status, updraft_api::ControlStatus::Busy);
+        assert_eq!(response.request_id, request.request_id.as_str());
+        drop(permits);
+        assert!(runtime.device.try_reserve_control().is_some());
     }
 
     #[test]
