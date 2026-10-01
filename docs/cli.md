@@ -1,27 +1,32 @@
 # Command line interface
 
-The `updraft` executable can access a fan directly over Bluetooth or act as an
-HTTP client of a running Updraft service. Run `updraft --help` and any command's
-`--help` for the full argument reference.
+The standalone `updraftctl` executable can access a fan directly over Bluetooth
+or act as an HTTP client of a running Updraft service. Run `updraftctl --help`
+and any command's `--help` for the full argument reference. The `updraft`
+executable runs the service and its diagnostic `probe` interface.
 
 For development, use the repository's pinned environment:
 
 ```sh
 devenv allow
-devenv shell -- cargo run -- devices --format json
+devenv shell -- cargo run --no-default-features --features cli --bin updraftctl -- devices --format json
 ```
+
+Cargo features default to `http` and `mqtt`; the control CLI is opt-in. `mqtt` also enables `http`.
+Build the service without MQTT with `--no-default-features --features http`, or
+build only the control CLI with `--no-default-features --features cli`.
 
 ## Running service
 
 ```sh
-updraft devices
-updraft devices --server https://fan.example/updraft --format json
-updraft state configured --format json
-updraft control configured preset timer-clear
-updraft control configured preset timer-one-minute --request-id attic-timer-1
-updraft control qc-local mode automatic
-updraft control qc-local targets --temperature-f 105 --humidity-percent 40
-updraft control qc-local timer-duration 60
+updraftctl devices
+updraftctl devices --server https://fan.example/updraft --format json
+updraftctl state configured --format json
+updraftctl control configured preset timer-clear
+updraftctl control configured preset timer-one-minute --request-id attic-timer-1
+updraftctl control qc-local mode automatic
+updraftctl control qc-local targets --temperature-f 105 --humidity-percent 40
+updraftctl control qc-local timer-duration 60
 ```
 
 Use the local device ID returned by `devices`. A local ID contains 1–64 ASCII
@@ -92,8 +97,8 @@ is generated immediately before the POST, after capability discovery. Global
 options within a command tree work before or after its subcommand, for example:
 
 ```sh
-updraft control configured --format json preset timer-clear --request-id attic-1
-updraft control configured preset timer-clear --format json --request-id attic-1
+updraftctl control configured --format json preset timer-clear --request-id attic-1
+updraftctl control configured preset timer-clear --format json --request-id attic-1
 ```
 
 Success requires a matching request ID, a successful HTTP status, and the
@@ -111,11 +116,11 @@ whether to retry.
 ## Direct Bluetooth
 
 ```sh
-updraft ble scan --format json
-updraft ble state
-updraft ble state --device-id <peripheral-id> --format json
-updraft ble control --device-id <peripheral-id> preset timer-clear --format json
-updraft ble control --device-id <peripheral-id> preset automatic-105-1-f-30-1-percent
+updraftctl ble scan --format json
+updraftctl ble state
+updraftctl ble state --device-id <peripheral-id> --format json
+updraftctl ble control --device-id <peripheral-id> preset timer-clear --format json
+updraftctl ble control --device-id <peripheral-id> preset automatic-105-1-f-30-1-percent
 ```
 
 `scan` discovers advertisements without connecting or sending protocol requests.
@@ -222,9 +227,9 @@ Discovery failures contain `peripheral_id` and `message`. A `query` contains:
 ## Completions and reusable Rust client
 
 ```sh
-updraft completions bash > updraft.bash
-updraft completions zsh > _updraft
-updraft completions fish > updraft.fish
+updraftctl completions bash > updraftctl.bash
+updraftctl completions zsh > _updraftctl
+updraftctl completions fish > updraftctl.fish
 ```
 
 Completions are generated from the same clap command definition without network

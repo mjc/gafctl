@@ -1,8 +1,10 @@
+#[cfg(any(feature = "mqtt", test))]
+use std::time::Instant;
 use std::{
     collections::{HashMap, VecDeque},
     net::SocketAddr,
     sync::Arc,
-    time::{Duration, Instant, SystemTime},
+    time::{Duration, SystemTime},
 };
 
 use crate::backend::{DeviceRegistry, DeviceRuntime};
@@ -18,20 +20,28 @@ use axum::{
     http::StatusCode,
     routing::{get, post},
 };
-use futures_util::{Stream, StreamExt, TryStreamExt, stream};
+#[cfg(feature = "mqtt")]
+use futures_util::TryStreamExt;
+use futures_util::{Stream, StreamExt, stream};
 use serde::Serialize;
+#[cfg(feature = "mqtt")]
+use tokio::sync::mpsc;
+#[cfg(feature = "mqtt")]
+use tokio::sync::watch;
 use tokio::{
     net::TcpListener,
-    sync::{RwLock, mpsc, watch},
+    sync::RwLock,
     time::{Interval, MissedTickBehavior, interval},
 };
+use updraft_api::{ControlStatus as V2ControlStatus, DeviceListV2Response, DeviceStateV2Response};
 pub(crate) use updraft_api::{DeviceControlV2Request, DeviceControlV2Response};
-use updraft_api::{DeviceListV2Response, DeviceStateV2Response};
 use updraft_bluetooth::{
     DisconnectOutcome, ProbeClient, ProbeError, ProbeErrorKind, ProbeMode, ProbeOptions,
     ProbeResult, QueryResult,
 };
-use updraft_protocol::{DeviceSnapshot, StateFreshness, StateReconciler};
+#[cfg(feature = "mqtt")]
+use updraft_protocol::StateFreshness;
+use updraft_protocol::{DeviceSnapshot, StateReconciler};
 use updraft_quickconnect::{
     QuickConnectClient, QuickConnectCommand, QuickConnectCommandMode, QuickConnectConfig,
 };
@@ -40,6 +50,7 @@ use crate::quickconnect_control::{
     QuickConnectControlIntent, QuickConnectControlService, QuickConnectControlStatus,
 };
 
+#[cfg(any(feature = "mqtt", test))]
 const DEVICE_ID: &str = "configured";
 const DEFAULT_POLL_INTERVAL: Duration = Duration::from_secs(30);
 const DEFAULT_FRESHNESS_LIMIT: Duration = Duration::from_secs(90);
@@ -48,7 +59,9 @@ const DEFAULT_FRESHNESS_LIMIT: Duration = Duration::from_secs(90);
 struct ApiState {
     registry: Arc<RwLock<DeviceRegistry>>,
     ble_device: Option<Arc<LegacyBleRuntime>>,
+    #[cfg(feature = "mqtt")]
     mqtt_updates: Option<watch::Sender<Arc<crate::mqtt::MqttStateSnapshot>>>,
+    #[cfg(feature = "mqtt")]
     mqtt_discovery_enabled: bool,
     quickconnect_control: Option<QuickConnectControlService>,
     quickconnect_runtime: Option<QuickConnectRuntime>,
@@ -65,6 +78,7 @@ struct LegacyBleRuntime {
     reconciler: Arc<RwLock<StateReconciler>>,
     device: Arc<DeviceRuntime>,
     ble_client: Arc<ProbeClient>,
+    #[cfg(feature = "mqtt")]
     freshness_limit: Duration,
     peripheral_id: Arc<str>,
 }
@@ -74,7 +88,9 @@ impl ApiState {
         Self {
             registry: Arc::new(RwLock::new(registry)),
             ble_device: None,
+            #[cfg(feature = "mqtt")]
             mqtt_updates: None,
+            #[cfg(feature = "mqtt")]
             mqtt_discovery_enabled: false,
             quickconnect_control: None,
             quickconnect_runtime: None,
@@ -95,7 +111,9 @@ impl ApiState {
                 device_id,
                 device,
             ))),
+            #[cfg(feature = "mqtt")]
             mqtt_updates: None,
+            #[cfg(feature = "mqtt")]
             mqtt_discovery_enabled: false,
             quickconnect_control: None,
             quickconnect_runtime: None,
@@ -176,6 +194,7 @@ impl ApiState {
         self.publish_state().await;
     }
 
+    #[cfg(feature = "mqtt")]
     async fn start_mqtt(&mut self, config: crate::mqtt::MqttConfig) -> Result<()> {
         self.mqtt_discovery_enabled = config.discovery_enabled;
         let initial_state = self.mqtt_state_snapshot().await?;
@@ -185,6 +204,7 @@ impl ApiState {
         Ok(())
     }
 
+    #[cfg(feature = "mqtt")]
     async fn publish_state(&self) {
         let Some(updates) = &self.mqtt_updates else {
             return;
@@ -197,6 +217,10 @@ impl ApiState {
         }
     }
 
+    #[cfg(not(feature = "mqtt"))]
+    async fn publish_state(&self) {}
+
+    #[cfg(feature = "mqtt")]
     async fn mqtt_state_snapshot(&self) -> Result<crate::mqtt::MqttStateSnapshot> {
         let descriptors = self
             .registry
@@ -240,12 +264,13 @@ impl ApiState {
 }
 
 impl LegacyBleRuntime {
-    fn new(freshness_limit: Duration, peripheral_id: String, device: Arc<DeviceRuntime>) -> Self {
+    fn new(_freshness_limit: Duration, peripheral_id: String, device: Arc<DeviceRuntime>) -> Self {
         Self {
             reconciler: Arc::new(RwLock::new(StateReconciler::default())),
             device,
             ble_client: Arc::new(ProbeClient::new()),
-            freshness_limit,
+            #[cfg(feature = "mqtt")]
+            freshness_limit: _freshness_limit,
             peripheral_id: Arc::from(peripheral_id),
         }
     }
@@ -431,7 +456,7 @@ impl ControlOutcome {
 
 fn control_outcome(result: Result<ProbeResult, ProbeError>) -> ControlOutcome {
     match result {
-        Ok(ProbeResult::Queried { result, .. }) => ControlOutcome::from_query(result),
+        Ok(ProbeResult::Queried { result, .. }) => ControlOutcome::from_query(*result),
         Ok(
             ProbeResult::NoDevices
             | ProbeResult::Discovered { .. }
@@ -455,7 +480,7 @@ pub(crate) async fn serve(
     identity_store: Option<std::path::PathBuf>,
     address: SocketAddr,
     allow_remote: bool,
-    mqtt_config: Option<crate::mqtt::MqttConfig>,
+    #[cfg(feature = "mqtt")] mqtt_config: Option<crate::mqtt::MqttConfig>,
     quickconnect_config: Option<crate::cli::QuickConnectRuntimeConfig>,
 ) -> Result<()> {
     validate_bind_address(address, allow_remote)?;
@@ -471,6 +496,7 @@ pub(crate) async fn serve(
     if let Some(config) = quickconnect_config {
         state.start_quickconnect(config).await?;
     }
+    #[cfg(feature = "mqtt")]
     if let Some(config) = mqtt_config {
         state.start_mqtt(config).await?;
     }
@@ -490,8 +516,14 @@ pub(crate) async fn serve(
         .context("HTTP server failed")
 }
 
+#[cfg(feature = "mqtt")]
 fn state_polling_enabled(state: &ApiState) -> bool {
     state.ble_device.is_some() || state.mqtt_updates.is_some()
+}
+
+#[cfg(not(feature = "mqtt"))]
+fn state_polling_enabled(state: &ApiState) -> bool {
+    state.ble_device.is_some()
 }
 
 fn quickconnect_polling_enabled(state: &ApiState) -> bool {
@@ -567,6 +599,7 @@ async fn device_state_v2_data(
 #[derive(Clone)]
 pub(crate) struct CachedV2ControlResult {
     pub(crate) response: DeviceControlV2Response,
+    #[cfg(feature = "mqtt")]
     pub(crate) legacy_response: Option<ControlResponse>,
 }
 
@@ -601,10 +634,10 @@ async fn control_device_v2(
     Json(request): Json<DeviceControlV2Request>,
 ) -> (StatusCode, Json<DeviceControlV2Response>) {
     let Some(id) = DeviceId::parse(id) else {
-        return v2_control_rejected(request.request_id, "unknown_device", StatusCode::NOT_FOUND);
+        return v2_control_rejected(request.request_id, V2ControlStatus::UnknownDevice);
     };
     let result = process_v2_control_request(&state, id, request).await;
-    let status = status_for_v2_outcome(result.response.status.as_str());
+    let status = status_for_v2_outcome(&result.response.status);
     (status, Json(result.response))
 }
 
@@ -614,7 +647,7 @@ async fn process_v2_control_request(
     request: DeviceControlV2Request,
 ) -> CachedV2ControlResult {
     if !v2_request_is_fresh(request.issued_at_unix_ms) {
-        return cached_v2_result(request.request_id, "stale_request");
+        return cached_v2_result(request.request_id, V2ControlStatus::StaleRequest);
     }
 
     let registered = state
@@ -624,7 +657,7 @@ async fn process_v2_control_request(
         .descriptors()
         .any(|descriptor| descriptor.id == id);
     if !registered {
-        return cached_v2_result(request.request_id, "unknown_device");
+        return cached_v2_result(request.request_id, V2ControlStatus::UnknownDevice);
     }
     let history = Arc::clone(
         state
@@ -664,7 +697,7 @@ async fn process_v2_control_request(
         .await
         .ok()
         .and_then(|response| response.clone())
-        .unwrap_or_else(|| cached_v2_result(request.request_id, "control_failed"))
+        .unwrap_or_else(|| cached_v2_result(request.request_id, V2ControlStatus::ControlFailed))
 }
 
 async fn execute_v2_control(
@@ -673,10 +706,12 @@ async fn execute_v2_control(
     request: &DeviceControlV2Request,
 ) -> CachedV2ControlResult {
     let backend = state.registry.read().await.dispatch(id, request.command);
-    let (outcome, legacy_response) = match backend {
+    #[cfg(feature = "mqtt")]
+    let mut legacy_response = None;
+    let outcome = match backend {
         Ok(DeviceBackend::LegacyBle) => {
             if state.ble_device.is_none() {
-                ("device_unavailable", None)
+                V2ControlStatus::DeviceUnavailable
             } else if let DeviceCommand::LegacyPreset { preset } = request.command {
                 match state
                     .execute_http_control(request.issued_at_unix_ms, preset)
@@ -684,16 +719,20 @@ async fn execute_v2_control(
                 {
                     Ok(response) => {
                         let status = if response.success {
-                            "confirmed"
+                            V2ControlStatus::Confirmed
                         } else {
-                            "unconfirmed"
+                            V2ControlStatus::Unconfirmed
                         };
-                        (status, Some(response))
+                        #[cfg(feature = "mqtt")]
+                        {
+                            legacy_response = Some(response);
+                        }
+                        status
                     }
-                    Err(()) => ("stale_request", None),
+                    Err(()) => V2ControlStatus::StaleRequest,
                 }
             } else {
-                ("unsupported_command", None)
+                V2ControlStatus::UnsupportedCommand
             }
         }
         Ok(DeviceBackend::QuickConnect) => match (
@@ -706,25 +745,29 @@ async fn execute_v2_control(
                     request.issued_at_unix_ms,
                     command,
                 ) else {
-                    return cached_v2_result(request.request_id.clone(), "invalid_request_id");
+                    return cached_v2_result(
+                        request.request_id.clone(),
+                        V2ControlStatus::InvalidRequestId,
+                    );
                 };
                 let result = service.execute(id, intent).await;
-                (quickconnect_status_name(result.status()), None)
+                quickconnect_control_status(result.status())
             }
-            (None, _) => ("backend_unavailable", None),
-            (_, None) => ("unsupported_command", None),
+            (None, _) => V2ControlStatus::BackendUnavailable,
+            (_, None) => V2ControlStatus::UnsupportedCommand,
         },
-        Err(crate::backend::DeviceRegistryError::UnknownDevice) => ("unknown_device", None),
+        Err(crate::backend::DeviceRegistryError::UnknownDevice) => V2ControlStatus::UnknownDevice,
         Err(crate::backend::DeviceRegistryError::UnsupportedCommand) => {
-            ("unsupported_command", None)
+            V2ControlStatus::UnsupportedCommand
         }
-        Err(_) => ("control_failed", None),
+        Err(_) => V2ControlStatus::ControlFailed,
     };
     CachedV2ControlResult {
         response: DeviceControlV2Response {
             request_id: request.request_id.as_str().to_owned(),
-            status: outcome.into(),
+            status: outcome,
         },
+        #[cfg(feature = "mqtt")]
         legacy_response,
     }
 }
@@ -760,21 +803,21 @@ fn reserve_v2_control(
         return V2ControlReservation::Completed(if *previous_command == command {
             response.clone()
         } else {
-            cached_v2_result(request_id.clone(), "request_id_reused")
+            cached_v2_result(request_id.clone(), V2ControlStatus::RequestIdReused)
         });
     }
     if let Some((previous_command, receiver)) = history.in_flight.get(request_id) {
         if *previous_command != command {
             return V2ControlReservation::Completed(cached_v2_result(
                 request_id.clone(),
-                "request_id_reused",
+                V2ControlStatus::RequestIdReused,
             ));
         }
         if receiver.has_changed().is_ok() {
             return V2ControlReservation::Wait(receiver.clone());
         }
         history.in_flight.remove(request_id);
-        let result = cached_v2_result(request_id.clone(), "control_failed");
+        let result = cached_v2_result(request_id.clone(), V2ControlStatus::ControlFailed);
         remember_v2_control_result(history, request_id.clone(), command, result.clone());
         return V2ControlReservation::Completed(result);
     }
@@ -798,26 +841,26 @@ fn remember_v2_control_result(
     }
 }
 
-fn cached_v2_result(request_id: CommandId, status: &'static str) -> CachedV2ControlResult {
+fn cached_v2_result(request_id: CommandId, status: V2ControlStatus) -> CachedV2ControlResult {
     CachedV2ControlResult {
         response: DeviceControlV2Response {
             request_id: request_id.as_str().to_owned(),
-            status: status.into(),
+            status,
         },
+        #[cfg(feature = "mqtt")]
         legacy_response: None,
     }
 }
 
 fn v2_control_rejected(
     request_id: CommandId,
-    outcome: &'static str,
-    status: StatusCode,
+    status: V2ControlStatus,
 ) -> (StatusCode, Json<DeviceControlV2Response>) {
     (
-        status,
+        status_for_v2_outcome(&status),
         Json(DeviceControlV2Response {
             request_id: request_id.as_str().to_owned(),
-            status: outcome.into(),
+            status,
         }),
     )
 }
@@ -862,27 +905,34 @@ fn quickconnect_command(command: DeviceCommand) -> Option<QuickConnectCommand> {
     }
 }
 
-fn quickconnect_status_name(status: QuickConnectControlStatus) -> &'static str {
+fn quickconnect_control_status(status: QuickConnectControlStatus) -> V2ControlStatus {
     match status {
-        QuickConnectControlStatus::Rejected => "rejected",
-        QuickConnectControlStatus::SubmittedUnconfirmed => "submitted_unconfirmed",
-        QuickConnectControlStatus::ReadbackMismatch => "readback_mismatch",
-        QuickConnectControlStatus::ReadbackUnavailable => "readback_unavailable",
-        QuickConnectControlStatus::Confirmed => "confirmed",
+        QuickConnectControlStatus::Rejected => V2ControlStatus::Rejected,
+        QuickConnectControlStatus::SubmittedUnconfirmed => V2ControlStatus::SubmittedUnconfirmed,
+        QuickConnectControlStatus::ReadbackMismatch => V2ControlStatus::ReadbackMismatch,
+        QuickConnectControlStatus::ReadbackUnavailable => V2ControlStatus::ReadbackUnavailable,
+        QuickConnectControlStatus::Confirmed => V2ControlStatus::Confirmed,
     }
 }
 
-fn status_for_v2_outcome(outcome: &str) -> StatusCode {
+fn status_for_v2_outcome(outcome: &V2ControlStatus) -> StatusCode {
     match outcome {
-        "confirmed" => StatusCode::OK,
-        "unknown_device" | "device_unavailable" => StatusCode::NOT_FOUND,
-        "backend_unavailable" => StatusCode::SERVICE_UNAVAILABLE,
-        "invalid_request_id" => StatusCode::BAD_REQUEST,
-        "control_failed" => StatusCode::INTERNAL_SERVER_ERROR,
-        "unconfirmed" | "submitted_unconfirmed" | "readback_mismatch" | "readback_unavailable" => {
-            StatusCode::BAD_GATEWAY
+        V2ControlStatus::Confirmed => StatusCode::OK,
+        V2ControlStatus::UnknownDevice | V2ControlStatus::DeviceUnavailable => {
+            StatusCode::NOT_FOUND
         }
-        _ => StatusCode::UNPROCESSABLE_ENTITY,
+        V2ControlStatus::BackendUnavailable => StatusCode::SERVICE_UNAVAILABLE,
+        V2ControlStatus::InvalidRequestId => StatusCode::BAD_REQUEST,
+        V2ControlStatus::ControlFailed => StatusCode::INTERNAL_SERVER_ERROR,
+        V2ControlStatus::Unconfirmed
+        | V2ControlStatus::SubmittedUnconfirmed
+        | V2ControlStatus::ReadbackMismatch
+        | V2ControlStatus::ReadbackUnavailable => StatusCode::BAD_GATEWAY,
+        V2ControlStatus::Rejected
+        | V2ControlStatus::UnsupportedCommand
+        | V2ControlStatus::StaleRequest
+        | V2ControlStatus::RequestIdReused
+        | V2ControlStatus::Unknown(_) => StatusCode::UNPROCESSABLE_ENTITY,
     }
 }
 
@@ -899,6 +949,7 @@ pub(crate) struct ControlResponse {
 }
 
 impl ControlResponse {
+    #[cfg(feature = "mqtt")]
     pub(crate) fn rejected(preset: ControlPreset, message: &str) -> Self {
         Self {
             success: false,
@@ -909,6 +960,7 @@ impl ControlResponse {
     }
 }
 
+#[cfg(feature = "mqtt")]
 async fn process_mqtt_controls(
     state: ApiState,
     controls: mpsc::Receiver<crate::mqtt::MqttControlWork>,
@@ -920,12 +972,14 @@ async fn process_mqtt_controls(
         .await;
 }
 
+#[cfg(feature = "mqtt")]
 fn control_requests(
     controls: mpsc::Receiver<crate::mqtt::MqttControlWork>,
 ) -> impl Stream<Item = crate::mqtt::MqttControlWork> {
     stream::unfold(controls, receive_control_request)
 }
 
+#[cfg(feature = "mqtt")]
 async fn receive_control_request(
     mut controls: mpsc::Receiver<crate::mqtt::MqttControlWork>,
 ) -> Option<(
@@ -936,11 +990,13 @@ async fn receive_control_request(
     Some((work, controls))
 }
 
+#[cfg(feature = "mqtt")]
 async fn reply_to_device_control(state: &ApiState, work: crate::mqtt::MqttControlWork) {
     let response = process_v2_control_request(state, work.device_id, work.request).await;
     let _ = work.reply.send(response);
 }
 
+#[cfg(feature = "mqtt")]
 async fn device_state_response(device: &LegacyBleRuntime) -> DeviceStateResponse {
     let reconciler = device.reconciler.read().await;
     let now = Instant::now();
@@ -964,6 +1020,7 @@ struct HealthResponse {
 }
 
 #[derive(Clone, Serialize)]
+#[cfg(feature = "mqtt")]
 struct DeviceStateResponse {
     device_id: &'static str,
     available: bool,
@@ -988,6 +1045,7 @@ struct StateValues {
 }
 
 impl StateValues {
+    #[cfg(feature = "mqtt")]
     fn from_snapshot(snapshot: &DeviceSnapshot) -> Option<Self> {
         project_legacy_snapshot(snapshot).map(|projection| projection.values)
     }
@@ -1082,7 +1140,9 @@ fn record_poll_result(
     result: Result<ProbeResult, ProbeError>,
 ) {
     match result {
-        Ok(ProbeResult::Queried { result, .. }) => record_query_result(reconciler, poll_id, result),
+        Ok(ProbeResult::Queried { result, .. }) => {
+            record_query_result(reconciler, poll_id, *result)
+        }
         Ok(ProbeResult::NoDevices) => {
             reconciler.apply_failure(poll_id, "no compatible device found");
         }
@@ -1148,6 +1208,7 @@ const fn fan_state_name(fan: updraft_protocol::FanState) -> &'static str {
     }
 }
 
+#[cfg(feature = "mqtt")]
 const fn freshness_name(freshness: StateFreshness) -> &'static str {
     match freshness {
         StateFreshness::Unknown => "unknown",
@@ -1160,6 +1221,7 @@ const fn freshness_name(freshness: StateFreshness) -> &'static str {
 mod tests {
     use std::{fs, path::PathBuf, time::SystemTime};
 
+    #[cfg(feature = "mqtt")]
     use crate::device::EntitySource;
     use axum::{body::Body, http::Request};
     use http_body_util::BodyExt;
@@ -1191,6 +1253,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "mqtt")]
     fn cloud_only_mqtt_state_is_scheduled_without_ble() {
         let mut state = ApiState::with_registry(DeviceRegistry::new());
         assert!(!state_polling_enabled(&state));
@@ -1206,6 +1269,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg(feature = "mqtt")]
     async fn cloud_only_periodic_state_publication_refreshes_the_mqtt_snapshot() {
         let initial = crate::mqtt::MqttStateSnapshot {
             devices: Vec::new(),
@@ -1223,6 +1287,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg(feature = "mqtt")]
     async fn mqtt_discovery_start_preserves_mixed_per_device_sources() {
         let path = identity_store_path();
         let mut registry = DeviceRegistry::load(&path).unwrap();
@@ -1371,6 +1436,7 @@ mod tests {
                 request_id: request_id.as_str().to_owned(),
                 status: "unconfirmed".into(),
             },
+            #[cfg(feature = "mqtt")]
             legacy_response: None,
         };
         let execution = spawn_v2_control_execution(
@@ -2006,6 +2072,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "mqtt")]
     fn snapshot_projection_does_not_expose_identity_suffix_or_claim_airflow() {
         let snapshot = DeviceSnapshot::from_frames(
             updraft_protocol::Frame::from_bytes(bytes::Bytes::from_static(

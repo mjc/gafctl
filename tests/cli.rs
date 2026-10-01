@@ -17,7 +17,20 @@ use serde_json::{Value, json};
 
 #[test]
 fn help_and_completions_work_without_any_transport_configuration() {
-    let output = cargo_bin_cmd!("updraft")
+    let service_help = cargo_bin_cmd!("updraft")
+        .arg("--help")
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let service_help = String::from_utf8(service_help).unwrap();
+    for command in ["completions", "probe", "serve"] {
+        assert!(service_help.contains(command), "missing {command}");
+    }
+    cargo_bin_cmd!("updraft").arg("devices").assert().code(2);
+
+    let output = cargo_bin_cmd!("updraftctl")
         .arg("--help")
         .assert()
         .success()
@@ -25,22 +38,14 @@ fn help_and_completions_work_without_any_transport_configuration() {
         .stdout
         .clone();
     let help = String::from_utf8(output).unwrap();
-    for command in [
-        "devices",
-        "state",
-        "control",
-        "ble",
-        "completions",
-        "probe",
-        "serve",
-    ] {
+    for command in ["devices", "state", "control", "ble", "completions"] {
         assert!(help.contains(command), "missing {command}");
     }
-    cargo_bin_cmd!("updraft")
+    cargo_bin_cmd!("updraftctl")
         .args(["ble", "--format", "json", "scan", "--help"])
         .assert()
         .success();
-    cargo_bin_cmd!("updraft")
+    cargo_bin_cmd!("updraftctl")
         .args(["completions", "zsh"])
         .env("UPDRAFT_SERVER_URL", "invalid")
         .env("UPDRAFT_QUICKCONNECT_USERNAME", "incomplete")
@@ -83,7 +88,7 @@ fn invalid_input_and_missing_control_targets_exit_before_transport_access() {
             "bad/id",
         ],
     ] {
-        cargo_bin_cmd!("updraft")
+        cargo_bin_cmd!("updraftctl")
             .args(args)
             .timeout(Duration::from_secs(5))
             .assert()
@@ -164,7 +169,7 @@ async fn service_reads_emit_one_json_result_and_explicit_url_overrides_environme
     for args in [vec!["devices"], vec!["state", "configured"]] {
         let url = server.url.clone();
         let output = tokio::task::spawn_blocking(move || {
-            cargo_bin_cmd!("updraft")
+            cargo_bin_cmd!("updraftctl")
                 .args(args)
                 .args(["--server", &url, "--format", "json"])
                 .env("UPDRAFT_SERVER_URL", "http://127.0.0.1:1")
@@ -197,7 +202,7 @@ async fn service_controls_preserve_backend_results_and_exit_only_when_confirmed(
         let server = start(service.clone()).await;
         let url = server.url.clone();
         let output = tokio::task::spawn_blocking(move || {
-            cargo_bin_cmd!("updraft")
+            cargo_bin_cmd!("updraftctl")
                 .args([
                     "control",
                     "configured",
@@ -228,7 +233,7 @@ async fn service_controls_preserve_backend_results_and_exit_only_when_confirmed(
 
 #[test]
 fn transport_failure_emits_a_json_error_with_a_nonzero_exit() {
-    let output = cargo_bin_cmd!("updraft")
+    let output = cargo_bin_cmd!("updraftctl")
         .args([
             "devices",
             "--server",
@@ -248,7 +253,7 @@ fn transport_failure_emits_a_json_error_with_a_nonzero_exit() {
 
 #[test]
 fn closed_stdout_pipe_is_a_successful_completion_exit() {
-    let mut child = std::process::Command::new(assert_cmd::cargo::cargo_bin!("updraft"))
+    let mut child = std::process::Command::new(assert_cmd::cargo::cargo_bin!("updraftctl"))
         .args(["completions", "bash"])
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
@@ -283,7 +288,7 @@ async fn unavailable_state_retains_backend_error_in_text_and_json_without_failin
     for format in ["text", "json"] {
         let url = server.url.clone();
         let output = tokio::task::spawn_blocking(move || {
-            cargo_bin_cmd!("updraft")
+            cargo_bin_cmd!("updraftctl")
                 .args(["state", "configured", "--server", &url, "--format", format])
                 .timeout(Duration::from_secs(5))
                 .assert()
@@ -323,7 +328,7 @@ async fn json_errors_keep_http_status_and_service_logs_use_stderr() {
         axum::serve(listener, app).await.unwrap();
     });
     let output = tokio::task::spawn_blocking(move || {
-        cargo_bin_cmd!("updraft")
+        cargo_bin_cmd!("updraftctl")
             .args(["devices", "--format", "json"])
             .env("UPDRAFT_SERVER_URL", url)
             .env("RUST_LOG", "updraft=debug")
@@ -338,7 +343,7 @@ async fn json_errors_keep_http_status_and_service_logs_use_stderr() {
     task.abort();
     let value: Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(value["error"]["http_status"], 502);
-    assert!(String::from_utf8_lossy(&output.stderr).contains("running CLI command"));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("running control CLI command"));
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -353,7 +358,7 @@ async fn empty_inventory_from_environment_is_successful_and_contains_one_newline
         axum::serve(listener, app).await.unwrap();
     });
     let output = tokio::task::spawn_blocking(move || {
-        cargo_bin_cmd!("updraft")
+        cargo_bin_cmd!("updraftctl")
             .args(["devices", "--format", "json"])
             .env("UPDRAFT_SERVER_URL", url)
             .env("UPDRAFT_QUICKCONNECT_USERNAME", "incomplete-account")
@@ -407,7 +412,7 @@ async fn all_cloud_control_shapes_are_posted_through_the_service() {
             axum::serve(listener, app).await.unwrap();
         });
         let output = tokio::task::spawn_blocking(move || {
-            cargo_bin_cmd!("updraft")
+            cargo_bin_cmd!("updraftctl")
                 .args(["control", "qc-local"])
                 .args(args)
                 .args(["--server", &url, "--format", "json"])
@@ -448,7 +453,7 @@ async fn timed_out_control_keeps_request_id_and_reports_unknown_outcome_without_
         axum::serve(listener, app).await.unwrap();
     });
     let output = tokio::task::spawn_blocking(move || {
-        cargo_bin_cmd!("updraft")
+        cargo_bin_cmd!("updraftctl")
             .args([
                 "control",
                 "configured",

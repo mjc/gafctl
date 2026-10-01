@@ -1,9 +1,4 @@
-use std::{
-    collections::HashSet,
-    fmt::{self, Write as _},
-    future::Future,
-    time::Duration,
-};
+use std::{collections::HashSet, fmt, future::Future, time::Duration};
 
 use anyhow::{Context, Result};
 use btleplug::{
@@ -393,27 +388,7 @@ pub(super) fn select_candidate(
 }
 
 pub(super) fn peripheral_id_matches(peripheral_id: &PeripheralId, expected: &str) -> bool {
-    let mut output = StringMatch {
-        expected,
-        offset: 0,
-    };
-    write!(&mut output, "{peripheral_id}").is_ok() && output.offset == expected.len()
-}
-
-struct StringMatch<'a> {
-    expected: &'a str,
-    offset: usize,
-}
-
-impl fmt::Write for StringMatch<'_> {
-    fn write_str(&mut self, output: &str) -> fmt::Result {
-        let end = self.offset + output.len();
-        if self.expected.get(self.offset..end) != Some(output) {
-            return Err(fmt::Error);
-        }
-        self.offset = end;
-        Ok(())
-    }
+    peripheral_id.to_string() == expected
 }
 
 impl Candidate {
@@ -592,14 +567,11 @@ mod tests {
     }
 
     #[test]
-    fn string_match_compares_display_chunks_without_building_a_string() {
-        let mut output = StringMatch {
-            expected: "gaf-device-42",
-            offset: 0,
-        };
+    fn peripheral_id_matches_its_display_representation() {
+        let id = test_peripheral_id(42);
+        let expected = id.to_string();
 
-        write!(&mut output, "gaf-device-{}", 42).unwrap();
-
-        assert_eq!(output.offset, output.expected.len());
+        assert!(peripheral_id_matches(&id, &expected));
+        assert!(!peripheral_id_matches(&id, "different-id"));
     }
 }

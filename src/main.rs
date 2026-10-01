@@ -1,14 +1,15 @@
 mod api;
 pub mod backend;
 mod cli;
-mod cli_ble;
-mod cli_client;
 pub mod control;
+mod control_display;
 pub mod device;
 mod logging;
+#[cfg(feature = "mqtt")]
 mod mqtt;
 mod output;
 pub mod quickconnect_control;
+mod stdout;
 
 use std::process::ExitCode;
 

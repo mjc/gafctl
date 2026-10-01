@@ -84,8 +84,6 @@ pub enum DisconnectOutcome {
 }
 
 /// Result of scanning and, when selected, querying a peripheral.
-// Keep the query inline to avoid a per-query heap allocation.
-#[allow(clippy::large_enum_variant)]
 #[derive(Debug)]
 pub enum ProbeResult {
     /// No peripherals advertising the service were found.
@@ -102,6 +100,6 @@ pub enum ProbeResult {
     /// One peripheral was queried successfully.
     Queried {
         device: DiscoveredDevice,
-        result: QueryResult,
+        result: Box<QueryResult>,
     },
 }

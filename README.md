@@ -11,12 +11,18 @@ Updraft is a Rust service for reading supported BLE and QuickConnect ventilation
 | `updraft-protocol` | Typed commands, values, and frame parsing. |
 | `updraft-bluetooth` | BLE discovery, connection, and protocol transport. |
 | `updraft-quickconnect` | Optional QuickConnect authentication, HTTP client, and state model. |
-| `updraft` | CLI, HTTP API, and optional MQTT bridge. |
+| `updraft` | HTTP service and optional MQTT bridge. |
+| `updraftctl` | Separate service-client and direct-BLE control CLI. |
 
-The `updraft` executable lives in root `src/`. Libraries live under `crates/`.
-The executable depends on Bluetooth and protocol; Bluetooth depends on protocol.
-Protocol has no transport or application dependencies. The service client uses the
-shared API contract and reqwest without importing the BLE runtime or server.
+The service executable lives in root `src/`; `updraftctl` is a separate binary
+target. Libraries live under `crates/`. Bluetooth depends on the transport-free
+protocol crate. The service client uses the shared API contract without importing
+the server runtime.
+
+The default Cargo features are `http` and `mqtt`; `mqtt` enables `http` and adds
+the broker bridge. The control CLI is opt-in. Build the service without MQTT
+using `--no-default-features --features http`; build only `updraftctl` with
+`--no-default-features --features cli`.
 
 ## Run
 
@@ -41,27 +47,27 @@ The controller's reported fan flag is diagnostic state. It does not prove motor 
 
 ## CLI
 
-Read or control devices through a running service:
+Use the standalone control CLI to read or control devices through a running service:
 
 ```sh
-updraft devices
-updraft state configured --format json
-updraft control configured preset timer-clear
-updraft devices --server https://fan.example/updraft
+updraftctl devices
+updraftctl state configured --format json
+updraftctl control configured preset timer-clear
+updraftctl devices --server https://fan.example/updraft
 ```
 
 Access a fan directly over BLE:
 
 ```sh
-updraft ble scan
-updraft ble state --device-id <peripheral-id> --format json
-updraft ble control --device-id <peripheral-id> preset automatic-105-f-30-percent
+updraftctl ble scan
+updraftctl ble state --device-id <peripheral-id> --format json
+updraftctl ble control --device-id <peripheral-id> preset automatic-105-f-30-percent
 ```
 
-During development, run these commands with `devenv shell -- cargo run --` in place
-of `updraft`. See the [CLI guide](docs/cli.md) for commands, controls, JSON output,
-timeouts, and exit codes. Existing `serve` and diagnostic `probe ble` commands
-remain available.
+During development, run these commands with
+`devenv shell -- cargo run --no-default-features --features cli --bin updraftctl --`. See the
+[CLI guide](docs/cli.md) for commands, controls, JSON output, timeouts, and exit
+codes. The service keeps its `serve` and diagnostic `probe ble` commands.
 
 ## Development
 
