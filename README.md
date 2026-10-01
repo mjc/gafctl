@@ -6,6 +6,8 @@ Updraft is a Rust service for reading supported BLE and QuickConnect ventilation
 
 | Crate | Purpose |
 | --- | --- |
+| `updraft-api` | Shared v2 device, capability, state, and control contract. |
+| `updraft-client` | Reusable HTTP client for a running Updraft service. |
 | `updraft-protocol` | Typed commands, values, and frame parsing. |
 | `updraft-bluetooth` | BLE discovery, connection, and protocol transport. |
 | `updraft-quickconnect` | Optional QuickConnect authentication, HTTP client, and state model. |
@@ -13,7 +15,8 @@ Updraft is a Rust service for reading supported BLE and QuickConnect ventilation
 
 The `updraft` executable lives in root `src/`. Libraries live under `crates/`.
 The executable depends on Bluetooth and protocol; Bluetooth depends on protocol.
-Protocol has no transport or application dependencies.
+Protocol has no transport or application dependencies. The service client uses the
+shared API contract and reqwest without importing the BLE runtime or server.
 
 ## Run
 
@@ -35,6 +38,30 @@ Set `UPDRAFT_MQTT_HOST`, `UPDRAFT_MQTT_PORT`, `UPDRAFT_MQTT_USERNAME`, and `UPDR
 The HTTP integration is the default Home Assistant entity source. MQTT discovery is optional. Use one entity source at a time to avoid duplicate entities. See [deployment](docs/deployment.md) and [Home Assistant transports](docs/home-assistant-entities.md).
 
 The controller's reported fan flag is diagnostic state. It does not prove motor operation or airflow.
+
+## CLI
+
+Read or control devices through a running service:
+
+```sh
+updraft devices
+updraft state configured --format json
+updraft control configured preset timer-clear
+updraft devices --server https://fan.example/updraft
+```
+
+Access a fan directly over BLE:
+
+```sh
+updraft ble scan
+updraft ble state --device-id <peripheral-id> --format json
+updraft ble control --device-id <peripheral-id> preset automatic-105-f-30-percent
+```
+
+During development, run these commands with `devenv shell -- cargo run --` in place
+of `updraft`. See the [CLI guide](docs/cli.md) for commands, controls, JSON output,
+timeouts, and exit codes. Existing `serve` and diagnostic `probe ble` commands
+remain available.
 
 ## Development
 

@@ -524,7 +524,7 @@ fn reject_device_control(
         CachedV2ControlResult {
             response: DeviceControlV2Response {
                 request_id: request.request_id.as_str().to_owned(),
-                status: rejection_status(rejection),
+                status: rejection_status(rejection).into(),
             },
             legacy_response,
         },
@@ -694,7 +694,7 @@ fn control_result_payload(
                 request_id,
                 &ControlResponse::rejected(
                     legacy_preset.unwrap_or(ControlPreset::TimerClear),
-                    result.response.status,
+                    result.response.status.as_str(),
                 ),
             )
             .map(Some),
@@ -1551,7 +1551,7 @@ mod tests {
         let result = CachedV2ControlResult {
             response: DeviceControlV2Response {
                 request_id: request_id.as_str().to_owned(),
-                status: "confirmed",
+                status: "confirmed".into(),
             },
             legacy_response: None,
         };
@@ -1575,7 +1575,7 @@ mod tests {
         let result = CachedV2ControlResult {
             response: DeviceControlV2Response {
                 request_id: request_id.as_str().to_owned(),
-                status: "unknown_device",
+                status: "unknown_device".into(),
             },
             legacy_response: None,
         };
@@ -1702,7 +1702,7 @@ mod tests {
                             .send(CachedV2ControlResult {
                                 response: DeviceControlV2Response {
                                     request_id: work.request.request_id.as_str().to_owned(),
-                                    status: "rejected",
+                                    status: "rejected".into(),
                                 },
                                 legacy_response: Some(ControlResponse::rejected(
                                     ControlPreset::TimerClear,

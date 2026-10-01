@@ -1,0 +1,486 @@
+use std::{
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
+    time::Duration,
+};
+
+use assert_cmd::cargo::cargo_bin_cmd;
+use axum::{
+    Json, Router,
+    extract::State,
+    http::StatusCode,
+    routing::{get, post},
+};
+use serde_json::{Value, json};
+
+#[test]
+fn help_and_completions_work_without_any_transport_configuration() {
+    let output = cargo_bin_cmd!("updraft")
+        .arg("--help")
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let help = String::from_utf8(output).unwrap();
+    for command in [
+        "devices",
+        "state",
+        "control",
+        "ble",
+        "completions",
+        "probe",
+        "serve",
+    ] {
+        assert!(help.contains(command), "missing {command}");
+    }
+    cargo_bin_cmd!("updraft")
+        .args(["ble", "--format", "json", "scan", "--help"])
+        .assert()
+        .success();
+    cargo_bin_cmd!("updraft")
+        .args(["completions", "zsh"])
+        .env("UPDRAFT_SERVER_URL", "invalid")
+        .env("UPDRAFT_QUICKCONNECT_USERNAME", "incomplete")
+        .assert()
+        .success();
+}
+
+#[test]
+fn invalid_input_and_missing_control_targets_exit_before_transport_access() {
+    for args in [
+        vec!["state", "../wrong"],
+        vec!["devices", "--server", "http://user:secret@localhost"],
+        vec![
+            "control",
+            "configured",
+            "targets",
+            "--temperature-f",
+            "89",
+            "--humidity-percent",
+            "40",
+        ],
+        vec![
+            "control",
+            "configured",
+            "targets",
+            "--temperature-f",
+            "110",
+            "--humidity-percent",
+            "80.1",
+        ],
+        vec!["control", "configured", "timer-duration", "31"],
+        vec!["devices", "--timeout-seconds", "0"],
+        vec!["ble", "control", "preset", "timer-clear"],
+        vec![
+            "control",
+            "configured",
+            "preset",
+            "timer-clear",
+            "--request-id",
+            "bad/id",
+        ],
+    ] {
+        cargo_bin_cmd!("updraft")
+            .args(args)
+            .timeout(Duration::from_secs(5))
+            .assert()
+            .code(2);
+    }
+}
+
+#[derive(Clone)]
+struct Service {
+    outcome: &'static str,
+    status: StatusCode,
+    posts: Arc<AtomicUsize>,
+}
+
+async fn devices() -> Json<Value> {
+    Json(
+        json!({"devices":[{"id":"configured","name":"Attic fan","backend":"legacy_ble",
+        "capabilities":{"read_state":true,"commands":[{"kind":"legacy_preset","value":"timer_clear"}]},
+        "state_source":"http","command_source":"http"}]}),
+    )
+}
+
+async fn state() -> Json<Value> {
+    Json(
+        json!({"id":"configured","backend":"legacy_ble","available":false,
+        "inventory_status":"unknown","last_error":null,"state":null}),
+    )
+}
+
+async fn control(
+    State(service): State<Service>,
+    Json(request): Json<Value>,
+) -> (StatusCode, Json<Value>) {
+    service.posts.fetch_add(1, Ordering::SeqCst);
+    assert_eq!(
+        request["command"],
+        json!({"kind":"legacy_preset","preset":"timer_clear"})
+    );
+    assert!(request["issued_at_unix_ms"].as_u64().unwrap() > 0);
+    (
+        service.status,
+        Json(json!({"request_id":request["request_id"],"status":service.outcome})),
+    )
+}
+
+struct Running {
+    url: String,
+    task: tokio::task::JoinHandle<()>,
+}
+impl Drop for Running {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
+
+async fn start(service: Service) -> Running {
+    let app = Router::new()
+        .route("/api/v2/devices", get(devices))
+        .route("/api/v2/devices/configured/state", get(state))
+        .route("/api/v2/devices/configured/control", post(control))
+        .with_state(service);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let task = tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    Running { url, task }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn service_reads_emit_one_json_result_and_explicit_url_overrides_environment() {
+    let server = start(Service {
+        outcome: "confirmed",
+        status: StatusCode::OK,
+        posts: Arc::default(),
+    })
+    .await;
+    for args in [vec!["devices"], vec!["state", "configured"]] {
+        let url = server.url.clone();
+        let output = tokio::task::spawn_blocking(move || {
+            cargo_bin_cmd!("updraft")
+                .args(args)
+                .args(["--server", &url, "--format", "json"])
+                .env("UPDRAFT_SERVER_URL", "http://127.0.0.1:1")
+                .env("RUST_LOG", "updraft=debug")
+                .timeout(Duration::from_secs(5))
+                .assert()
+                .success()
+                .get_output()
+                .stdout
+                .clone()
+        })
+        .await
+        .unwrap();
+        let value: Value = serde_json::from_slice(&output).unwrap();
+        assert!(value.get("devices").is_some() || value["available"] == false);
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn service_controls_preserve_backend_results_and_exit_only_when_confirmed() {
+    for (outcome, status, exit) in [
+        ("confirmed", StatusCode::OK, 0),
+        ("readback_mismatch", StatusCode::BAD_GATEWAY, 1),
+    ] {
+        let service = Service {
+            outcome,
+            status,
+            posts: Arc::default(),
+        };
+        let server = start(service.clone()).await;
+        let url = server.url.clone();
+        let output = tokio::task::spawn_blocking(move || {
+            cargo_bin_cmd!("updraft")
+                .args([
+                    "control",
+                    "configured",
+                    "preset",
+                    "timer-clear",
+                    "--server",
+                    &url,
+                    "--format",
+                    "json",
+                    "--request-id",
+                    "cli-test",
+                ])
+                .timeout(Duration::from_secs(5))
+                .assert()
+                .code(exit)
+                .get_output()
+                .stdout
+                .clone()
+        })
+        .await
+        .unwrap();
+        let value: Value = serde_json::from_slice(&output).unwrap();
+        assert_eq!(value["request_id"], "cli-test");
+        assert_eq!(value["status"], outcome);
+        assert_eq!(service.posts.load(Ordering::SeqCst), 1);
+    }
+}
+
+#[test]
+fn transport_failure_emits_a_json_error_with_a_nonzero_exit() {
+    let output = cargo_bin_cmd!("updraft")
+        .args([
+            "devices",
+            "--server",
+            "http://127.0.0.1:1",
+            "--format",
+            "json",
+        ])
+        .timeout(Duration::from_secs(5))
+        .assert()
+        .code(1)
+        .get_output()
+        .stdout
+        .clone();
+    let value: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(value["error"]["kind"], "transport");
+}
+
+#[test]
+fn closed_stdout_pipe_is_a_successful_completion_exit() {
+    let mut child = std::process::Command::new(assert_cmd::cargo::cargo_bin!("updraft"))
+        .args(["completions", "bash"])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    drop(child.stdout.take());
+    let output = child.wait_with_output().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn unavailable_state_retains_backend_error_in_text_and_json_without_failing() {
+    let app = Router::new().route("/api/v2/devices", get(devices)).route(
+        "/api/v2/devices/configured/state",
+        get(|| async {
+            Json(json!({
+                "id":"configured", "backend":"legacy_ble", "available":false,
+                "inventory_status":"unavailable", "state":null,
+                "last_error":"backend read timed out"
+            }))
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let server = Running {
+        url: format!("http://{}", listener.local_addr().unwrap()),
+        task: tokio::spawn(async move { axum::serve(listener, app).await.unwrap() }),
+    };
+    for format in ["text", "json"] {
+        let url = server.url.clone();
+        let output = tokio::task::spawn_blocking(move || {
+            cargo_bin_cmd!("updraft")
+                .args(["state", "configured", "--server", &url, "--format", format])
+                .timeout(Duration::from_secs(5))
+                .assert()
+                .success()
+                .get_output()
+                .clone()
+        })
+        .await
+        .unwrap();
+        assert!(output.stderr.is_empty());
+        match format {
+            "text" => {
+                let text = String::from_utf8(output.stdout).unwrap();
+                assert!(text.contains("Available: false"));
+                assert!(text.contains("Last error: backend read timed out"));
+            }
+            "json" => {
+                let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+                assert_eq!(value["last_error"], "backend read timed out");
+                assert_eq!(value["available"], false);
+                assert!(value["state"].is_null());
+            }
+            _ => unreachable!(),
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn json_errors_keep_http_status_and_service_logs_use_stderr() {
+    let app = Router::new().route(
+        "/api/v2/devices",
+        get(|| async { (StatusCode::BAD_GATEWAY, "upstream unavailable") }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let task = tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    let output = tokio::task::spawn_blocking(move || {
+        cargo_bin_cmd!("updraft")
+            .args(["devices", "--format", "json"])
+            .env("UPDRAFT_SERVER_URL", url)
+            .env("RUST_LOG", "updraft=debug")
+            .timeout(Duration::from_secs(5))
+            .assert()
+            .code(1)
+            .get_output()
+            .clone()
+    })
+    .await
+    .unwrap();
+    task.abort();
+    let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(value["error"]["http_status"], 502);
+    assert!(String::from_utf8_lossy(&output.stderr).contains("running CLI command"));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn empty_inventory_from_environment_is_successful_and_contains_one_newline() {
+    let app = Router::new().route(
+        "/api/v2/devices",
+        get(|| async { Json(json!({"devices":[]})) }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let task = tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    let output = tokio::task::spawn_blocking(move || {
+        cargo_bin_cmd!("updraft")
+            .args(["devices", "--format", "json"])
+            .env("UPDRAFT_SERVER_URL", url)
+            .env("UPDRAFT_QUICKCONNECT_USERNAME", "incomplete-account")
+            .timeout(Duration::from_secs(5))
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone()
+    })
+    .await
+    .unwrap();
+    task.abort();
+    assert_eq!(output, b"{\"devices\":[]}\n");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn all_cloud_control_shapes_are_posted_through_the_service() {
+    for (args, expected) in [
+        (
+            vec!["mode", "manual"],
+            json!({"kind":"quick_connect_mode","mode":"manual"}),
+        ),
+        (
+            vec![
+                "targets",
+                "--temperature-f",
+                "105",
+                "--humidity-percent",
+                "40",
+            ],
+            json!({"kind":"quick_connect_targets","temperature_f":105,"humidity_percent":40}),
+        ),
+        (
+            vec!["timer-duration", "60"],
+            json!({"kind":"quick_connect_timer_duration","minutes":60}),
+        ),
+    ] {
+        let app=Router::new().route("/api/v2/devices",get(|| async { Json(json!({"devices":[{
+            "id":"qc-local","name":"cloud fan","backend":"quick_connect",
+            "capabilities":{"read_state":true,"commands":[{"kind":"quick_connect_mode"},{"kind":"quick_connect_targets"},{"kind":"quick_connect_timer_duration"}]},
+            "state_source":"mqtt","command_source":"mqtt"}]})) }))
+            .route("/api/v2/devices/qc-local/control",post(move |Json(request):Json<Value>| { let expected=expected.clone(); async move {
+                assert_eq!(request["command"],expected);
+                assert_eq!(request["request_id"].as_str().unwrap().len(),32);
+                Json(json!({"request_id":request["request_id"],"status":"confirmed"}))
+            }}));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let task = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let output = tokio::task::spawn_blocking(move || {
+            cargo_bin_cmd!("updraft")
+                .args(["control", "qc-local"])
+                .args(args)
+                .args(["--server", &url, "--format", "json"])
+                .timeout(Duration::from_secs(5))
+                .assert()
+                .success()
+                .get_output()
+                .stdout
+                .clone()
+        })
+        .await
+        .unwrap();
+        task.abort();
+        let value: Value = serde_json::from_slice(&output).unwrap();
+        assert_eq!(value["status"], "confirmed");
+        assert_eq!(value["http_status"], 200);
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn timed_out_control_keeps_request_id_and_reports_unknown_outcome_without_retry() {
+    let posts = Arc::new(AtomicUsize::new(0));
+    let counter = posts.clone();
+    let app = Router::new().route("/api/v2/devices", get(devices)).route(
+        "/api/v2/devices/configured/control",
+        post(move || {
+            let counter = counter.clone();
+            async move {
+                counter.fetch_add(1, Ordering::SeqCst);
+                tokio::time::sleep(Duration::from_secs(2)).await;
+                Json(json!({"request_id":"uncertain-cli","status":"confirmed"}))
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let task = tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    let output = tokio::task::spawn_blocking(move || {
+        cargo_bin_cmd!("updraft")
+            .args([
+                "control",
+                "configured",
+                "preset",
+                "timer-clear",
+                "--server",
+                &url,
+                "--format",
+                "json",
+                "--timeout-seconds",
+                "1",
+                "--request-id",
+                "uncertain-cli",
+            ])
+            .timeout(Duration::from_secs(5))
+            .assert()
+            .code(1)
+            .get_output()
+            .stdout
+            .clone()
+    })
+    .await
+    .unwrap();
+    task.abort();
+    let value: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(value["error"]["kind"], "timeout");
+    assert_eq!(value["error"]["request_id"], "uncertain-cli");
+    assert!(
+        value["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("outcome unknown")
+    );
+    assert_eq!(posts.load(Ordering::SeqCst), 1);
+}
