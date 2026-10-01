@@ -19,12 +19,14 @@ use axum::{
     routing::{get, post},
 };
 use futures_util::{Stream, StreamExt, TryStreamExt, stream};
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use tokio::{
     net::TcpListener,
     sync::{RwLock, mpsc, watch},
     time::{Interval, MissedTickBehavior, interval},
 };
+pub(crate) use updraft_api::{DeviceControlV2Request, DeviceControlV2Response};
+use updraft_api::{DeviceListV2Response, DeviceStateV2Response};
 use updraft_bluetooth::{
     DisconnectOutcome, ProbeClient, ProbeError, ProbeErrorKind, ProbeMode, ProbeOptions,
     ProbeResult, QueryResult,
@@ -277,7 +279,7 @@ impl LegacyBleRuntime {
         ControlResponse {
             success,
             preset,
-            message,
+            message: message.to_owned(),
             state: response_state,
         }
     }
@@ -513,25 +515,10 @@ fn router(state: ApiState) -> Router {
         .with_state(state)
 }
 
-#[derive(Serialize)]
-struct DeviceListV2Response {
-    devices: Vec<crate::device::DeviceDescriptor>,
-}
-
 async fn devices_v2(State(state): State<ApiState>) -> Json<DeviceListV2Response> {
     Json(DeviceListV2Response {
         devices: state.registry.read().await.descriptors().cloned().collect(),
     })
-}
-
-#[derive(Serialize)]
-struct DeviceStateV2Response {
-    id: DeviceId,
-    backend: DeviceBackend,
-    available: bool,
-    inventory_status: crate::backend::DeviceInventoryStatus,
-    last_error: Option<String>,
-    state: Option<DeviceState>,
 }
 
 async fn device_state_v2(
@@ -577,20 +564,6 @@ async fn device_state_v2_data(
     })
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct DeviceControlV2Request {
-    pub(crate) request_id: CommandId,
-    pub(crate) issued_at_unix_ms: u64,
-    pub(crate) command: DeviceCommand,
-}
-
-#[derive(Clone, Debug, Serialize)]
-pub(crate) struct DeviceControlV2Response {
-    pub(crate) request_id: String,
-    pub(crate) status: &'static str,
-}
-
 #[derive(Clone)]
 pub(crate) struct CachedV2ControlResult {
     pub(crate) response: DeviceControlV2Response,
@@ -631,7 +604,7 @@ async fn control_device_v2(
         return v2_control_rejected(request.request_id, "unknown_device", StatusCode::NOT_FOUND);
     };
     let result = process_v2_control_request(&state, id, request).await;
-    let status = status_for_v2_outcome(result.response.status);
+    let status = status_for_v2_outcome(result.response.status.as_str());
     (status, Json(result.response))
 }
 
@@ -750,7 +723,7 @@ async fn execute_v2_control(
     CachedV2ControlResult {
         response: DeviceControlV2Response {
             request_id: request.request_id.as_str().to_owned(),
-            status: outcome,
+            status: outcome.into(),
         },
         legacy_response,
     }
@@ -829,7 +802,7 @@ fn cached_v2_result(request_id: CommandId, status: &'static str) -> CachedV2Cont
     CachedV2ControlResult {
         response: DeviceControlV2Response {
             request_id: request_id.as_str().to_owned(),
-            status,
+            status: status.into(),
         },
         legacy_response: None,
     }
@@ -844,7 +817,7 @@ fn v2_control_rejected(
         status,
         Json(DeviceControlV2Response {
             request_id: request_id.as_str().to_owned(),
-            status: outcome,
+            status: outcome.into(),
         }),
     )
 }
@@ -921,16 +894,16 @@ async fn health() -> Json<HealthResponse> {
 pub(crate) struct ControlResponse {
     success: bool,
     preset: ControlPreset,
-    message: &'static str,
+    message: String,
     state: Option<StateValues>,
 }
 
 impl ControlResponse {
-    pub(crate) fn rejected(preset: ControlPreset, message: &'static str) -> Self {
+    pub(crate) fn rejected(preset: ControlPreset, message: &str) -> Self {
         Self {
             success: false,
             preset,
-            message,
+            message: message.to_owned(),
             state: None,
         }
     }
@@ -1396,7 +1369,7 @@ mod tests {
         let response = CachedV2ControlResult {
             response: DeviceControlV2Response {
                 request_id: request_id.as_str().to_owned(),
-                status: "unconfirmed",
+                status: "unconfirmed".into(),
             },
             legacy_response: None,
         };
@@ -1958,6 +1931,48 @@ mod tests {
         let expired = state_response(state).await;
         assert_eq!(expired["available"], false);
         assert!(expired["state"].is_null());
+    }
+
+    #[tokio::test]
+    async fn reusable_client_reads_the_actual_service_router_without_physical_access() {
+        let state = ApiState::with_ble_device(
+            Duration::from_secs(60),
+            "private-peripheral-id".to_owned(),
+            DeviceRegistry::new(),
+        );
+        let projection =
+            project_legacy_snapshot(&snapshot_at(Instant::now(), SystemTime::now())).unwrap();
+        state
+            .registry
+            .read()
+            .await
+            .runtime(&DeviceId::configured_ble())
+            .unwrap()
+            .set_state(projection.device_state)
+            .await;
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let app = router(state);
+        let task = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let client = updraft_client::Client::new(
+            url.parse().unwrap(),
+            updraft_client::ClientOptions::default(),
+        )
+        .unwrap();
+        let inventory = client.devices().await.unwrap();
+        assert_eq!(inventory.devices.len(), 1);
+        assert_eq!(inventory.devices[0].id, DeviceId::configured_ble());
+        let response = client.state(&DeviceId::configured_ble()).await.unwrap();
+        assert!(response.available);
+        let snapshot = response.state.unwrap();
+        assert_eq!(snapshot.temperature_f, Some(97.0));
+        assert_eq!(snapshot.estimated_running, None);
+        let serialized = serde_json::to_string(&snapshot).unwrap();
+        assert!(!serialized.contains("private-suffix"));
+        assert!(!serialized.contains("private-peripheral-id"));
+        task.abort();
     }
 
     #[tokio::test]

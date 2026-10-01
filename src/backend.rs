@@ -107,15 +107,7 @@ pub struct DeviceRuntime {
     control_slots: Arc<Semaphore>,
 }
 
-#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum DeviceInventoryStatus {
-    #[default]
-    Unknown,
-    Present,
-    Missing,
-    Unavailable,
-}
+pub use updraft_api::DeviceInventoryStatus;
 
 #[derive(Clone, Debug, Default)]
 pub struct DeviceRuntimeSnapshot {

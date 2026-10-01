@@ -50,7 +50,12 @@ The response contains no account or provider identifiers. Clients use the return
       "timer_original_minutes": 0
     },
     "estimated_running": null,
-    "diagnostics": {"firmware_version": "3.0.0"},
+    "diagnostics": {
+      "firmware_version": "3.0.0",
+      "signal_strength_raw": null,
+      "verified_raw": null,
+      "ota_in_progress": null
+    },
     "provenance": {
       "backend": "legacy_ble",
       "fetched_at_unix_ms": 2000,
@@ -60,7 +65,7 @@ The response contains no account or provider identifiers. Clients use the return
 }
 ```
 
-Unknown measurements stay `null`. `available` is true only while a usable state snapshot is fresh. `inventory_status` is `unknown`, `present`, `missing`, or `unavailable`; it describes device inventory, not motor operation. `estimated_running` is an estimate and may be null. The controller's fan flag is not proof of airflow.
+Unknown measurements stay `null`. Nullable fields are present explicitly; required fields must not be omitted. Clients may accept additional response fields. `available` is true only while a usable state snapshot is fresh. `inventory_status` is `unknown`, `present`, `missing`, or `unavailable`; it describes device inventory, not motor operation. `estimated_running` is an estimate and may be null. The controller's fan flag is not proof of airflow.
 
 ## Controls
 

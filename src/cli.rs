@@ -1,8 +1,10 @@
 use std::time::Duration;
 use std::{net::SocketAddr, path::PathBuf};
 
+use crate::cli_client::{BleCommand, ControlOptions, ServiceOptions, StateOptions};
 use anyhow::{Context, Result, bail};
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, CommandFactory, Parser, Subcommand};
+use std::process::ExitCode;
 use updraft_bluetooth::{ProbeMode, ProbeOptions, probe};
 use updraft_protocol::{
     AutomaticThresholds, ControlCommand, HumidityTenthsPercent, Minutes, TemperatureTenthsF,
@@ -10,7 +12,11 @@ use updraft_protocol::{
 use updraft_quickconnect::{AccountRole, Credentials};
 
 #[derive(Debug, Parser)]
-#[command(name = "updraft", about = "GAF attic fan proxy")]
+#[command(
+    name = "updraft",
+    version,
+    about = "GAF attic fan proxy and controller"
+)]
 struct Cli {
     #[command(subcommand)]
     command: Command,
@@ -18,6 +24,16 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
+    /// List registered devices on a running Updraft service.
+    Devices(ServiceOptions),
+    /// Read a device's cached service snapshot, including availability and timestamps.
+    State(StateOptions),
+    /// Issue a supported control through the running service's transaction owner.
+    Control(ControlOptions),
+    /// Scan, read, or control a fan directly over Bluetooth.
+    Ble(BleCommand),
+    /// Generate shell completions without connecting to any transport.
+    Completions { shell: clap_complete::Shell },
     /// Inspect the GAF Wi-Fi Vent over a device transport.
     Probe(ProbeCommand),
     /// Serve device state and the supported controls to Home Assistant.
@@ -175,13 +191,24 @@ impl BleOptions {
     }
 }
 
-pub(crate) async fn run() -> Result<()> {
+pub(crate) async fn run() -> Result<ExitCode> {
     let cli = Cli::parse();
+    tracing::debug!("running CLI command");
     match cli.command {
-        Command::Serve(options) => options.run().await,
+        Command::Devices(options) => options.devices().await,
+        Command::State(options) => options.run().await,
+        Command::Control(options) => options.run().await,
+        Command::Ble(options) => options.run().await,
+        Command::Completions { shell } => {
+            let mut completions = Vec::new();
+            clap_complete::generate(shell, &mut Cli::command(), "updraft", &mut completions);
+            crate::output::write_stdout(|output| output.write_all(&completions))?;
+            Ok(ExitCode::SUCCESS)
+        }
+        Command::Serve(options) => options.run().await.map(|()| ExitCode::SUCCESS),
         Command::Probe(ProbeCommand {
             transport: ProbeTransport::Ble(options),
-        }) => run_ble_probe(options).await,
+        }) => run_ble_probe(options).await.map(|()| ExitCode::SUCCESS),
     }
 }
 
@@ -353,7 +380,7 @@ async fn run_ble_probe(options: BleOptions) -> Result<()> {
         .await
         .context("BLE probe failed")?;
     let control_confirmed = control_result_confirmed(control_requested, &result);
-    crate::output::print_probe_result(result, show_identity);
+    crate::output::print_probe_result(result, show_identity)?;
     if !control_confirmed {
         bail!("requested control was not confirmed");
     }

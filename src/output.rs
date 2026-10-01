@@ -1,4 +1,7 @@
-use std::fmt;
+use std::{
+    fmt,
+    io::{self, Write},
+};
 
 use updraft_bluetooth::{DiscoveredDevice, ProbeResult};
 use updraft_protocol::{
@@ -6,37 +9,75 @@ use updraft_protocol::{
     OperatingMode, ReadCommand, ReadbackMatch,
 };
 
-pub(crate) fn print_probe_result(result: ProbeResult, show_identity: bool) {
+#[derive(Debug, thiserror::Error)]
+#[error("write stdout: {0}")]
+pub(crate) struct StdoutError(#[source] io::Error);
+
+impl StdoutError {
+    pub(crate) fn is_broken_pipe(&self) -> bool {
+        self.0.kind() == io::ErrorKind::BrokenPipe
+    }
+}
+
+pub(crate) fn write_stdout(
+    write: impl FnOnce(&mut dyn Write) -> io::Result<()>,
+) -> anyhow::Result<()> {
+    write(&mut io::stdout().lock()).map_err(|error| StdoutError(error).into())
+}
+
+pub(crate) fn print_probe_result(result: ProbeResult, show_identity: bool) -> anyhow::Result<()> {
+    write_stdout(|output| write_probe_result(output, result, show_identity))
+}
+
+fn write_probe_result(
+    output: &mut dyn Write,
+    result: ProbeResult,
+    show_identity: bool,
+) -> io::Result<()> {
     match result {
         ProbeResult::NoDevices => {
-            println!("No nearby BLE device advertising GAF service 00FF was found.");
+            writeln!(
+                output,
+                "No nearby BLE device advertising GAF service 00FF was found."
+            )?;
         }
         ProbeResult::Discovered { devices } => {
-            print_devices(devices.iter().map(|candidate| candidate.device()));
-            println!("Scan-only mode: no connection or protocol request was made.");
+            print_devices(output, devices.iter().map(|candidate| candidate.device()))?;
+            writeln!(
+                output,
+                "Scan-only mode: no connection or protocol request was made."
+            )?;
         }
         ProbeResult::Ambiguous { devices } => {
-            print_devices(devices.iter().map(|candidate| candidate.device()));
-            println!(
+            print_devices(output, devices.iter().map(|candidate| candidate.device()))?;
+            writeln!(
+                output,
                 "More than one candidate found. Re-run with --device-id <id> to query one fan."
-            );
+            )?;
         }
         ProbeResult::DiscoveryIncomplete { devices, failures } => {
-            print_devices(devices.iter().map(|candidate| candidate.device()));
-            println!("BLE discovery incomplete; automatic selection was skipped.");
+            print_devices(output, devices.iter().map(|candidate| candidate.device()))?;
+            writeln!(
+                output,
+                "BLE discovery incomplete; automatic selection was skipped."
+            )?;
             print_discovery_failures(&failures);
         }
         ProbeResult::Queried { device, result } => {
-            println!("Queried GAF BLE device: {}", DeviceDescription(&device));
+            writeln!(
+                output,
+                "Queried GAF BLE device: {}",
+                DeviceDescription(&device)
+            )?;
             if let Some(control) = &result.control {
-                print_control_acknowledgement(control);
+                print_control_acknowledgement(output, control)?;
             }
             if let Some(snapshot) = &result.snapshot {
-                print_snapshot(snapshot, show_identity);
+                print_snapshot(output, snapshot, show_identity)?;
             }
             if let Some(control) = &result.control {
-                println!("{}", ControlReadbackDisplay(control.readback()));
-                println!("{}", ModeReadbackDisplay(control.mode_readback()));
+                writeln!(output, "{}", ControlReadbackDisplay(control.readback()))?;
+                writeln!(output, "{}", ModeReadbackDisplay(control.mode_readback()))?;
             }
             if let Some(error) = &result.state_error {
                 eprintln!("state readback unavailable after control acknowledgement: {error}");
@@ -47,6 +88,7 @@ pub(crate) fn print_probe_result(result: ProbeResult, show_identity: bool) {
             }
         }
     }
+    Ok(())
 }
 
 fn print_discovery_failures(failures: &[updraft_bluetooth::DiscoveryFailure]) {
@@ -58,35 +100,47 @@ fn print_discovery_failures(failures: &[updraft_bluetooth::DiscoveryFailure]) {
     });
 }
 
-fn print_devices<'a>(devices: impl ExactSizeIterator<Item = &'a DiscoveredDevice>) {
-    println!("Found {} GAF BLE device(s):", devices.len());
-    devices.enumerate().for_each(|(index, device)| {
-        println!("  [{index}] {}", DeviceDescription(device));
-    });
+fn print_devices<'a>(
+    output: &mut dyn Write,
+    devices: impl ExactSizeIterator<Item = &'a DiscoveredDevice>,
+) -> io::Result<()> {
+    writeln!(output, "Found {} GAF BLE device(s):", devices.len())?;
+    devices.enumerate().try_for_each(|(index, device)| {
+        writeln!(output, "  [{index}] {}", DeviceDescription(device))
+    })
 }
 
-fn print_control_acknowledgement(control: &ControlOutcome) {
+fn print_control_acknowledgement(
+    output: &mut dyn Write,
+    control: &ControlOutcome,
+) -> io::Result<()> {
     let response = control.frame();
     let acknowledgement = match control.acknowledgement() {
         Acknowledgement::Accepted => "success",
         Acknowledgement::Unrecognized => "unrecognized/error",
     };
-    println!(
+    writeln!(
+        output,
         "control acknowledgement: {acknowledgement} ({} payload={})",
         String::from_utf8_lossy(&response.command()),
         String::from_utf8_lossy(response.payload()),
-    );
+    )
 }
 
-fn print_snapshot(snapshot: &DeviceSnapshot, show_identity: bool) {
-    snapshot.frames().for_each(|(request, response)| {
+fn print_snapshot(
+    output: &mut dyn Write,
+    snapshot: &DeviceSnapshot,
+    show_identity: bool,
+) -> io::Result<()> {
+    snapshot.frames().try_for_each(|(request, response)| {
         let payload = display_reply_payload(request, response.payload(), show_identity);
-        println!(
+        writeln!(
+            output,
             "{} -> {} payload_hex={payload}",
             String::from_utf8_lossy(request.frame()).trim_end(),
             String::from_utf8_lossy(&response.command()),
-        );
-    });
+        )
+    })
 }
 
 fn display_reply_payload(
@@ -142,7 +196,7 @@ impl fmt::Display for ReplyPayload<'_> {
     }
 }
 
-struct ControlReadbackDisplay<'a>(&'a ControlReadback);
+pub(crate) struct ControlReadbackDisplay<'a>(pub(crate) &'a ControlReadback);
 
 impl fmt::Display for ControlReadbackDisplay<'_> {
     fn fmt(&self, output: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -170,7 +224,7 @@ impl fmt::Display for ControlReadbackDisplay<'_> {
     }
 }
 
-struct ModeReadbackDisplay(ModeReadback);
+pub(crate) struct ModeReadbackDisplay(pub(crate) ModeReadback);
 
 impl fmt::Display for ModeReadbackDisplay {
     fn fmt(&self, output: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -234,6 +288,22 @@ mod tests {
         AutomaticThresholds, HumidityTenthsPercent, Minutes, PayloadError, Readback, ReadbackError,
         TemperatureTenthsF, TimerState,
     };
+
+    #[test]
+    fn diagnostic_probe_output_propagates_a_closed_pipe_instead_of_panicking() {
+        struct ClosedPipe;
+        impl Write for ClosedPipe {
+            fn write(&mut self, _: &[u8]) -> io::Result<usize> {
+                Err(io::ErrorKind::BrokenPipe.into())
+            }
+
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+        let error = write_probe_result(&mut ClosedPipe, ProbeResult::NoDevices, false).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::BrokenPipe);
+    }
 
     #[test]
     fn borrowed_payload_display_preserves_hex_and_identity_redaction() {

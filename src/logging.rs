@@ -11,6 +11,7 @@ fn filter() -> EnvFilter {
 pub(crate) fn init() {
     tracing_subscriber::fmt()
         .json()
+        .with_writer(std::io::stderr)
         .with_env_filter(filter())
         .init();
 }
