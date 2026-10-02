@@ -7,3 +7,8 @@ ignore = ["E501"]
 
 [tool.ruff.lint.per-file-ignores]
 "tests/test_homeassistant_registry.py" = ["E402"]
+
+[tool.mypy]
+python_version = "3.14"
+strict = true
+follow_imports = "silent"

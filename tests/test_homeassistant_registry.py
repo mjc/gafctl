@@ -7,31 +7,19 @@ import shutil
 import sys
 import tempfile
 import unittest
+from dataclasses import replace
 from functools import partial
 from pathlib import Path
 from types import MappingProxyType
 from unittest.mock import AsyncMock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-
-from homeassistant.components.mqtt import (
-    binary_sensor as mqtt_binary,
-)
-from homeassistant.components.mqtt import (
-    button as mqtt_button,
-)
-from homeassistant.components.mqtt import (
-    number as mqtt_number,
-)
-from homeassistant.components.mqtt import (
-    select as mqtt_select,
-)
-from homeassistant.components.mqtt import (
-    sensor as mqtt_sensor,
-)
-from homeassistant.components.mqtt import (
-    switch as mqtt_switch,
-)
+from homeassistant.components.mqtt import binary_sensor as mqtt_binary
+from homeassistant.components.mqtt import button as mqtt_button
+from homeassistant.components.mqtt import number as mqtt_number
+from homeassistant.components.mqtt import select as mqtt_select
+from homeassistant.components.mqtt import sensor as mqtt_sensor
+from homeassistant.components.mqtt import switch as mqtt_switch
 from homeassistant.config_entries import ConfigEntries, ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
@@ -47,25 +35,42 @@ from custom_components.gafctl import number as gafctl_number
 from custom_components.gafctl import sensor as gafctl_sensor
 from custom_components.gafctl import switch as gafctl_switch
 from custom_components.gafctl.button import GafctlRefreshButton
-from custom_components.gafctl.client import ApiError
 from custom_components.gafctl.config_flow import GafctlConfigFlow
+from custom_components.gafctl.controls import number_controls
+from custom_components.gafctl.models import (
+    ApiError,
+    ControlOutcomeUnknown,
+    Device,
+    DeviceState,
+    Readings,
+)
 
 COMPONENT_DIR = Path(__file__).resolve().parents[1] / "custom_components/gafctl"
-
 PROXY_ID = "550e8400-e29b-41d4-a716-446655440000"
 
 
 def device(proxy_id=PROXY_ID, owner="http"):
-    return {
-        "proxy_id": proxy_id,
-        "id": "configured",
-        "name": "Vent",
-        "backend": "legacy_ble",
-        "state": True,
-        "commands": [],
-        "state_source": owner,
-        "command_source": owner,
-    }
+    return Device(
+        proxy_id=proxy_id,
+        id="configured",
+        name="Vent",
+        backend="legacy_ble",
+        read_state=True,
+        commands=frozenset(),
+        owner=owner,
+    )
+
+
+def state_data(*, state=None, available=True, freshness="fresh", backend="legacy_ble"):
+    return DeviceState(
+        device_id="configured",
+        backend=backend,
+        available=available,
+        freshness=freshness,
+        observed_at_unix_ms=None,
+        last_error=None,
+        state=state,
+    )
 
 
 def read_discovery_fixture(path: str) -> list[tuple[str, dict[str, object]]]:
@@ -78,7 +83,7 @@ class RegistryTests(unittest.IsolatedAsyncioTestCase):
     ) -> None:
         await self.entry()
         eligible = [
-            device() | {"id": key, "capabilities": {"read_state": True, "commands": []}}
+            replace(device(), id=key, read_state=True, commands=frozenset([]))
             for key in ("one", "two")
         ]
         flow = GafctlConfigFlow()
@@ -88,7 +93,7 @@ class RegistryTests(unittest.IsolatedAsyncioTestCase):
         client = AsyncMock()
         client.fetch_devices.return_value = [
             device(),
-            device(owner="mqtt") | {"id": "mqtt"},
+            replace(device(owner="mqtt"), id="mqtt"),
             *eligible,
         ]
         with (
@@ -126,7 +131,7 @@ class RegistryTests(unittest.IsolatedAsyncioTestCase):
 
         loader.async_setup(self.hass)
         selected = [
-            device() | {"id": key, "capabilities": {"read_state": True, "commands": []}}
+            replace(device(), id=key, read_state=True, commands=frozenset([]))
             for key in ("one", "two")
         ]
         client = AsyncMock()
@@ -166,9 +171,9 @@ class RegistryTests(unittest.IsolatedAsyncioTestCase):
         flow.hass = self.hass
         flow.handler = "gafctl"
         flow.context = {"source": "user"}
-        selected = device() | {"capabilities": {"read_state": True, "commands": []}}
+        selected = replace(device(), read_state=True, commands=frozenset([]))
         flow._api_url = "http://proxy:8787"
-        flow._devices = {selected["id"]: selected}
+        flow._devices = {selected.id: selected}
         for changed in (
             device(owner="mqtt"),
             device("650e8400-e29b-41d4-a716-446655440000"),
@@ -191,9 +196,9 @@ class RegistryTests(unittest.IsolatedAsyncioTestCase):
             flow.hass = self.hass
             flow.handler = "gafctl"
             flow.context = {"source": "import"}
-            selected = device(proxy_id) | {
-                "capabilities": {"read_state": True, "commands": []}
-            }
+            selected = replace(
+                device(proxy_id), read_state=True, commands=frozenset([])
+            )
             with patch.object(
                 flow, "_fetch_devices", AsyncMock(return_value=[selected])
             ):
@@ -283,10 +288,15 @@ class RegistryTests(unittest.IsolatedAsyncioTestCase):
             ),
         ):
             coordinator = GafctlCoordinator(
-                self.hass, AsyncMock(), device() | {"backend": backend}, entry
+                self.hass, AsyncMock(), replace(device(), backend=backend), entry
             )
             coordinator.async_set_updated_data(
-                {"available": True, "freshness": "fresh", "state": values}
+                state_data(
+                    backend=backend,
+                    available=True,
+                    freshness="fresh",
+                    state=Readings(**values),
+                )
             )
             entry.runtime_data = coordinator
             entities = []
@@ -302,17 +312,23 @@ class RegistryTests(unittest.IsolatedAsyncioTestCase):
         self,
     ) -> None:
         entry = await self.entry()
-        selected = device() | {
-            "backend": "quick_connect",
-            "commands": [{"kind": "quick_connect_mode"}],
-        }
+        selected = replace(
+            device(),
+            backend="quick_connect",
+            commands=frozenset(["quick_connect_mode"]),
+        )
         coordinator = GafctlCoordinator(self.hass, AsyncMock(), selected, entry)
         coordinator.async_set_updated_data(
-            {"available": True, "freshness": "fresh", "state": {"mode": "automatic"}}
+            state_data(
+                backend="quick_connect",
+                available=True,
+                freshness="fresh",
+                state=Readings(mode="automatic"),
+            )
         )
         entry.runtime_data = coordinator
         coordinator.async_set_mode = AsyncMock()
-        switches, buttons = [], []
+        switches, buttons = ([], [])
         await gafctl_switch.async_setup_entry(self.hass, entry, switches.extend)
         await gafctl_button.async_setup_entry(self.hass, entry, buttons.extend)
         self.assertEqual([switch.is_on for switch in switches], [True, False, False])
@@ -326,7 +342,7 @@ class RegistryTests(unittest.IsolatedAsyncioTestCase):
         )
         await all_off.async_press()
         coordinator.async_set_mode.assert_awaited_with("off")
-        coordinator.device = selected | {"commands": []}
+        coordinator.device = replace(selected, commands=frozenset([]))
         self.assertFalse(all_off.available)
         self.assertTrue(all(not switch.available for switch in switches))
         empty = []
@@ -337,23 +353,31 @@ class RegistryTests(unittest.IsolatedAsyncioTestCase):
         self,
     ) -> None:
         entry = await self.entry()
-        selected = device() | {
-            "backend": "quick_connect",
-            "commands": [{"kind": "quick_connect_mode"}],
-        }
+        selected = replace(
+            device(),
+            backend="quick_connect",
+            commands=frozenset(["quick_connect_mode"]),
+        )
         self.hass.config_entries.async_update_entry(
             entry, data=dict(entry.data) | {"backend": "quick_connect"}
         )
         client = AsyncMock()
         client.fetch_devices.return_value = [selected]
-        old = {"available": True, "freshness": "fresh", "state": {"mode": "automatic"}}
+        old = state_data(
+            backend="quick_connect",
+            available=True,
+            freshness="fresh",
+            state=Readings(mode="automatic"),
+        )
         client.fetch_state.return_value = old
         coordinator = GafctlCoordinator(self.hass, client, selected, entry)
         with self.assertRaises(ApiError):
             await coordinator.async_set_mode("manual")
         client.set_control.assert_awaited_once()
         client.set_control.reset_mock()
-        client.fetch_state.return_value = old | {"state": {"mode": "conflicting"}}
+        client.fetch_state.return_value = replace(
+            old, state=Readings(mode="conflicting")
+        )
         with self.assertRaises(ApiError):
             await coordinator.async_set_mode("off", only_if_current="automatic")
         client.set_control.assert_not_called()
@@ -388,10 +412,15 @@ class RegistryTests(unittest.IsolatedAsyncioTestCase):
                 },
             ),
         ):
-            selected = device() | {"backend": backend}
+            selected = replace(device(), backend=backend)
             coordinator = GafctlCoordinator(self.hass, AsyncMock(), selected, entry)
             coordinator.async_set_updated_data(
-                {"available": True, "freshness": "fresh", "state": values}
+                state_data(
+                    backend=backend,
+                    available=True,
+                    freshness="fresh",
+                    state=Readings(**values),
+                )
             )
             entry.runtime_data = coordinator
             entities = []
@@ -407,16 +436,22 @@ class RegistryTests(unittest.IsolatedAsyncioTestCase):
         self,
     ) -> None:
         entry = await self.entry()
-        selected = device() | {
-            "backend": "quick_connect",
-            "commands": [{"kind": "quick_connect_mode"}],
-        }
+        selected = replace(
+            device(),
+            backend="quick_connect",
+            commands=frozenset(["quick_connect_mode"]),
+        )
         entry_data = dict(entry.data) | {"backend": "quick_connect"}
         self.hass.config_entries.async_update_entry(entry, data=entry_data)
         client = AsyncMock()
         client.fetch_devices.return_value = [selected]
-        old = {"available": True, "freshness": "fresh", "state": {"mode": "automatic"}}
-        new = old | {"state": {"mode": "off"}}
+        old = state_data(
+            backend="quick_connect",
+            available=True,
+            freshness="fresh",
+            state=Readings(mode="automatic"),
+        )
+        new = replace(old, state=Readings(mode="off"))
         client.fetch_state.side_effect = [old, new]
         coordinator = GafctlCoordinator(self.hass, client, selected, entry)
         coordinator.async_set_updated_data(old)
@@ -431,9 +466,7 @@ class RegistryTests(unittest.IsolatedAsyncioTestCase):
         client.fetch_state.return_value = old
         await coordinator.async_set_mode("off", only_if_current="timer")
         client.set_control.assert_not_called()
-        client.fetch_devices.return_value = [
-            selected | {"state_source": "mqtt", "command_source": "mqtt"}
-        ]
+        client.fetch_devices.return_value = [replace(selected, owner="mqtt")]
         with self.assertRaises(ApiError):
             await coordinator.async_set_mode("manual")
         client.set_control.assert_not_called()
@@ -442,13 +475,13 @@ class RegistryTests(unittest.IsolatedAsyncioTestCase):
         self,
     ) -> None:
         entry = await self.entry()
-        selected = device() | {"commands": [{"kind": "legacy_timer"}]}
-        old = {
-            "available": True,
-            "freshness": "fresh",
-            "state": {"timer_original_minutes": 600},
-        }
-        new = old | {"state": {"timer_original_minutes": 1}}
+        selected = replace(device(), commands=frozenset(["legacy_timer"]))
+        old = state_data(
+            available=True,
+            freshness="fresh",
+            state=Readings(timer_original_minutes=600),
+        )
+        new = replace(old, state=Readings(timer_original_minutes=1))
         client = AsyncMock()
         client.fetch_devices.return_value = [selected]
         client.fetch_state.side_effect = [old, new]
@@ -469,25 +502,28 @@ class RegistryTests(unittest.IsolatedAsyncioTestCase):
         self,
     ) -> None:
         entry = await self.entry()
-        selected = device() | {
-            "commands": [
-                {"kind": "legacy_automatic_temperature"},
-                {"kind": "legacy_automatic_humidity"},
-                {"kind": "legacy_timer"},
-            ]
-        }
-        old = {
-            "available": True,
-            "freshness": "fresh",
-            "state": {
-                "automatic_temperature_threshold_f": 105.1,
-                "automatic_humidity_threshold_percent": 30.1,
-                "timer_original_minutes": 0,
-            },
-        }
-        new = old | {
-            "state": old["state"] | {"automatic_temperature_threshold_f": 110.0}
-        }
+        selected = replace(
+            device(),
+            commands=frozenset(
+                [
+                    "legacy_automatic_temperature",
+                    "legacy_automatic_humidity",
+                    "legacy_timer",
+                ]
+            ),
+        )
+        old = state_data(
+            available=True,
+            freshness="fresh",
+            state=Readings(
+                automatic_temperature_threshold_f=105.1,
+                automatic_humidity_threshold_percent=30.1,
+                timer_original_minutes=0,
+            ),
+        )
+        new = replace(
+            old, state=replace(old.state, automatic_temperature_threshold_f=110.0)
+        )
         client = AsyncMock()
         client.fetch_devices.return_value = [selected]
         client.fetch_state.side_effect = [old, new]
@@ -506,11 +542,7 @@ class RegistryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(timer.native_step, 1)
         await temperature.async_set_native_value(110)
         client.set_control.assert_awaited_once_with(
-            "configured",
-            {
-                "kind": "legacy_automatic_temperature",
-                "temperature_f": 110,
-            },
+            "configured", {"kind": "legacy_automatic_temperature", "temperature_f": 110}
         )
         for invalid in [89, 121, 105.1, True, float("nan"), float("inf")]:
             with self.assertRaises(HomeAssistantError):
@@ -519,18 +551,21 @@ class RegistryTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_cloud_number_sends_only_selected_target(self) -> None:
         entry = await self.entry()
-        selected = device() | {
-            "backend": "quick_connect",
-            "commands": [{"kind": "quick_connect_targets"}],
-        }
-        old = {
-            "available": True,
-            "freshness": "fresh",
-            "state": {"automatic_temperature_f": 105, "automatic_humidity_percent": 40},
-        }
-        new = old | {
-            "state": {"automatic_temperature_f": 110, "automatic_humidity_percent": 45}
-        }
+        selected = replace(
+            device(),
+            backend="quick_connect",
+            commands=frozenset(["quick_connect_targets"]),
+        )
+        old = state_data(
+            backend="quick_connect",
+            available=True,
+            freshness="fresh",
+            state=Readings(automatic_temperature_f=105, automatic_humidity_percent=40),
+        )
+        new = replace(
+            old,
+            state=Readings(automatic_temperature_f=110, automatic_humidity_percent=45),
+        )
         self.hass.config_entries.async_update_entry(
             entry, data=dict(entry.data) | {"backend": "quick_connect"}
         )
@@ -547,6 +582,253 @@ class RegistryTests(unittest.IsolatedAsyncioTestCase):
             "configured",
             {"kind": "quick_connect_automatic_temperature", "temperature_f": 110},
         )
+
+    async def control_case(self, operation):
+        entry = await self.entry()
+        backend = "quick_connect" if operation == "mode" else "legacy_ble"
+        capability = {
+            "mode": "quick_connect_mode",
+            "number": "legacy_automatic_temperature",
+            "preset": "legacy_preset",
+        }[operation]
+        selected = replace(device(), backend=backend, commands=frozenset({capability}))
+        self.hass.config_entries.async_update_entry(
+            entry, data=dict(entry.data) | {"backend": backend}
+        )
+        client = AsyncMock()
+        client.fetch_devices.return_value = [selected]
+        old = state_data(
+            backend=backend,
+            state=Readings(
+                mode="automatic",
+                automatic_temperature_threshold_f=105,
+                timer_original_minutes=0,
+                timer_remaining_minutes=0,
+            ),
+        )
+        new = replace(
+            old,
+            state=replace(
+                old.state,
+                mode="manual" if operation == "mode" else "timer",
+                automatic_temperature_threshold_f=110,
+                timer_original_minutes=1,
+                timer_remaining_minutes=1,
+            ),
+        )
+        client.fetch_state.side_effect = [old, new]
+        coordinator = GafctlCoordinator(self.hass, client, selected, entry)
+        if operation == "mode":
+            submit = partial(coordinator.async_set_mode, "manual")
+        elif operation == "number":
+            submit = partial(
+                coordinator.async_set_number, number_controls("legacy_ble")[0], 110
+            )
+        else:
+            submit = partial(coordinator.async_set_preset, "timer_one_minute")
+        return coordinator, client, selected, old, new, submit
+
+    async def test_all_controls_preserve_unknown_request_when_refresh_fails(
+        self,
+    ) -> None:
+        for operation in ("mode", "number", "preset"):
+            with self.subTest(operation=operation):
+                coordinator, client, _, old, _, submit = await self.control_case(
+                    operation
+                )
+                uncertain = ControlOutcomeUnknown("request-under-test")
+                client.set_control.side_effect = uncertain
+                client.fetch_state.side_effect = [old, ApiError("readback unavailable")]
+                with self.assertRaises(ControlOutcomeUnknown) as raised:
+                    await submit()
+                self.assertIs(raised.exception, uncertain)
+                self.assertEqual(raised.exception.request_id, "request-under-test")
+                client.set_control.assert_awaited_once()
+                self.assertEqual(client.fetch_state.await_count, 2)
+                self.assertFalse(coordinator.command_lock.locked())
+
+    async def test_all_controls_recheck_owner_and_capability_after_writing(
+        self,
+    ) -> None:
+        for operation in ("mode", "number", "preset"):
+            for change in ("owner", "capability", "backend", "proxy"):
+                with self.subTest(operation=operation, change=change):
+                    (
+                        coordinator,
+                        client,
+                        selected,
+                        _,
+                        _,
+                        submit,
+                    ) = await self.control_case(operation)
+                    changed = {
+                        "owner": replace(selected, owner="mqtt"),
+                        "capability": replace(selected, commands=frozenset()),
+                        "backend": replace(
+                            selected,
+                            backend="legacy_ble"
+                            if selected.backend == "quick_connect"
+                            else "quick_connect",
+                        ),
+                        "proxy": replace(
+                            selected, proxy_id="650e8400-e29b-41d4-a716-446655440000"
+                        ),
+                    }[change]
+                    client.fetch_devices.side_effect = [[selected], [changed]]
+                    with self.assertRaises(ApiError):
+                        await submit()
+                    client.set_control.assert_awaited_once()
+                    self.assertFalse(coordinator.command_lock.locked())
+
+    async def test_all_controls_reject_owner_and_capability_loss_before_writing(
+        self,
+    ) -> None:
+        for operation in ("mode", "number", "preset"):
+            for change in ("owner", "capability"):
+                with self.subTest(operation=operation, change=change):
+                    _, client, selected, _, _, submit = await self.control_case(
+                        operation
+                    )
+                    client.fetch_devices.return_value = [
+                        replace(selected, owner="mqtt")
+                        if change == "owner"
+                        else replace(selected, commands=frozenset())
+                    ]
+                    with self.assertRaises(ApiError):
+                        await submit()
+                    client.set_control.assert_not_called()
+
+    async def test_all_controls_propagate_cancellation_without_replaying(self) -> None:
+        for operation in ("mode", "number", "preset"):
+            for phase in ("submit", "readback"):
+                with self.subTest(operation=operation, phase=phase):
+                    coordinator, client, _, old, _, submit = await self.control_case(
+                        operation
+                    )
+
+                    async def cancel_current(*_):
+                        asyncio.current_task().cancel()
+                        await asyncio.sleep(0)
+
+                    if phase == "submit":
+                        client.set_control.side_effect = cancel_current
+                    else:
+                        calls = 0
+
+                        async def readback(
+                            _device_id, *, initial=old, cancel=cancel_current
+                        ):
+                            nonlocal calls
+                            calls += 1
+                            if calls == 1:
+                                return initial
+                            await cancel()
+
+                        client.fetch_state.side_effect = readback
+                    with self.assertRaises(asyncio.CancelledError):
+                        await asyncio.create_task(submit())
+                    client.set_control.assert_awaited_once()
+                    self.assertEqual(
+                        client.fetch_state.await_count, 1 if phase == "submit" else 2
+                    )
+                    self.assertFalse(coordinator.command_lock.locked())
+
+    async def test_preset_requires_matching_readback(self) -> None:
+        _, client, _, old, new, submit = await self.control_case("preset")
+        client.fetch_state.side_effect = [old, old]
+        with self.assertRaisesRegex(ApiError, "no matching current preset"):
+            await submit()
+        client.set_control.assert_awaited_once()
+        client.set_control.reset_mock()
+        client.fetch_state.side_effect = [old, new]
+        await submit()
+        client.set_control.assert_awaited_once()
+
+    async def test_state_backend_must_match_selected_inventory(self) -> None:
+        from homeassistant.helpers.update_coordinator import UpdateFailed
+
+        coordinator, client, _, old, _, submit = await self.control_case("number")
+        client.fetch_state.side_effect = None
+        client.fetch_state.return_value = replace(old, backend="quick_connect")
+        with self.assertRaisesRegex(UpdateFailed, "different backend"):
+            await coordinator._async_update_data()
+        with self.assertRaises(ApiError):
+            await submit()
+        client.set_control.assert_not_called()
+
+    async def test_preset_confirmation_requires_mode_and_clear_fan_flag(self) -> None:
+        for preset, fields, mode, flag, matches in (
+            (
+                "automatic105_f30_percent",
+                {
+                    "automatic_temperature_threshold_f": 105,
+                    "automatic_humidity_threshold_percent": 30,
+                },
+                "timer",
+                False,
+                False,
+            ),
+            (
+                "automatic105_f30_percent",
+                {
+                    "automatic_temperature_threshold_f": 105,
+                    "automatic_humidity_threshold_percent": 30,
+                },
+                "automatic",
+                False,
+                True,
+            ),
+            (
+                "timer_one_minute",
+                {"timer_original_minutes": 1, "timer_remaining_minutes": 1},
+                "automatic",
+                False,
+                False,
+            ),
+            (
+                "timer_one_minute",
+                {"timer_original_minutes": 1, "timer_remaining_minutes": 1},
+                "timer",
+                True,
+                True,
+            ),
+            (
+                "timer_clear",
+                {"timer_original_minutes": 0, "timer_remaining_minutes": 0},
+                "timer",
+                True,
+                False,
+            ),
+            (
+                "timer_clear",
+                {"timer_original_minutes": 0, "timer_remaining_minutes": 0},
+                "timer",
+                None,
+                False,
+            ),
+            (
+                "timer_clear",
+                {"timer_original_minutes": 0, "timer_remaining_minutes": 0},
+                "timer",
+                False,
+                True,
+            ),
+        ):
+            with self.subTest(preset=preset, mode=mode, flag=flag):
+                coordinator, client, _, old, _, _ = await self.control_case("preset")
+                client.fetch_state.side_effect = [
+                    old,
+                    replace(
+                        old,
+                        state=Readings(mode=mode, controller_fan_flag=flag, **fields),
+                    ),
+                ]
+                if matches:
+                    await coordinator.async_set_preset(preset)
+                else:
+                    with self.assertRaisesRegex(ApiError, "no matching current preset"):
+                        await coordinator.async_set_preset(preset)
+                client.set_control.assert_awaited_once_with("configured", preset)
 
     async def asyncSetUp(self) -> None:
         self.directory = tempfile.TemporaryDirectory()
@@ -569,20 +851,18 @@ class RegistryTests(unittest.IsolatedAsyncioTestCase):
         entry = await self.entry()
         client = AsyncMock()
         client.fetch_devices.return_value = [device()]
-        client.refresh.return_value = {
-            "available": True,
-            "freshness": "fresh",
-            "state": {"temperature_f": 100},
-        }
+        client.refresh.return_value = state_data(
+            available=True, freshness="fresh", state=Readings(temperature_f=100)
+        )
         client.fetch_state.return_value = client.refresh.return_value
         coordinator = GafctlCoordinator(self.hass, client, device(), entry)
-        coordinator.async_set_updated_data({"available": False, "state": None})
+        coordinator.async_set_updated_data(state_data(available=False, state=None))
         button = GafctlRefreshButton(coordinator, entry)
         self.assertTrue(button.available)
         await button.async_press()
         client.refresh.assert_awaited_once_with("configured", "legacy_ble")
         client.fetch_state.assert_awaited_once_with("configured")
-        self.assertEqual(coordinator.data["state"]["temperature_f"], 100)
+        self.assertEqual(coordinator.data.state.temperature_f, 100)
 
     async def test_refresh_failure_preserves_current_data_and_reports_failure(
         self,
@@ -592,7 +872,7 @@ class RegistryTests(unittest.IsolatedAsyncioTestCase):
         client.fetch_devices.return_value = [device()]
         client.refresh.side_effect = ApiError("device refresh did not complete")
         coordinator = GafctlCoordinator(self.hass, client, device(), entry)
-        old = {"available": True, "state": {"temperature_f": 99}}
+        old = state_data(available=True, state=Readings(temperature_f=99))
         coordinator.async_set_updated_data(old)
         with self.assertRaises(HomeAssistantError):
             await GafctlRefreshButton(coordinator, entry).async_press()
@@ -618,11 +898,10 @@ class RegistryTests(unittest.IsolatedAsyncioTestCase):
         entry = await self.entry()
         client = AsyncMock()
         client.fetch_devices.return_value = [device()]
-        client.refresh.return_value = {
-            "available": True,
-            "state": {"temperature_f": 100},
-        }
-        client.fetch_state.return_value = {"available": False, "state": None}
+        client.refresh.return_value = state_data(
+            available=True, state=Readings(temperature_f=100)
+        )
+        client.fetch_state.return_value = state_data(available=False, state=None)
         coordinator = GafctlCoordinator(self.hass, client, device(), entry)
         with self.assertRaises(HomeAssistantError):
             await GafctlRefreshButton(coordinator, entry).async_press()
@@ -637,12 +916,11 @@ class RegistryTests(unittest.IsolatedAsyncioTestCase):
         ):
             client = AsyncMock()
             client.fetch_devices.side_effect = [[device()], [changed]]
-            client.refresh.return_value = {
-                "available": True,
-                "state": {"temperature_f": 99},
-            }
+            client.refresh.return_value = state_data(
+                available=True, state=Readings(temperature_f=99)
+            )
             coordinator = GafctlCoordinator(self.hass, client, device(), entry)
-            old = {"available": False, "state": None}
+            old = state_data(available=False, state=None)
             coordinator.async_set_updated_data(old)
             with self.assertRaises(HomeAssistantError):
                 await GafctlRefreshButton(coordinator, entry).async_press()
@@ -654,16 +932,12 @@ class RegistryTests(unittest.IsolatedAsyncioTestCase):
         entry = await self.entry()
         client = AsyncMock()
         client.fetch_devices.return_value = [device()]
-        newer = {
-            "available": True,
-            "freshness": "fresh",
-            "state": {"temperature_f": 110},
-        }
-        older = {
-            "available": True,
-            "freshness": "fresh",
-            "state": {"temperature_f": 100},
-        }
+        newer = state_data(
+            available=True, freshness="fresh", state=Readings(temperature_f=110)
+        )
+        older = state_data(
+            available=True, freshness="fresh", state=Readings(temperature_f=100)
+        )
         coordinator = GafctlCoordinator(self.hass, client, device(), entry)
 
         async def delayed_response(*_):
@@ -710,7 +984,7 @@ class RegistryTests(unittest.IsolatedAsyncioTestCase):
             config_entry=entry,
             device_id=registered_device.id,
         )
-        return entity, registered_device
+        return (entity, registered_device)
 
     async def test_mqtt_handoff_removes_http_entities_and_empty_device(self) -> None:
         entry = await self.entry()
@@ -778,13 +1052,15 @@ class RegistryTests(unittest.IsolatedAsyncioTestCase):
         client = AsyncMock()
         from homeassistant.helpers.update_coordinator import UpdateFailed
 
-        from custom_components.gafctl.client import ApiError
+        from custom_components.gafctl.client import (
+            ApiError,
+            Readings,
+        )
 
         client.fetch_devices.side_effect = ApiError("inventory unavailable")
-        client.fetch_state.return_value = {
-            "available": True,
-            "state": {"temperature_f": 100},
-        }
+        client.fetch_state.return_value = state_data(
+            available=True, state=Readings(temperature_f=100)
+        )
         coordinator = GafctlCoordinator(self.hass, client, device(), entry)
         with self.assertRaises(UpdateFailed):
             await coordinator._async_update_data()

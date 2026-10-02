@@ -6,9 +6,10 @@ from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
-from .client import ApiError, entity_keys
+from .controls import entity_keys
 from .coordinator import GafctlConfigEntry, GafctlCoordinator
 from .entity import GafctlEntity
+from .models import ApiError
 
 
 async def async_setup_entry(
@@ -43,7 +44,7 @@ class GafctlRefreshButton(GafctlEntity, ButtonEntity):
         return bool(
             super().available
             and self.coordinator.http_state_owned
-            and self.coordinator.device["state"]
+            and self.coordinator.device.read_state
         )
 
     async def async_press(self) -> None:

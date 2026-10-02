@@ -1,20 +1,40 @@
 """Standard-library tests for proxy response handling with a fake HTTP session."""
 
-import importlib.util
+import importlib
 import sys
 import unittest
+from dataclasses import FrozenInstanceError
 from pathlib import Path
+from types import ModuleType
 
-CLIENT_PATH = Path(__file__).parents[1] / "custom_components" / "gafctl" / "client.py"
-CLIENT_SPEC = importlib.util.spec_from_file_location("gafctl_client", CLIENT_PATH)
-assert CLIENT_SPEC is not None and CLIENT_SPEC.loader is not None
-CLIENT = importlib.util.module_from_spec(CLIENT_SPEC)
-sys.modules[CLIENT_SPEC.name] = CLIENT
-CLIENT_SPEC.loader.exec_module(CLIENT)
+COMPONENT_PATH = Path(__file__).parents[1] / "custom_components" / "gafctl"
+PACKAGE = ModuleType("gafctl_client_tests")
+PACKAGE.__path__ = [str(COMPONENT_PATH)]
+sys.modules[PACKAGE.__name__] = PACKAGE
+CLIENT = importlib.import_module("gafctl_client_tests.client")
+MODELS = importlib.import_module("gafctl_client_tests.models")
+CONTROLS = importlib.import_module("gafctl_client_tests.controls")
 ApiClient = CLIENT.ApiClient
-ApiError = CLIENT.ApiError
+ApiError = MODELS.ApiError
 normalize_api_url = CLIENT.normalize_api_url
+Readings = MODELS.Readings
+Device = MODELS.Device
 PROXY_ID = "550e8400-e29b-41d4-a716-446655440000"
+
+
+def model_device(**overrides):
+    return Device(
+        **{
+            "proxy_id": PROXY_ID,
+            "id": "configured",
+            "name": "Vent",
+            "backend": "legacy_ble",
+            "read_state": True,
+            "commands": frozenset(),
+            "owner": "http",
+        }
+        | overrides
+    )
 
 
 def inventory_device(**overrides: object) -> dict[str, object]:
@@ -141,6 +161,52 @@ class FailedSession:
 
 
 class ApiClientTests(unittest.IsolatedAsyncioTestCase):
+    async def test_normalized_models_are_immutable_and_detached_from_wire_data(
+        self,
+    ) -> None:
+        raw = inventory_device(
+            capabilities={"read_state": True, "commands": [{"kind": "future_command"}]}
+        )
+        selected = (
+            await ApiClient(
+                "http://proxy", FakeSession([FakeResponse({"devices": [raw]})])
+            ).fetch_devices()
+        )[0]
+        raw["capabilities"]["commands"].clear()
+        self.assertEqual(selected.commands, frozenset({"future_command"}))
+        with self.assertRaises(FrozenInstanceError):
+            selected.owner = "mqtt"
+        payload = v2_state_payload(legacy_state())
+        state = await ApiClient(
+            "http://proxy", FakeSession([FakeResponse(payload)])
+        ).fetch_state("configured")
+        payload["state"]["settings"]["mode"] = "timer"
+        self.assertEqual(state.state.mode, "automatic")
+        with self.assertRaises(FrozenInstanceError):
+            state.state.mode = "timer"
+
+    def test_number_controls_validate_bounds_without_coercion(self) -> None:
+        for backend in ("legacy_ble", "quick_connect"):
+            for control in CONTROLS.number_controls(backend):
+                with self.subTest(backend=backend, control=control.key):
+                    self.assertEqual(control.validate(control.minimum), control.minimum)
+                    self.assertEqual(
+                        control.validate(float(control.maximum)), control.maximum
+                    )
+                    for invalid in (
+                        True,
+                        None,
+                        "100",
+                        control.minimum - 1,
+                        control.maximum + 1,
+                        control.minimum + 0.5,
+                        float("inf"),
+                        float("nan"),
+                        10**1000,
+                    ):
+                        with self.assertRaises(ApiError):
+                            control.validate(invalid)
+
     async def test_projects_reported_diagnostics_without_inventing_units_or_boolean_meaning(
         self,
     ) -> None:
@@ -154,20 +220,20 @@ class ApiClientTests(unittest.IsolatedAsyncioTestCase):
         session = FakeSession(
             [FakeResponse(v2_state_payload(raw, backend="quick_connect"))]
         )
-        result = (await ApiClient("http://proxy", session).fetch_state("configured"))[
-            "state"
-        ]
-        self.assertEqual(result["signal_strength_raw"], "-42")
-        self.assertEqual(result["verified_raw"], "unknown-token")
-        self.assertIs(result["ota_in_progress"], True)
-        self.assertIs(result["automatic_mode"], True)
-        self.assertIs(result["timer_mode"], False)
-        self.assertIs(result["manual_mode"], False)
+        result = (
+            await ApiClient("http://proxy", session).fetch_state("configured")
+        ).state
+        self.assertEqual(result.signal_strength_raw, "-42")
+        self.assertEqual(result.verified_raw, "unknown-token")
+        self.assertIs(result.ota_in_progress, True)
+        self.assertIs(result.automatic_mode, True)
+        self.assertIs(result.timer_mode, False)
+        self.assertIs(result.manual_mode, False)
         raw["settings"]["mode"] = "conflicting"
         result = CLIENT._home_assistant_values(raw, "quick_connect")
-        self.assertIsNone(result["automatic_mode"])
-        self.assertIsNone(result["timer_mode"])
-        self.assertIsNone(result["manual_mode"])
+        self.assertIsNone(result.automatic_mode)
+        self.assertIsNone(result.timer_mode)
+        self.assertIsNone(result.manual_mode)
 
     async def test_adjustable_ble_capabilities_create_numbers_and_send_bounded_commands(
         self,
@@ -177,12 +243,11 @@ class ApiClientTests(unittest.IsolatedAsyncioTestCase):
             {"kind": "legacy_automatic_humidity", "humidity_percent": 80},
             {"kind": "legacy_timer", "minutes": 360},
         ]
-        device = {
-            "backend": "legacy_ble",
-            "commands": [{"kind": item["kind"]} for item in commands],
-        }
+        device = model_device(
+            backend="legacy_ble", commands=frozenset(item["kind"] for item in commands)
+        )
         self.assertEqual(
-            CLIENT.entity_keys(device)["number"],
+            CONTROLS.entity_keys(device)["number"],
             {"automatic_temperature", "automatic_humidity", "timer_duration"},
         )
         session = FakeSession(
@@ -193,13 +258,13 @@ class ApiClientTests(unittest.IsolatedAsyncioTestCase):
         )
         client = ApiClient("http://proxy", session)
         for command in commands:
-            (await client.set_control("configured", command))
+            await client.set_control("configured", command)
         self.assertEqual([post["json"]["command"] for post in session.posts], commands)
         for command in commands:
             field = next(key for key in command if key != "kind")
             for value in [-1, 361, 1.5, True, None]:
                 with self.assertRaises(ApiError):
-                    CLIENT._control_command(command | {field: value})
+                    CONTROLS._control_command(command | {field: value})
 
     async def test_refresh_reads_device_once_and_rejects_cached_failed_outcome(
         self,
@@ -209,7 +274,7 @@ class ApiClientTests(unittest.IsolatedAsyncioTestCase):
         result = await ApiClient("http://proxy/prefix", session).refresh(
             "configured", "legacy_ble"
         )
-        self.assertTrue(result["available"])
+        self.assertTrue(result.available)
         self.assertEqual(
             session.urls, ["http://proxy/prefix/api/v2/devices/configured/refresh"]
         )
@@ -226,10 +291,8 @@ class ApiClientTests(unittest.IsolatedAsyncioTestCase):
                 [FakeResponse(payload | {"status": status}, http_status)]
             )
             with self.assertRaises(ApiError):
-                (
-                    await ApiClient("http://proxy", session).refresh(
-                        "configured", "legacy_ble"
-                    )
+                await ApiClient("http://proxy", session).refresh(
+                    "configured", "legacy_ble"
                 )
 
     async def test_inventory_requires_proxy_identity_and_one_owner(self) -> None:
@@ -248,7 +311,7 @@ class ApiClientTests(unittest.IsolatedAsyncioTestCase):
                     ),
                 )
                 with self.assertRaises(ApiError):
-                    (await client.fetch_devices())
+                    await client.fetch_devices()
 
     async def test_inventory_preserves_proxy_identity_and_rejects_mixed_proxies(
         self,
@@ -257,7 +320,7 @@ class ApiClientTests(unittest.IsolatedAsyncioTestCase):
             "http://127.0.0.1:8787",
             FakeSession([FakeResponse({"devices": [inventory_device()]})]),
         )
-        self.assertEqual((await client.fetch_devices())[0]["proxy_id"], PROXY_ID)
+        self.assertEqual((await client.fetch_devices())[0].proxy_id, PROXY_ID)
         client = ApiClient(
             "http://127.0.0.1:8787",
             FakeSession(
@@ -277,7 +340,7 @@ class ApiClientTests(unittest.IsolatedAsyncioTestCase):
             ),
         )
         with self.assertRaises(ApiError):
-            (await client.fetch_devices())
+            await client.fetch_devices()
 
     def test_timer_preset_requires_matching_remaining_and_original_duration(
         self,
@@ -292,19 +355,18 @@ class ApiClientTests(unittest.IsolatedAsyncioTestCase):
         ):
             with self.subTest(remaining=remaining, original=original):
                 self.assertEqual(
-                    CLIENT.timer_control_preset(
-                        {
-                            "timer_remaining_minutes": remaining,
-                            "timer_original_minutes": original,
-                        }
+                    CONTROLS.timer_control_preset(
+                        Readings(
+                            timer_remaining_minutes=remaining,
+                            timer_original_minutes=original,
+                        )
                     ),
                     expected,
                 )
 
     def test_normalizes_proxy_url_and_rejects_embedded_credentials(self) -> None:
         self.assertEqual(
-            normalize_api_url(" http://127.0.0.1:8787/ "),
-            "http://127.0.0.1:8787",
+            normalize_api_url(" http://127.0.0.1:8787/ "), "http://127.0.0.1:8787"
         )
         with self.assertRaises(ApiError):
             normalize_api_url("http://user:secret@127.0.0.1:8787")
@@ -341,11 +403,9 @@ class ApiClientTests(unittest.IsolatedAsyncioTestCase):
             ]
         )
         client = ApiClient("http://127.0.0.1:8787", session)
-
         devices = await client.fetch_devices()
-
-        self.assertEqual(devices[0]["id"], "configured")
-        self.assertNotIn("peripheral_id", devices[0])
+        self.assertEqual(devices[0].id, "configured")
+        self.assertFalse(hasattr(devices[0], "peripheral_id"))
         self.assertEqual(session.urls, ["http://127.0.0.1:8787/api/v2/devices"])
 
     async def test_inventory_keeps_capabilities_for_explicit_device_selection(
@@ -394,19 +454,16 @@ class ApiClientTests(unittest.IsolatedAsyncioTestCase):
                 )
             ]
         )
-
         devices = await ApiClient("http://ha:8787", session).fetch_devices()
-
         self.assertEqual(
-            CLIENT.select_device(devices, "cloud-device")["name"],
-            "QuickConnect Vent",
+            CONTROLS.select_device(devices, "cloud-device").name, "QuickConnect Vent"
         )
         self.assertEqual(
-            CLIENT.entity_platforms(devices[1]),
+            CONTROLS.entity_platforms(devices[1]),
             {"sensor", "binary_sensor", "select", "number", "button", "switch"},
         )
         self.assertEqual(
-            CLIENT.entity_keys(devices[1]),
+            CONTROLS.entity_keys(devices[1]),
             {
                 "sensor": {
                     "temperature",
@@ -434,9 +491,9 @@ class ApiClientTests(unittest.IsolatedAsyncioTestCase):
                 },
             },
         )
-        self.assertNotIn("number", CLIENT.entity_platforms(devices[0]))
+        self.assertNotIn("number", CONTROLS.entity_platforms(devices[0]))
         self.assertEqual(
-            CLIENT.QUICKCONNECT_NUMBER_RANGES,
+            CONTROLS.QUICKCONNECT_NUMBER_RANGES,
             {
                 "automatic_temperature": (90, 120, 1),
                 "automatic_humidity": (30, 80, 1),
@@ -446,12 +503,21 @@ class ApiClientTests(unittest.IsolatedAsyncioTestCase):
 
     def test_device_selection_never_falls_back_to_first_device(self) -> None:
         devices = [
-            {"id": "first", "state": True, "backend": "legacy_ble", "commands": []},
-            {"id": "second", "state": True, "backend": "quick_connect", "commands": []},
+            model_device(
+                id="first",
+                read_state=True,
+                backend="legacy_ble",
+                commands=frozenset([]),
+            ),
+            model_device(
+                id="second",
+                read_state=True,
+                backend="quick_connect",
+                commands=frozenset([]),
+            ),
         ]
-
         with self.assertRaisesRegex(ApiError, "selected device is unavailable"):
-            CLIENT.select_device(devices, "missing")
+            CONTROLS.select_device(devices, "missing")
 
     async def test_maps_quickconnect_measurements_targets_mode_and_running_provenance(
         self,
@@ -466,59 +532,52 @@ class ApiClientTests(unittest.IsolatedAsyncioTestCase):
                 ]
             ),
         )
-
         result = await client.fetch_state("configured")
-
-        self.assertEqual(result["state"]["temperature_f"], 101.4)
-        self.assertEqual(result["state"]["automatic_temperature_f"], 105)
-        self.assertEqual(result["state"]["timer_duration_minutes"], 60)
-        self.assertEqual(result["state"]["mode"], "automatic")
-        self.assertIs(result["state"]["humidity_monitor"], True)
-        self.assertIs(result["state"]["running_estimate"], True)
-        self.assertEqual(result["state"]["running_estimate_provenance"], "inferred")
-        self.assertNotIn("timer_remaining_minutes", result["state"])
-        self.assertNotIn("signal_strength", result["state"])
-        self.assertNotIn("is_verified", result["state"])
+        self.assertEqual(result.state.temperature_f, 101.4)
+        self.assertEqual(result.state.automatic_temperature_f, 105)
+        self.assertEqual(result.state.timer_duration_minutes, 60)
+        self.assertEqual(result.state.mode, "automatic")
+        self.assertIs(result.state.humidity_monitor, True)
+        self.assertIs(result.state.running_estimate, True)
+        self.assertEqual(result.state.running_estimate_provenance, "inferred")
+        self.assertIsNone(result.state.timer_remaining_minutes)
+        self.assertFalse(hasattr(result.state, "signal_strength"))
+        self.assertFalse(hasattr(result.state, "is_verified"))
 
     def test_device_source_transition_removes_http_entity_ownership(self) -> None:
-        device = {
-            "id": "cloud-device",
-            "backend": "quick_connect",
-            "state": True,
-            "commands": [{"kind": "quick_connect_mode"}],
-            "state_source": "mqtt",
-            "command_source": "mqtt",
-        }
-
-        self.assertEqual(CLIENT.entity_platforms(device), set())
-
-    def test_mixed_sources_keep_only_the_http_owned_entity_sets(self) -> None:
-        device = {
-            "id": "cloud-device",
-            "backend": "quick_connect",
-            "state": True,
-            "commands": [
-                {"kind": "quick_connect_mode"},
-                {"kind": "quick_connect_targets"},
-                {"kind": "quick_connect_timer_duration"},
-            ],
-        }
-
-        self.assertEqual(
-            CLIENT.entity_platforms(device | {"state_source": "mqtt"}),
-            {"select", "number", "switch", "button"},
+        device = model_device(
+            id="cloud-device",
+            backend="quick_connect",
+            read_state=True,
+            commands=frozenset(["quick_connect_mode"]),
+            owner="mqtt",
         )
-        self.assertEqual(
-            CLIENT.entity_platforms(device | {"command_source": "mqtt"}),
-            {"sensor", "binary_sensor", "button"},
-        )
+        self.assertEqual(CONTROLS.entity_platforms(device), set())
+
+    async def test_mixed_sources_are_rejected_before_entity_creation(self) -> None:
+        for state_owner, command_owner in (("mqtt", "http"), ("http", "mqtt")):
+            session = FakeSession(
+                [
+                    FakeResponse(
+                        {
+                            "devices": [
+                                inventory_device(
+                                    state_source=state_owner,
+                                    command_source=command_owner,
+                                )
+                            ]
+                        }
+                    )
+                ]
+            )
+            with self.assertRaises(ApiError):
+                await ApiClient("http://proxy", session).fetch_devices()
 
     async def test_accepts_an_empty_device_inventory(self) -> None:
         client = ApiClient(
             "http://127.0.0.1:8787", FakeSession([FakeResponse({"devices": []})])
         )
-
-        self.assertEqual((await client.fetch_devices()), [])
+        self.assertEqual(await client.fetch_devices(), [])
 
     async def test_rejects_duplicate_inventory_ids(self) -> None:
         device = {
@@ -531,12 +590,10 @@ class ApiClientTests(unittest.IsolatedAsyncioTestCase):
             "capabilities": {"read_state": True, "commands": []},
         }
         client = ApiClient(
-            "http://ha:8787",
-            FakeSession([FakeResponse({"devices": [device, device]})]),
+            "http://ha:8787", FakeSession([FakeResponse({"devices": [device, device]})])
         )
-
         with self.assertRaisesRegex(ApiError, "duplicate device identifiers"):
-            (await client.fetch_devices())
+            await client.fetch_devices()
 
     async def test_fetches_state_and_preserves_freshness(self) -> None:
         values = {
@@ -556,23 +613,19 @@ class ApiClientTests(unittest.IsolatedAsyncioTestCase):
         )
         session = FakeSession([FakeResponse(payload)])
         client = ApiClient("http://127.0.0.1:8787/", session)
-
         result = await client.fetch_state("configured")
-
-        self.assertEqual(result["state"], values)
-        self.assertEqual(result["freshness"], "fresh")
-        self.assertNotIn("peripheral_id", result)
-        self.assertNotIn("identity_suffix", result["state"])
+        self.assertEqual(result.state, Readings(**values))
+        self.assertEqual(result.freshness, "fresh")
+        self.assertFalse(hasattr(result, "peripheral_id"))
+        self.assertFalse(hasattr(result.state, "identity_suffix"))
         self.assertEqual(
-            session.urls,
-            ["http://127.0.0.1:8787/api/v2/devices/configured/state"],
+            session.urls, ["http://127.0.0.1:8787/api/v2/devices/configured/state"]
         )
 
     async def test_rejects_path_injection_in_device_ids(self) -> None:
         client = ApiClient("http://127.0.0.1:8787", FakeSession([]))
-
         with self.assertRaisesRegex(ApiError, "invalid configured device"):
-            (await client.fetch_state("../other"))
+            await client.fetch_state("../other")
 
     async def test_preserves_stale_unavailable_state_without_inventing_values(
         self,
@@ -588,12 +641,10 @@ class ApiClientTests(unittest.IsolatedAsyncioTestCase):
         client = ApiClient(
             "http://127.0.0.1:8787", FakeSession([FakeResponse(payload)])
         )
-
         result = await client.fetch_state("configured")
-
-        self.assertIsNone(result["state"])
-        self.assertFalse(result["available"])
-        self.assertEqual(result["freshness"], "stale")
+        self.assertIsNone(result.state)
+        self.assertFalse(result.available)
+        self.assertEqual(result.freshness, "stale")
 
     async def test_sends_only_supported_controls_and_requires_confirmation(
         self,
@@ -601,27 +652,24 @@ class ApiClientTests(unittest.IsolatedAsyncioTestCase):
         response = FakeResponse({"request_id": "$request_id", "status": "confirmed"})
         session = FakeSession([response])
         client = ApiClient("http://127.0.0.1:8787", session)
-
-        (await client.set_control("configured", "timer_clear"))
-
+        await client.set_control("configured", "timer_clear")
         self.assertEqual(
-            session.urls,
-            ["http://127.0.0.1:8787/api/v2/devices/configured/control"],
+            session.urls, ["http://127.0.0.1:8787/api/v2/devices/configured/control"]
         )
         request = session.posts[0]["json"]
         self.assertEqual(
-            request["command"],
-            {"kind": "legacy_preset", "preset": "timer_clear"},
+            request["command"], {"kind": "legacy_preset", "preset": "timer_clear"}
         )
         self.assertTrue(request["request_id"])
         self.assertIsInstance(request["issued_at_unix_ms"], int)
         self.assertEqual(session.posts[0]["timeout"], 300)
         with self.assertRaisesRegex(ApiError, "unsupported control preset"):
-            (await client.set_control("configured", "timer_999"))
+            await client.set_control("configured", "timer_999")
 
     async def test_control_timeout_and_disconnect_preserve_unknown_request_without_retry(
         self,
     ) -> None:
+
         class LostResponse(FakeResponse):
             async def __aenter__(self):
                 raise self.payload
@@ -630,7 +678,7 @@ class ApiClientTests(unittest.IsolatedAsyncioTestCase):
             session = FakeSession([LostResponse(error)])
             client = ApiClient("http://proxy", session)
             with self.assertRaises(ApiError) as raised:
-                (await client.set_control("configured", "timer_clear"))
+                await client.set_control("configured", "timer_clear")
             self.assertEqual(
                 raised.exception.request_id, session.posts[0]["json"]["request_id"]
             )
@@ -645,13 +693,9 @@ class ApiClientTests(unittest.IsolatedAsyncioTestCase):
         response = FakeResponse({"request_id": "$request_id", "status": "confirmed"})
         session = FakeSession([response])
         client = ApiClient("http://ha:8787", session)
-
-        (
-            await client.set_control(
-                "quick-device", {"kind": "quick_connect_mode", "mode": "manual"}
-            )
+        await client.set_control(
+            "quick-device", {"kind": "quick_connect_mode", "mode": "manual"}
         )
-
         request = session.posts[0]["json"]
         self.assertEqual(
             request["command"], {"kind": "quick_connect_mode", "mode": "manual"}
@@ -662,7 +706,6 @@ class ApiClientTests(unittest.IsolatedAsyncioTestCase):
     async def test_rejects_invalid_quickconnect_values_before_post(self) -> None:
         session = FakeSession([])
         client = ApiClient("http://ha:8787", session)
-
         for command in (
             {
                 "kind": "quick_connect_targets",
@@ -677,7 +720,7 @@ class ApiClientTests(unittest.IsolatedAsyncioTestCase):
             {"kind": "quick_connect_timer_duration", "minutes": 45},
         ):
             with self.subTest(command=command), self.assertRaises(ApiError):
-                (await client.set_control("quick-device", command))
+                await client.set_control("quick-device", command)
         self.assertEqual(session.posts, [])
 
     async def test_sends_valid_quickconnect_targets_and_duration_as_typed_commands(
@@ -689,24 +732,17 @@ class ApiClientTests(unittest.IsolatedAsyncioTestCase):
         ]
         session = FakeSession(responses)
         client = ApiClient("http://ha:8787", session)
-
-        (
-            await client.set_control(
-                "quick-device",
-                {
-                    "kind": "quick_connect_targets",
-                    "temperature_f": 120,
-                    "humidity_percent": 80,
-                },
-            )
+        await client.set_control(
+            "quick-device",
+            {
+                "kind": "quick_connect_targets",
+                "temperature_f": 120,
+                "humidity_percent": 80,
+            },
         )
-        (
-            await client.set_control(
-                "quick-device",
-                {"kind": "quick_connect_timer_duration", "minutes": 360},
-            )
+        await client.set_control(
+            "quick-device", {"kind": "quick_connect_timer_duration", "minutes": 360}
         )
-
         self.assertEqual(
             [post["json"]["command"] for post in session.posts],
             [
@@ -735,9 +771,8 @@ class ApiClientTests(unittest.IsolatedAsyncioTestCase):
                 ]
             ),
         )
-
         with self.assertRaisesRegex(ApiError, "readback differed"):
-            (await client.set_control("configured", "timer_clear"))
+            await client.set_control("configured", "timer_clear")
 
     async def test_unknown_or_inconsistent_control_reply_preserves_uncertain_submission(
         self,
@@ -750,11 +785,9 @@ class ApiClientTests(unittest.IsolatedAsyncioTestCase):
                     )
                 ]
             )
-            with self.assertRaises(CLIENT.ControlOutcomeUnknown) as raised:
-                (
-                    await ApiClient("http://proxy", session).set_control(
-                        "configured", "timer_clear"
-                    )
+            with self.assertRaises(MODELS.ControlOutcomeUnknown) as raised:
+                await ApiClient("http://proxy", session).set_control(
+                    "configured", "timer_clear"
                 )
             self.assertEqual(
                 raised.exception.request_id, session.posts[0]["json"]["request_id"]
@@ -767,18 +800,16 @@ class ApiClientTests(unittest.IsolatedAsyncioTestCase):
             "http://127.0.0.1:8787",
             FakeSession([FakeResponse({"request_id": "wrong", "status": "confirmed"})]),
         )
-
         with self.assertRaisesRegex(ApiError, "outcome unknown"):
-            (await client.set_control("configured", "timer_clear"))
+            await client.set_control("configured", "timer_clear")
 
     async def test_rejects_inconsistent_or_invalid_proxy_responses(self) -> None:
         invalid = v2_state_payload(legacy_state(), available=False)
         client = ApiClient(
             "http://127.0.0.1:8787", FakeSession([FakeResponse(invalid)])
         )
-
         with self.assertRaisesRegex(ApiError, "inconsistent"):
-            (await client.fetch_state("configured"))
+            await client.fetch_state("configured")
 
     async def test_rejects_invalid_inventory_status(self) -> None:
         for inventory_status in ([], {}):
@@ -791,20 +822,18 @@ class ApiClientTests(unittest.IsolatedAsyncioTestCase):
                     "state": None,
                 }
                 client = ApiClient(
-                    "http://127.0.0.1:8787",
-                    FakeSession([FakeResponse(payload)]),
+                    "http://127.0.0.1:8787", FakeSession([FakeResponse(payload)])
                 )
                 with self.assertRaisesRegex(ApiError, "invalid device state"):
-                    (await client.fetch_state("configured"))
+                    await client.fetch_state("configured")
 
     async def test_rejects_malformed_sensor_values(self) -> None:
         payload = v2_state_payload(legacy_state(temperature_f="unknown"))
         client = ApiClient(
             "http://127.0.0.1:8787", FakeSession([FakeResponse(payload)])
         )
-
         with self.assertRaisesRegex(ApiError, "invalid device values"):
-            (await client.fetch_state("configured"))
+            await client.fetch_state("configured")
 
     async def test_rejects_non_finite_and_oversized_sensor_values(self) -> None:
         for field, value in (
@@ -821,28 +850,24 @@ class ApiClientTests(unittest.IsolatedAsyncioTestCase):
                     state["settings"][field] = value
                 payload = v2_state_payload(state)
                 client = ApiClient(
-                    "http://127.0.0.1:8787",
-                    FakeSession([FakeResponse(payload)]),
+                    "http://127.0.0.1:8787", FakeSession([FakeResponse(payload)])
                 )
                 with self.assertRaisesRegex(ApiError, "invalid device values"):
-                    (await client.fetch_state("configured"))
+                    await client.fetch_state("configured")
 
     async def test_maps_http_failures_to_safe_errors(self) -> None:
         client = ApiClient(
             "http://127.0.0.1:8787", FakeSession([FakeResponse({}, status=503)])
         )
-
         with self.assertRaisesRegex(ApiError, "HTTP 503"):
-            (await client.fetch_devices())
+            await client.fetch_devices()
 
     async def test_maps_connection_failures_without_exposing_exception_details(
         self,
     ) -> None:
         client = ApiClient("http://127.0.0.1:8787", FailedSession())
-
         with self.assertRaisesRegex(ApiError, "cannot connect") as raised:
-            (await client.fetch_devices())
-
+            await client.fetch_devices()
         self.assertNotIn("private host detail", str(raised.exception))
 
 

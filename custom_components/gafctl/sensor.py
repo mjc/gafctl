@@ -1,5 +1,6 @@
 """Read-only GAF state and diagnostic sensors."""
 
+from collections.abc import Callable
 from dataclasses import dataclass
 
 from homeassistant.components.sensor import (
@@ -17,21 +18,22 @@ from homeassistant.const import (
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
-from .client import JsonObject, JsonValue, entity_keys
+from .controls import entity_keys
 from .coordinator import GafctlConfigEntry, GafctlCoordinator
 from .entity import GafctlEntity
+from .models import JsonObject, Readings
 
 
 @dataclass(frozen=True, kw_only=True)
 class GafctlSensorDescription(SensorEntityDescription):
-    value_key: str
+    value: Callable[[Readings], float | int | str | None]
 
 
 SENSORS = (
     GafctlSensorDescription(
         key="temperature",
         name="Ambient temperature",
-        value_key="temperature_f",
+        value=lambda readings: readings.temperature_f,
         device_class=SensorDeviceClass.TEMPERATURE,
         native_unit_of_measurement=UnitOfTemperature.FAHRENHEIT,
         state_class=SensorStateClass.MEASUREMENT,
@@ -39,7 +41,7 @@ SENSORS = (
     GafctlSensorDescription(
         key="humidity",
         name="Relative humidity",
-        value_key="humidity_percent",
+        value=lambda readings: readings.humidity_percent,
         device_class=SensorDeviceClass.HUMIDITY,
         native_unit_of_measurement=PERCENTAGE,
         state_class=SensorStateClass.MEASUREMENT,
@@ -47,19 +49,19 @@ SENSORS = (
     GafctlSensorDescription(
         key="mode",
         name="Controller mode",
-        value_key="mode",
+        value=lambda readings: readings.mode,
         entity_category=EntityCategory.DIAGNOSTIC,
     ),
     GafctlSensorDescription(
         key="firmware_version",
         name="Firmware version",
-        value_key="firmware_version",
+        value=lambda readings: readings.firmware_version,
         entity_category=EntityCategory.DIAGNOSTIC,
     ),
     GafctlSensorDescription(
         key="automatic_temperature_threshold",
         name="Automatic temperature threshold",
-        value_key="automatic_temperature_threshold_f",
+        value=lambda readings: readings.automatic_temperature_threshold_f,
         device_class=SensorDeviceClass.TEMPERATURE,
         native_unit_of_measurement=UnitOfTemperature.FAHRENHEIT,
         entity_category=EntityCategory.DIAGNOSTIC,
@@ -67,34 +69,34 @@ SENSORS = (
     GafctlSensorDescription(
         key="automatic_humidity_threshold",
         name="Automatic humidity threshold",
-        value_key="automatic_humidity_threshold_percent",
+        value=lambda readings: readings.automatic_humidity_threshold_percent,
         native_unit_of_measurement=PERCENTAGE,
         entity_category=EntityCategory.DIAGNOSTIC,
     ),
     GafctlSensorDescription(
         key="timer_remaining",
         name="Timer remaining",
-        value_key="timer_remaining_minutes",
+        value=lambda readings: readings.timer_remaining_minutes,
         native_unit_of_measurement=UnitOfTime.MINUTES,
         entity_category=EntityCategory.DIAGNOSTIC,
     ),
     GafctlSensorDescription(
         key="timer_original",
         name="Original timer setting",
-        value_key="timer_original_minutes",
+        value=lambda readings: readings.timer_original_minutes,
         native_unit_of_measurement=UnitOfTime.MINUTES,
         entity_category=EntityCategory.DIAGNOSTIC,
     ),
     GafctlSensorDescription(
         key="signal_strength_raw",
         name="Signal strength (reported)",
-        value_key="signal_strength_raw",
+        value=lambda readings: readings.signal_strength_raw,
         entity_category=EntityCategory.DIAGNOSTIC,
     ),
     GafctlSensorDescription(
         key="verified_raw",
         name="Verification (reported)",
-        value_key="verified_raw",
+        value=lambda readings: readings.verified_raw,
         entity_category=EntityCategory.DIAGNOSTIC,
     ),
 )
@@ -127,9 +129,9 @@ class GafctlSensor(GafctlEntity, SensorEntity):
         self.entity_description = description
 
     @property
-    def native_value(self) -> JsonValue:
+    def native_value(self) -> float | int | str | None:
         state = self.state_values
-        return state.get(self.entity_description.value_key) if state else None
+        return self.entity_description.value(state) if state else None
 
     @property
     def available(self) -> bool:
@@ -137,8 +139,8 @@ class GafctlSensor(GafctlEntity, SensorEntity):
             super().available
             and self.coordinator.http_state_owned
             and self.coordinator.data
-            and self.coordinator.data.get("available")
-            and self.coordinator.data.get("state") is not None
+            and self.coordinator.data.available
+            and self.coordinator.data.state is not None
         )
 
     @property

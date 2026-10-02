@@ -3,9 +3,9 @@
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
-from .client import JsonObject
 from .const import DOMAIN
 from .coordinator import GafctlConfigEntry, GafctlCoordinator
+from .models import JsonObject, Readings
 
 
 class GafctlEntity(CoordinatorEntity[GafctlCoordinator]):
@@ -19,15 +19,17 @@ class GafctlEntity(CoordinatorEntity[GafctlCoordinator]):
         self._attr_unique_id = f"{entry.unique_id}_{key}"
 
     @property
-    def state_values(self) -> JsonObject:
-        return (self.coordinator.data or {}).get("state") or {}
+    def state_values(self) -> Readings | None:
+        data = self.coordinator.data
+        return data.state if data else None
 
     @property
     def reading_attributes(self) -> JsonObject:
-        data = self.coordinator.data or {}
+        data = self.coordinator.data
         return {
-            key: data.get(key)
-            for key in ("freshness", "observed_at_unix_ms", "last_error")
+            "freshness": data.freshness if data else None,
+            "observed_at_unix_ms": data.observed_at_unix_ms if data else None,
+            "last_error": data.last_error if data else None,
         }
 
     @property
@@ -35,10 +37,12 @@ class GafctlEntity(CoordinatorEntity[GafctlCoordinator]):
         device = self.coordinator.device
         return DeviceInfo(
             identifiers={(DOMAIN, self._entry.unique_id)},
-            name=device.get("name", "GAF Vent"),
+            name=device.name,
             manufacturer="GAF",
             model="GAF Wi-Fi Vent"
-            if device["backend"] == "legacy_ble"
+            if device.backend == "legacy_ble"
             else "GAF QuickConnect Vent",
-            sw_version=self.state_values.get("firmware_version"),
+            sw_version=self.state_values.firmware_version
+            if self.state_values
+            else None,
         )

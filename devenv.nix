@@ -23,6 +23,7 @@ in {
       bacon
       python3
       ruff
+      mypy
       pkg-config
       mosquitto
     ]
@@ -37,6 +38,7 @@ in {
   tasks."check:http".exec = "cargo nextest run --package gafctl --all-targets --no-default-features --features http --locked --status-level fail --final-status-level fail";
   tasks."check:doc".exec = "cargo test --workspace --doc --locked";
   tasks."check:python-format".exec = "ruff format --check custom_components tests/*.py";
+  tasks."check:python-types".exec = "mypy custom_components/gafctl/client.py custom_components/gafctl/models.py custom_components/gafctl/controls.py";
   tasks."check:python-lint".exec = "ruff check custom_components tests/*.py";
   tasks."check:ha".exec = "python3 -m unittest discover -s tests -p test_gafctl_client.py";
   tasks."check:ha-registry" = lib.mkIf linux {
@@ -67,6 +69,7 @@ in {
       "check:ha"
       "check:python-format"
       "check:python-lint"
+      "check:python-types"
     ]
     ++ lib.optionals linux ["check:ha-registry"];
 }

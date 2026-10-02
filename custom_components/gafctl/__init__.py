@@ -4,14 +4,16 @@ from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryNotReady
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
-from .client import ApiClient, ApiError, entity_keys
+from .client import ApiClient
 from .const import CONF_API_URL, CONF_DEVICE_ID, CONF_PROXY_ID, PLATFORMS
+from .controls import entity_keys
 from .coordinator import (
     GafctlConfigEntry,
     GafctlCoordinator,
     async_cleanup_registry,
     unavailable_device,
 )
+from .models import ApiError
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: GafctlConfigEntry) -> bool:
@@ -25,8 +27,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: GafctlConfigEntry) -> bo
         (
             item
             for item in devices
-            if item["id"] == entry.data[CONF_DEVICE_ID]
-            and item["proxy_id"] == entry.data[CONF_PROXY_ID]
+            if item.id == entry.data[CONF_DEVICE_ID]
+            and item.proxy_id == entry.data[CONF_PROXY_ID]
         ),
         None,
     )

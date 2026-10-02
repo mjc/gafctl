@@ -1,15 +1,20 @@
 """Mutually exclusive cloud mode controls."""
 
+from types import MappingProxyType
+
 from homeassistant.components.switch import SwitchEntity
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
-from .client import QUICKCONNECT_MODES, ApiError, entity_keys
+from .controls import QUICKCONNECT_MODES, entity_keys
 from .coordinator import GafctlConfigEntry, GafctlCoordinator
 from .entity import GafctlEntity
+from .models import ApiError
 
-MODES = {"automatic": "Automatic mode", "timer": "Timer mode", "manual": "Manual mode"}
+MODES = MappingProxyType(
+    {"automatic": "Automatic mode", "timer": "Timer mode", "manual": "Manual mode"}
+)
 
 
 async def async_setup_entry(
@@ -40,7 +45,8 @@ class GafctlModeSwitch(GafctlEntity, SwitchEntity):
 
     @property
     def is_on(self) -> bool | None:
-        mode = (self.state_values).get("mode")
+        state = self.state_values
+        mode = state.mode if state else None
         return mode == self._mode if mode in QUICKCONNECT_MODES else None
 
     @property

@@ -35,7 +35,8 @@ devenv tasks run check:all
 
 This runs formatting, Clippy with warnings denied for all features, CLI-only
 and HTTP-only configurations, workspace tests with all features, CLI-only and
-HTTP-only tests, Rust doctests, Ruff formatting and lint checks, and the Python
+HTTP-only tests, Rust doctests, Ruff formatting and lint checks, strict typing of the Python
+client, models and controls, and the Python
 Home Assistant client tests.
 
 On native Linux, `check:all` also runs `check:ha-registry`. That task uses Home
@@ -66,7 +67,13 @@ python3 -m unittest discover -s tests -p test_gafctl_client.py
 ```
 
 The HA integration uses Python 3.14, typed config-entry runtime data, and shared
-entity descriptions. Format and lint Python changes with
+entity descriptions. `models.py` holds immutable device and reading records;
+`client.py` validates HTTP payloads; `controls.py` defines bounds, commands and
+readback checks. The coordinator serializes writes, checks current ownership and
+capabilities, sends once, and refreshes state after the response. Entities expose
+readings and translate API errors for HA.
+
+Run `devenv tasks run check:python-types` for strict typing. Format and lint Python changes with
 `ruff format custom_components tests/*.py` and
 `ruff check custom_components tests/*.py`.
 
