@@ -1,0 +1,16 @@
+#!/bin/sh
+set -eu
+if [ "$1" = configure ]; then
+    if ! getent group gafctl >/dev/null; then addgroup --system gafctl; fi
+    if ! getent passwd gafctl >/dev/null; then
+        adduser --system --ingroup gafctl --home /var/lib/gafctl --no-create-home --disabled-login gafctl
+    fi
+    chown root:gafctl /etc/gafctl
+    chmod 750 /etc/gafctl
+    chown root:gafctl /etc/gafctl/gafctl.env
+    chmod 640 /etc/gafctl/gafctl.env
+    if [ -d /run/systemd/system ]; then systemctl daemon-reload; fi
+    if [ -S /run/dbus/system_bus_socket ]; then
+        dbus-send --system --type=method_call --dest=org.freedesktop.DBus /org/freedesktop/DBus org.freedesktop.DBus.ReloadConfig || true
+    fi
+fi

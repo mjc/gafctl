@@ -3,3 +3,7 @@
 /.direnv
 __pycache__/
 *.py[cod]
+
+/dist/
+/gafctl.env
+/quickconnect-password

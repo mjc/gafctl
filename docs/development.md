@@ -116,3 +116,21 @@ cargo deny check advisories sources
 cargo machete
 cargo tree --duplicates
 ```
+
+## Distribution
+
+The root Dockerfile builds both binaries with the checked-in toolchain and
+lockfile. Its `artifacts` target exports native Linux `.deb` packages and binary
+archives; `runtime` runs the server. The Home Assistant app builds the same Rust
+source from the revision pinned in `home-assistant/Dockerfile`.
+
+The Distribution workflow builds on native x86-64 and ARM64 runners. A manual
+run uploads build artifacts without publishing. A `vVERSION` tag must match the
+root Cargo version, HA manifest version, and app version. Update the app source
+revision when releasing server changes.
+
+Before publishing, protect release tags and configure required reviewers on the
+GitHub `release` environment. Its publish job creates a GitHub Release with
+checksums and publishes `ghcr.io/mjc/gafctl:VERSION` as a multi-architecture
+image. Set the GHCR package visibility to public after its first publication.
+Do not document a registry tag as available before it has been published.

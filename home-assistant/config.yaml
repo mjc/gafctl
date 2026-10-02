@@ -1,0 +1,40 @@
+name: Gafctl
+version: "0.1.0"
+slug: gafctl
+description: GAF Master Flow attic fan HTTP and MQTT service
+url: https://github.com/mjc/gafctl
+arch:
+  - amd64
+  - aarch64
+startup: application
+boot: auto
+init: true
+host_dbus: true
+ports:
+  8787/tcp: 8787
+ports_description:
+  8787/tcp: HTTP API for Home Assistant and local clients
+watchdog: http://[HOST]:[PORT:8787]/health
+backup: cold
+options:
+  device_id: ""
+  quickconnect_username: ""
+  quickconnect_password: ""
+  quickconnect_role: consumer
+  quickconnect_writes_enabled: false
+  mqtt_host: ""
+  mqtt_port: 1883
+  mqtt_username: ""
+  mqtt_password: ""
+  mqtt_discovery: false
+schema:
+  device_id: str
+  quickconnect_username: str
+  quickconnect_password: password
+  quickconnect_role: list(consumer|contractor)
+  quickconnect_writes_enabled: bool
+  mqtt_host: str
+  mqtt_port: port
+  mqtt_username: str
+  mqtt_password: password
+  mqtt_discovery: bool

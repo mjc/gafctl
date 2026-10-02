@@ -1,0 +1,10 @@
+.git
+.devenv
+.direnv
+target
+__pycache__
+**/__pycache__
+*.pyc
+/dist
+/gafctl.env
+/quickconnect-password

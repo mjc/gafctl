@@ -1,0 +1,8 @@
+#!/bin/sh
+set -eu
+case "$1" in
+    remove|purge)
+        if [ -d /run/systemd/system ]; then systemctl daemon-reload; fi
+        ;;
+esac
+# Keep /var/lib/gafctl and the service account: device identity must survive reinstall.

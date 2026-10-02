@@ -1,0 +1,11 @@
+services:
+  gafctl:
+    environment:
+      GAFCTL_QUICKCONNECT_PASSWORD_FILE: /run/secrets/quickconnect-password
+    volumes:
+      - type: bind
+        source: ./quickconnect-password
+        target: /run/secrets/quickconnect-password
+        read_only: true
+        bind:
+          create_host_path: false

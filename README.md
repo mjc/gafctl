@@ -38,23 +38,25 @@ require the manufacturer's app.
 
 ## Install
 
-Build on the computer that will connect to the fan. Install
-[Nix](https://nixos.org/download/) and [devenv](https://devenv.sh/getting-started/),
-then run:
+Choose an installation method for the computer that will connect to the fan:
 
-```sh
-git clone https://github.com/mjc/gafctl.git
-cd gafctl
-devenv allow
-devenv shell -- cargo build --release --locked
-```
+| Host | Installation |
+| --- | --- |
+| Home Assistant OS | [Gafctl app](docs/installation.md#home-assistant-os) |
+| Ubuntu / Debian | [Native package and systemd service](docs/installation.md#ubuntu-and-debian) |
+| Linux with Docker | [Docker Compose](docs/installation.md#docker-compose) |
+| NixOS / macOS | [devenv](docs/installation.md#nix) |
+| Other Linux distributions | [Source build](docs/installation.md#source-build) |
 
-The build produces `gafctl` and `gafctl-server`. `gafctl server` launches
-`gafctl-server` and forwards its arguments. Run the examples from the repository
-root. For a service-only build, add
-`--no-default-features --features http,mqtt --bin gafctl-server`.
-On Linux, install and start BlueZ using your
-distribution's package manager. On macOS, allow Bluetooth access if prompted.
+Install the separate Home Assistant integration through
+[HACS or manual installation](docs/installation.md#home-assistant-integration).
+HACS installs the integration; the app, package, or container runs the server.
+Release binaries and registry images have not been published yet; the guide
+includes source builds for each server path.
+
+The server package includes `gafctl` and `gafctl-server`. `gafctl server` launches
+its sibling `gafctl-server` and forwards arguments. For the examples below, use
+`gafctl` if you installed it, or `./target/release/gafctl` after a source build.
 
 ## Find your fan
 
@@ -108,7 +110,8 @@ For automatic startup and logs, follow the [service setup guide](docs/deployment
 
 ## Add it to Home Assistant
 
-1. Copy this repository's `custom_components/gafctl` directory into
+1. Install through [HACS](docs/installation.md#hacs), or copy this repository's
+   `custom_components/gafctl` directory into
    Home Assistant's configuration directory as `custom_components/gafctl`.
    The resulting path should include `custom_components/gafctl/manifest.json`.
 2. Restart Home Assistant.
@@ -156,6 +159,7 @@ all presets, QuickConnect commands, timeouts, and exit codes.
 ## More documentation
 
 - [Fan models and compatibility](docs/hardware.md)
+- [Installation methods](docs/installation.md)
 - [Run as a service; configure QuickConnect](docs/deployment.md)
 - [Home Assistant entities and MQTT](docs/home-assistant-entities.md)
 - [Command line reference](docs/cli.md)

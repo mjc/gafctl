@@ -1,0 +1,11 @@
+services:
+  gafctl:
+    environment:
+      GAFCTL_DEVICE_ID: "${GAFCTL_DEVICE_ID:?Set GAFCTL_DEVICE_ID to the ID from gafctl ble scan}"
+    volumes:
+      - type: bind
+        source: /run/dbus/system_bus_socket
+        target: /run/dbus/system_bus_socket
+        read_only: true
+        bind:
+          create_host_path: false

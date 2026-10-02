@@ -1,7 +1,7 @@
 # Run Gafctl as a service
 
-First build Gafctl and confirm a direct state read using the
-[README](../README.md). The service computer needs Bluetooth within range of an
+First [install Gafctl](installation.md) and confirm a direct state read using
+the [README](../README.md). The service computer needs Bluetooth within range of an
 original ERV5SMT or EGV5SMT. QuickConnect requires Internet access; see
 [fan models and controller types](hardware.md) to choose a backend.
 
@@ -27,54 +27,28 @@ it can also start with no devices configured.
 
 ## Linux with systemd
 
-These instructions are for a Linux distribution where you manage service files
-manually. On NixOS, manage the package, user, Bluetooth, firewall, and systemd
-unit declaratively. This repository builds with devenv and exports no NixOS
-package or service module.
+On Ubuntu and Debian, use the [package installation](installation.md#ubuntu-and-debian).
+It installs both binaries, the service account, the unit, and the BlueZ D-Bus
+policy. The packaged unit listens on loopback until you add a listener override.
 
-Install both executables from the repository root after the release build:
+For a manual installation on another systemd distribution, build both binaries
+and install the repository's service files:
 
 ```sh
-sudo install -m 0755 target/release/gafctl target/release/gafctl-server /usr/local/bin/
+sudo install -m 0755 target/release/gafctl target/release/gafctl-server /usr/bin/
 sudo useradd --system --home-dir /var/lib/gafctl --shell /usr/sbin/nologin gafctl
 sudo install -d -m 0750 -o root -g gafctl /etc/gafctl
-sudo install -m 0640 -o root -g gafctl /dev/null /etc/gafctl/gafctl.env
+sudo install -m 0640 -o root -g gafctl packaging/gafctl.env /etc/gafctl/gafctl.env
+sudo install -m 0644 packaging/systemd/gafctl.service /etc/systemd/system/
+sudo install -m 0644 packaging/dbus/gafctl.conf /etc/dbus-1/system.d/
 ```
 
-Create the user only if it does not already exist. Edit
-`/etc/gafctl/gafctl.env` and add your scan's peripheral ID:
-
-```ini
-GAFCTL_DEVICE_ID=PERIPHERAL_ID
-GAFCTL_IDENTITY_STORE=/var/lib/gafctl/identities.json
-```
-
-Create `/etc/systemd/system/gafctl.service`:
-
-```ini
-[Unit]
-Description=Gafctl GAF Master Flow attic fan service
-Wants=network-online.target
-After=network-online.target bluetooth.service
-
-[Service]
-User=gafctl
-Group=gafctl
-StateDirectory=gafctl
-StateDirectoryMode=0700
-EnvironmentFile=/etc/gafctl/gafctl.env
-ExecStart=/usr/local/bin/gafctl-server --bind 0.0.0.0:8787 --allow-remote
-Restart=on-failure
-RestartSec=5
-UMask=0077
-
-[Install]
-WantedBy=multi-user.target
-```
-
-Install and enable BlueZ using your distribution's tools. The `gafctl` user
-must be allowed to access BlueZ through the system D-Bus; check your distribution's
-policy if the service gets a permission error. Then start Gafctl:
+Create the user only if it does not exist. Edit `/etc/gafctl/gafctl.env` with the
+Bluetooth device ID or QuickConnect credentials. Start BlueZ for an original
+controller and reload the D-Bus configuration using your distribution's tools.
+The unit creates a private `/var/lib/gafctl` state directory and sets the
+identity-store path. Follow the package guide's listener override if Home
+Assistant runs elsewhere, then start the service:
 
 ```sh
 sudo systemctl daemon-reload
@@ -83,8 +57,11 @@ systemctl status gafctl.service
 journalctl -u gafctl.service -n 50 --no-pager
 ```
 
-Allow the required network access in your firewall, then check from the Home
-Assistant host:
+On NixOS, manage the package, service user, Bluetooth, D-Bus policy, state
+location, and firewall declaratively. The repository's development environment
+uses devenv; it exports no NixOS package or module.
+
+Allow the required network access, then check from the Home Assistant host:
 
 ```sh
 curl http://GAFCTL_HOST:8787/health
@@ -92,9 +69,9 @@ curl http://GAFCTL_HOST:8787/api/v2/devices
 curl http://GAFCTL_HOST:8787/api/v2/devices/configured/state
 ```
 
-Replace `GAFCTL_HOST` with the service computer's address. `/health` checks the
+Replace `GAFCTL_HOST` with the service host's address. `/health` checks the
 process. The device state response should have `available: true` and current
-readings before you add the [Home Assistant integration](../README.md#add-it-to-home-assistant).
+readings before you add the Home Assistant integration.
 
 ## QuickConnect (experimental)
 
