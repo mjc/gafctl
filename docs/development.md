@@ -8,12 +8,15 @@ devenv allow
 devenv shell
 ```
 
-Inside that shell, run the executable with `cargo run --`, for example:
+Inside that shell, select the control CLI explicitly:
 
 ```sh
-cargo run -- ble scan
-cargo run -- devices --format json
+cargo run --no-default-features --features cli --bin updraftctl -- ble scan
+cargo run --no-default-features --features cli --bin updraftctl -- devices --format json
 ```
+
+The service binary is `updraft`; start it with `cargo run -- serve` and the
+configuration described in the deployment guide.
 
 If `DEVENV_ROOT` points to this repository, run Cargo commands directly. If it
 points elsewhere, start a fresh command from this repository's root.
@@ -24,9 +27,25 @@ points elsewhere, start a fresh command from this repository's root.
 devenv tasks run check:all
 ```
 
-This runs formatting, Clippy with warnings denied, Rust tests through nextest,
-Rust doctests, and the Python Home Assistant client tests. The individual tasks
-are `check:fmt`, `check:clippy`, `check:test`, `check:doc`, and `check:ha`.
+This runs formatting, Clippy with warnings denied for all features, CLI-only
+and HTTP-only configurations, workspace tests with all features, CLI-only and
+HTTP-only tests, Rust doctests, and the Python Home Assistant client tests.
+
+On native Linux, `check:all` also runs `check:ha-registry`. That task uses Home
+Assistant and MQTT dependencies pinned by `devenv.lock`, generates discovery
+fixtures from the Rust implementation, and exercises HA entity/device registries,
+onboarding, reconfiguration, ownership transitions and MQTT templates. Each run
+uses an isolated configuration directory under `target/ha-registry`; it does not
+connect to a deployed Home Assistant instance or the fan. It runs without a VM.
+
+Run that suite separately on native Linux:
+
+```sh
+devenv tasks run check:ha-registry
+```
+
+The HA package supports Linux, so this task is absent from the macOS environment.
+The other checks run on both platforms.
 
 For a focused Rust test inside the shell:
 
