@@ -125,9 +125,9 @@ class GafctlCoordinator(DataUpdateCoordinator[DeviceState]):
             await self.async_refresh()
             state = self._require_control("quick_connect_mode", "quick_connect")
             if only_if_current is not None:
-                if state.mode not in QUICKCONNECT_MODES:
+                if state.settings.mode not in QUICKCONNECT_MODES:
                     raise ApiError("current device mode is unknown")
-                if state.mode != only_if_current:
+                if state.settings.mode != only_if_current:
                     return
             command = (
                 {
@@ -140,9 +140,10 @@ class GafctlCoordinator(DataUpdateCoordinator[DeviceState]):
             await self._async_submit_control(command)
             state = self._require_control("quick_connect_mode", "quick_connect")
             matches = (
-                state.mode == mode
+                state.settings.mode == mode
                 if only_if_current is None
-                else state.mode in QUICKCONNECT_MODES and state.mode != only_if_current
+                else state.settings.mode in QUICKCONNECT_MODES
+                and state.settings.mode != only_if_current
             )
             if not matches:
                 raise ApiError("confirmed control has no matching current mode")

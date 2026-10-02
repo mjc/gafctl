@@ -19,6 +19,9 @@ ApiError = MODELS.ApiError
 normalize_api_url = CLIENT.normalize_api_url
 Readings = MODELS.Readings
 Device = MODELS.Device
+LegacySettings = MODELS.LegacySettings
+QuickConnectSettings = MODELS.QuickConnectSettings
+Diagnostics = MODELS.Diagnostics
 PROXY_ID = "550e8400-e29b-41d4-a716-446655440000"
 
 
@@ -63,7 +66,12 @@ def legacy_state(**overrides: object) -> dict[str, object]:
             "timer_original_minutes": 0,
         },
         "estimated_running": None,
-        "diagnostics": {"firmware_version": "3.0.0"},
+        "diagnostics": {
+            "firmware_version": "3.0.0",
+            "signal_strength_raw": None,
+            "verified_raw": None,
+            "ota_in_progress": None,
+        },
         "provenance": {
             "backend": "legacy_ble",
             "fetched_at_unix_ms": 2000,
@@ -91,6 +99,7 @@ def quickconnect_state(**overrides: object) -> dict[str, object]:
             "firmware_version": "1.2.3",
             "signal_strength_raw": "-45",
             "verified_raw": "true",
+            "ota_in_progress": None,
         },
         "provenance": {
             "backend": "quick_connect",
@@ -181,9 +190,9 @@ class ApiClientTests(unittest.IsolatedAsyncioTestCase):
             "http://proxy", FakeSession([FakeResponse(payload)])
         ).fetch_state("configured")
         payload["state"]["settings"]["mode"] = "timer"
-        self.assertEqual(state.state.mode, "automatic")
+        self.assertEqual(state.state.settings.mode, "automatic")
         with self.assertRaises(FrozenInstanceError):
-            state.state.mode = "timer"
+            state.state.settings.mode = "timer"
 
     def test_number_controls_validate_bounds_without_coercion(self) -> None:
         for backend in ("legacy_ble", "quick_connect"):
@@ -223,17 +232,17 @@ class ApiClientTests(unittest.IsolatedAsyncioTestCase):
         result = (
             await ApiClient("http://proxy", session).fetch_state("configured")
         ).state
-        self.assertEqual(result.signal_strength_raw, "-42")
-        self.assertEqual(result.verified_raw, "unknown-token")
-        self.assertIs(result.ota_in_progress, True)
-        self.assertIs(result.automatic_mode, True)
-        self.assertIs(result.timer_mode, False)
-        self.assertIs(result.manual_mode, False)
+        self.assertEqual(result.diagnostics.signal_strength_raw, "-42")
+        self.assertEqual(result.diagnostics.verified_raw, "unknown-token")
+        self.assertIs(result.diagnostics.ota_in_progress, True)
+        self.assertIs(result.settings.is_mode("automatic"), True)
+        self.assertIs(result.settings.is_mode("timer"), False)
+        self.assertIs(result.settings.is_mode("manual"), False)
         raw["settings"]["mode"] = "conflicting"
         result = CLIENT._decode_readings(raw, "quick_connect")
-        self.assertIsNone(result.automatic_mode)
-        self.assertIsNone(result.timer_mode)
-        self.assertIsNone(result.manual_mode)
+        self.assertIsNone(result.settings.is_mode("automatic"))
+        self.assertIsNone(result.settings.is_mode("timer"))
+        self.assertIsNone(result.settings.is_mode("manual"))
 
     async def test_adjustable_ble_capabilities_create_numbers_and_send_bounded_commands(
         self,
@@ -357,8 +366,10 @@ class ApiClientTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(
                     CONTROLS.timer_control_preset(
                         Readings(
-                            timer_remaining_minutes=remaining,
-                            timer_original_minutes=original,
+                            settings=LegacySettings(
+                                timer_remaining_minutes=remaining,
+                                timer_original_minutes=original,
+                            )
                         )
                     ),
                     expected,
@@ -537,13 +548,13 @@ class ApiClientTests(unittest.IsolatedAsyncioTestCase):
         )
         result = await client.fetch_state("configured")
         self.assertEqual(result.state.temperature_f, 101.4)
-        self.assertEqual(result.state.automatic_temperature_f, 105)
-        self.assertEqual(result.state.timer_duration_minutes, 60)
-        self.assertEqual(result.state.mode, "automatic")
-        self.assertIs(result.state.humidity_monitor, True)
-        self.assertIs(result.state.running_estimate, True)
-        self.assertEqual(result.state.running_estimate_provenance, "inferred")
-        self.assertIsNone(result.state.timer_remaining_minutes)
+        self.assertEqual(result.state.settings.automatic_temperature_f, 105)
+        self.assertEqual(result.state.settings.timer_duration_minutes, 60)
+        self.assertEqual(result.state.settings.mode, "automatic")
+        self.assertIs(result.state.settings.humidity_monitor, True)
+        self.assertIs(result.state.estimated_running, True)
+        self.assertIsInstance(result.state.settings, QuickConnectSettings)
+        self.assertFalse(hasattr(result.state.settings, "timer_remaining_minutes"))
         self.assertFalse(hasattr(result.state, "signal_strength"))
         self.assertFalse(hasattr(result.state, "is_verified"))
 
@@ -599,17 +610,19 @@ class ApiClientTests(unittest.IsolatedAsyncioTestCase):
             await client.fetch_devices()
 
     async def test_fetches_state_and_preserves_freshness(self) -> None:
-        values = {
-            "firmware_version": "3.0.0",
-            "mode": "automatic",
-            "controller_fan_flag": False,
-            "temperature_f": 98.6,
-            "humidity_percent": 42.1,
-            "automatic_temperature_threshold_f": 105.0,
-            "automatic_humidity_threshold_percent": 30.0,
-            "timer_remaining_minutes": 0,
-            "timer_original_minutes": 0,
-        }
+        values = Readings(
+            settings=LegacySettings(
+                mode="automatic",
+                controller_fan_on=False,
+                automatic_temperature_tenths_f=1050,
+                automatic_humidity_tenths_percent=300,
+                timer_remaining_minutes=0,
+                timer_original_minutes=0,
+            ),
+            diagnostics=Diagnostics(firmware_version="3.0.0"),
+            temperature_f=98.6,
+            humidity_percent=42.1,
+        )
         payload = v2_state_payload(
             legacy_state() | {"identity_suffix": "private-suffix"},
             peripheral_id="private-peripheral-id",
@@ -617,7 +630,7 @@ class ApiClientTests(unittest.IsolatedAsyncioTestCase):
         session = FakeSession([FakeResponse(payload)])
         client = ApiClient("http://127.0.0.1:8787/", session)
         result = await client.fetch_state("configured")
-        self.assertEqual(result.state, Readings(**values))
+        self.assertEqual(result.state, values)
         self.assertEqual(result.freshness, "fresh")
         self.assertFalse(hasattr(result, "peripheral_id"))
         self.assertFalse(hasattr(result.state, "identity_suffix"))
@@ -830,33 +843,57 @@ class ApiClientTests(unittest.IsolatedAsyncioTestCase):
                 with self.assertRaisesRegex(ApiError, "invalid device state"):
                     await client.fetch_state("configured")
 
-    async def test_rejects_malformed_sensor_values(self) -> None:
-        payload = v2_state_payload(legacy_state(temperature_f="unknown"))
-        client = ApiClient(
-            "http://127.0.0.1:8787", FakeSession([FakeResponse(payload)])
-        )
-        with self.assertRaisesRegex(ApiError, "invalid device values"):
-            await client.fetch_state("configured")
-
-    async def test_rejects_non_finite_and_oversized_sensor_values(self) -> None:
-        for field, value in (
-            ("temperature_f", float("inf")),
-            ("temperature_f", float("nan")),
-            ("temperature_f", 10**400),
-            ("timer_remaining_minutes", 10**400),
+    async def test_nullable_readings_preserve_unknown_values(self) -> None:
+        for backend, raw in (
+            ("legacy_ble", legacy_state()),
+            ("quick_connect", quickconnect_state()),
         ):
-            with self.subTest(field=field, value=type(value).__name__):
-                state = legacy_state()
-                if field in {"temperature_f", "humidity_percent"}:
-                    state[field] = value
-                elif field == "timer_remaining_minutes":
-                    state["settings"][field] = value
-                payload = v2_state_payload(state)
-                client = ApiClient(
-                    "http://127.0.0.1:8787", FakeSession([FakeResponse(payload)])
-                )
-                with self.assertRaisesRegex(ApiError, "invalid device values"):
-                    await client.fetch_state("configured")
+            raw["temperature_f"] = None
+            raw["humidity_percent"] = None
+            raw["estimated_running"] = None
+            raw["diagnostics"] = None
+            raw["settings"] = {
+                key: value if key in {"backend", "mode"} else None
+                for key, value in raw["settings"].items()
+            }
+            if backend == "legacy_ble":
+                raw["settings"]["mode"] = None
+            with self.subTest(backend=backend):
+                result = await ApiClient(
+                    "http://proxy",
+                    FakeSession([FakeResponse(v2_state_payload(raw, backend=backend))]),
+                ).fetch_state("configured")
+                self.assertIsNone(result.state.temperature_f)
+                self.assertIsNone(result.state.humidity_percent)
+                self.assertIsNone(result.state.settings.automatic_temperature_f)
+                self.assertIsNone(result.state.settings.automatic_humidity_percent)
+                self.assertIsNone(result.state.settings.timer_duration_minutes)
+                self.assertEqual(result.state.diagnostics, Diagnostics())
+                self.assertIsNone(result.state.estimated_running)
+
+    async def test_rejects_incomplete_or_mismatched_state(self) -> None:
+        for changed in (
+            "settings",
+            "temperature_f",
+            "diagnostics",
+            "estimated_running",
+            "settings_backend",
+            "provenance_backend",
+            "observed_at",
+        ):
+            raw = legacy_state()
+            if changed == "settings_backend":
+                raw["settings"]["backend"] = "quick_connect"
+            elif changed == "provenance_backend":
+                raw["provenance"]["backend"] = "quick_connect"
+            elif changed == "observed_at":
+                del raw["provenance"]["observed_at_unix_ms"]
+            else:
+                del raw[changed]
+            with self.subTest(changed=changed), self.assertRaises(ApiError):
+                await ApiClient(
+                    "http://proxy", FakeSession([FakeResponse(v2_state_payload(raw))])
+                ).fetch_state("configured")
 
     async def test_maps_http_failures_to_safe_errors(self) -> None:
         client = ApiClient(

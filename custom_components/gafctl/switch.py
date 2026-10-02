@@ -38,7 +38,7 @@ class GafctlModeSwitch(GafctlEntity, SwitchEntity):
     @property
     def is_on(self) -> bool | None:
         state = self.state_values
-        mode = state.mode if state else None
+        mode = state.settings.mode if state else None
         return mode == self._mode if mode in QUICKCONNECT_MODES else None
 
     @property

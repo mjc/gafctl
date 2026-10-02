@@ -6,7 +6,15 @@ from dataclasses import dataclass
 from types import MappingProxyType
 from typing import TypeGuard
 
-from .models import ApiError, Backend, Device, JsonObject, JsonValue, Readings
+from .models import (
+    ApiError,
+    Backend,
+    Device,
+    JsonObject,
+    JsonValue,
+    LegacySettings,
+    Readings,
+)
 
 CONTROL_HTTP_STATUSES = MappingProxyType(
     {
@@ -126,7 +134,7 @@ NUMBER_CONTROLS: Mapping[Backend, tuple[NumberControl, ...]] = MappingProxyType(
                 backend="legacy_ble",
                 command_kind="legacy_automatic_temperature",
                 command_field="temperature_f",
-                reading=lambda readings: readings.automatic_temperature_threshold_f,
+                reading=lambda readings: readings.settings.automatic_temperature_f,
                 minimum=90,
                 maximum=120,
                 step=1,
@@ -136,7 +144,7 @@ NUMBER_CONTROLS: Mapping[Backend, tuple[NumberControl, ...]] = MappingProxyType(
                 backend="legacy_ble",
                 command_kind="legacy_automatic_humidity",
                 command_field="humidity_percent",
-                reading=lambda readings: readings.automatic_humidity_threshold_percent,
+                reading=lambda readings: readings.settings.automatic_humidity_percent,
                 minimum=30,
                 maximum=80,
                 step=1,
@@ -146,7 +154,7 @@ NUMBER_CONTROLS: Mapping[Backend, tuple[NumberControl, ...]] = MappingProxyType(
                 backend="legacy_ble",
                 command_kind="legacy_timer",
                 command_field="minutes",
-                reading=lambda readings: readings.timer_original_minutes,
+                reading=lambda readings: readings.settings.timer_duration_minutes,
                 minimum=0,
                 maximum=360,
                 step=1,
@@ -158,7 +166,7 @@ NUMBER_CONTROLS: Mapping[Backend, tuple[NumberControl, ...]] = MappingProxyType(
                 backend="quick_connect",
                 command_kind="quick_connect_automatic_temperature",
                 command_field="temperature_f",
-                reading=lambda readings: readings.automatic_temperature_f,
+                reading=lambda readings: readings.settings.automatic_temperature_f,
                 minimum=90,
                 maximum=120,
                 step=1,
@@ -168,7 +176,7 @@ NUMBER_CONTROLS: Mapping[Backend, tuple[NumberControl, ...]] = MappingProxyType(
                 backend="quick_connect",
                 command_kind="quick_connect_automatic_humidity",
                 command_field="humidity_percent",
-                reading=lambda readings: readings.automatic_humidity_percent,
+                reading=lambda readings: readings.settings.automatic_humidity_percent,
                 minimum=30,
                 maximum=80,
                 step=1,
@@ -178,7 +186,7 @@ NUMBER_CONTROLS: Mapping[Backend, tuple[NumberControl, ...]] = MappingProxyType(
                 backend="quick_connect",
                 command_kind="quick_connect_timer_duration",
                 command_field="minutes",
-                reading=lambda readings: readings.timer_duration_minutes,
+                reading=lambda readings: readings.settings.timer_duration_minutes,
                 minimum=30,
                 maximum=360,
                 step=30,
@@ -202,9 +210,11 @@ CONTROL_PRESETS = frozenset((*THRESHOLDS, *TIMER_PRESETS))
 
 
 def threshold_control_preset(readings: Readings) -> str | None:
+    if not isinstance(readings.settings, LegacySettings):
+        return None
     current = (
-        readings.automatic_temperature_threshold_f,
-        readings.automatic_humidity_threshold_percent,
+        readings.settings.automatic_temperature_f,
+        readings.settings.automatic_humidity_percent,
     )
     return next(
         (preset for preset, thresholds in THRESHOLDS.items() if current == thresholds),
@@ -213,15 +223,17 @@ def threshold_control_preset(readings: Readings) -> str | None:
 
 
 def preset_matches(readings: Readings, preset: str) -> bool:
+    if not isinstance(readings.settings, LegacySettings):
+        return False
     if preset in THRESHOLDS:
         return (
-            readings.mode == "automatic"
+            readings.settings.mode == "automatic"
             and threshold_control_preset(readings) == preset
         )
     return (
-        readings.mode == "timer"
+        readings.settings.mode == "timer"
         and timer_control_preset(readings) == preset
-        and (preset != "timer_clear" or readings.controller_fan_flag is False)
+        and (preset != "timer_clear" or readings.settings.controller_fan_on is False)
     )
 
 
@@ -324,7 +336,12 @@ def _control_command(command: str | Mapping[str, JsonValue]) -> JsonObject:
 
 
 def timer_control_preset(state: Readings) -> str | None:
-    current = (state.timer_remaining_minutes, state.timer_original_minutes)
+    if not isinstance(state.settings, LegacySettings):
+        return None
+    current = (
+        state.settings.timer_remaining_minutes,
+        state.settings.timer_original_minutes,
+    )
     return next(
         (
             preset

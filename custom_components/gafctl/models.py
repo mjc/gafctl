@@ -1,7 +1,7 @@
-"""Immutable data validated at the HTTP boundary."""
+"""Immutable device data from the Gafctl API."""
 
 from dataclasses import dataclass
-from typing import Literal
+from typing import ClassVar, Literal
 
 type JsonValue = (
     None | bool | int | float | str | list[JsonValue] | dict[str, JsonValue]
@@ -29,28 +29,58 @@ class Device:
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
-class Readings:
-    temperature_f: float | int | None = None
-    humidity_percent: float | int | None = None
+class LegacySettings:
+    backend: ClassVar[Literal["legacy_ble"]] = "legacy_ble"
     mode: str | None = None
-    firmware_version: str | None = None
-    controller_fan_flag: bool | None = None
-    automatic_temperature_threshold_f: float | None = None
-    automatic_humidity_threshold_percent: float | None = None
+    controller_fan_on: bool | None = None
+    automatic_temperature_tenths_f: int | None = None
+    automatic_humidity_tenths_percent: int | None = None
     timer_remaining_minutes: int | None = None
     timer_original_minutes: int | None = None
+
+    @property
+    def automatic_temperature_f(self) -> float | None:
+        value = self.automatic_temperature_tenths_f
+        return value / 10 if value is not None else None
+
+    @property
+    def automatic_humidity_percent(self) -> float | None:
+        value = self.automatic_humidity_tenths_percent
+        return value / 10 if value is not None else None
+
+    @property
+    def timer_duration_minutes(self) -> int | None:
+        return self.timer_original_minutes
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class QuickConnectSettings:
+    backend: ClassVar[Literal["quick_connect"]] = "quick_connect"
+    mode: str = "unknown"
     automatic_temperature_f: int | None = None
     automatic_humidity_percent: int | None = None
     timer_duration_minutes: int | None = None
     humidity_monitor: bool | None = None
-    automatic_mode: bool | None = None
-    timer_mode: bool | None = None
-    manual_mode: bool | None = None
-    running_estimate: bool | None = None
-    running_estimate_provenance: str | None = None
+
+    def is_mode(self, mode: str) -> bool | None:
+        return None if self.mode in {"unknown", "conflicting"} else self.mode == mode
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class Diagnostics:
+    firmware_version: str | None = None
     signal_strength_raw: str | None = None
     verified_raw: str | None = None
     ota_in_progress: bool | None = None
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class Readings:
+    settings: LegacySettings | QuickConnectSettings
+    temperature_f: float | None = None
+    humidity_percent: float | None = None
+    estimated_running: bool | None = None
+    diagnostics: Diagnostics = Diagnostics()
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)

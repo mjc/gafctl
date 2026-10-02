@@ -104,7 +104,7 @@ class GafctlControlSelect(GafctlEntity, SelectEntity):
         if not state:
             return None
         current = (
-            state.mode
+            state.settings.mode
             if self._key == "mode"
             else threshold_control_preset(state)
             if self._key == "automatic_thresholds"

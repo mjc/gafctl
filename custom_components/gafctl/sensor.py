@@ -21,7 +21,7 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from .controls import entity_keys
 from .coordinator import GafctlConfigEntry, GafctlCoordinator
 from .entity import GafctlEntity
-from .models import JsonObject, Readings
+from .models import JsonObject, LegacySettings, Readings
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -49,19 +49,19 @@ SENSORS = (
     GafctlSensorDescription(
         key="mode",
         name="Controller mode",
-        value=lambda readings: readings.mode,
+        value=lambda readings: readings.settings.mode,
         entity_category=EntityCategory.DIAGNOSTIC,
     ),
     GafctlSensorDescription(
         key="firmware_version",
         name="Firmware version",
-        value=lambda readings: readings.firmware_version,
+        value=lambda readings: readings.diagnostics.firmware_version,
         entity_category=EntityCategory.DIAGNOSTIC,
     ),
     GafctlSensorDescription(
         key="automatic_temperature_threshold",
         name="Automatic temperature threshold",
-        value=lambda readings: readings.automatic_temperature_threshold_f,
+        value=lambda readings: readings.settings.automatic_temperature_f,
         device_class=SensorDeviceClass.TEMPERATURE,
         native_unit_of_measurement=UnitOfTemperature.FAHRENHEIT,
         entity_category=EntityCategory.DIAGNOSTIC,
@@ -69,34 +69,42 @@ SENSORS = (
     GafctlSensorDescription(
         key="automatic_humidity_threshold",
         name="Automatic humidity threshold",
-        value=lambda readings: readings.automatic_humidity_threshold_percent,
+        value=lambda readings: readings.settings.automatic_humidity_percent,
         native_unit_of_measurement=PERCENTAGE,
         entity_category=EntityCategory.DIAGNOSTIC,
     ),
     GafctlSensorDescription(
         key="timer_remaining",
         name="Timer remaining",
-        value=lambda readings: readings.timer_remaining_minutes,
+        value=lambda readings: (
+            readings.settings.timer_remaining_minutes
+            if isinstance(readings.settings, LegacySettings)
+            else None
+        ),
         native_unit_of_measurement=UnitOfTime.MINUTES,
         entity_category=EntityCategory.DIAGNOSTIC,
     ),
     GafctlSensorDescription(
         key="timer_original",
         name="Original timer setting",
-        value=lambda readings: readings.timer_original_minutes,
+        value=lambda readings: (
+            readings.settings.timer_original_minutes
+            if isinstance(readings.settings, LegacySettings)
+            else None
+        ),
         native_unit_of_measurement=UnitOfTime.MINUTES,
         entity_category=EntityCategory.DIAGNOSTIC,
     ),
     GafctlSensorDescription(
         key="signal_strength_raw",
         name="Signal strength (reported)",
-        value=lambda readings: readings.signal_strength_raw,
+        value=lambda readings: readings.diagnostics.signal_strength_raw,
         entity_category=EntityCategory.DIAGNOSTIC,
     ),
     GafctlSensorDescription(
         key="verified_raw",
         name="Verification (reported)",
-        value=lambda readings: readings.verified_raw,
+        value=lambda readings: readings.diagnostics.verified_raw,
         entity_category=EntityCategory.DIAGNOSTIC,
     ),
 )

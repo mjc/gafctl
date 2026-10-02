@@ -42,6 +42,9 @@ from custom_components.gafctl.models import (
     ControlOutcomeUnknown,
     Device,
     DeviceState,
+    Diagnostics,
+    LegacySettings,
+    QuickConnectSettings,
     Readings,
 )
 
@@ -274,13 +277,20 @@ class RegistryTests(unittest.IsolatedAsyncioTestCase):
     ) -> None:
         entry = await self.entry()
         for backend, values, expected in (
-            ("legacy_ble", {"timer_original_minutes": 2}, {"timer_original": 2}),
+            (
+                "legacy_ble",
+                Readings(settings=LegacySettings(timer_original_minutes=2)),
+                {"timer_original": 2},
+            ),
             (
                 "quick_connect",
-                {
-                    "signal_strength_raw": "unknown-units",
-                    "verified_raw": "unknown-semantics",
-                },
+                Readings(
+                    settings=QuickConnectSettings(),
+                    diagnostics=Diagnostics(
+                        signal_strength_raw="unknown-units",
+                        verified_raw="unknown-semantics",
+                    ),
+                ),
                 {
                     "signal_strength_raw": "unknown-units",
                     "verified_raw": "unknown-semantics",
@@ -295,7 +305,7 @@ class RegistryTests(unittest.IsolatedAsyncioTestCase):
                     backend=backend,
                     available=True,
                     freshness="fresh",
-                    state=Readings(**values),
+                    state=values,
                 )
             )
             entry.runtime_data = coordinator
@@ -323,7 +333,7 @@ class RegistryTests(unittest.IsolatedAsyncioTestCase):
                 backend="quick_connect",
                 available=True,
                 freshness="fresh",
-                state=Readings(mode="automatic"),
+                state=Readings(settings=QuickConnectSettings(mode="automatic")),
             )
         )
         entry.runtime_data = coordinator
@@ -367,7 +377,7 @@ class RegistryTests(unittest.IsolatedAsyncioTestCase):
             backend="quick_connect",
             available=True,
             freshness="fresh",
-            state=Readings(mode="automatic"),
+            state=Readings(settings=QuickConnectSettings(mode="automatic")),
         )
         client.fetch_state.return_value = old
         coordinator = GafctlCoordinator(self.hass, client, selected, entry)
@@ -376,7 +386,7 @@ class RegistryTests(unittest.IsolatedAsyncioTestCase):
         client.set_control.assert_awaited_once()
         client.set_control.reset_mock()
         client.fetch_state.return_value = replace(
-            old, state=Readings(mode="conflicting")
+            old, state=Readings(settings=QuickConnectSettings(mode="conflicting"))
         )
         with self.assertRaises(ApiError):
             await coordinator.async_set_mode("off", only_if_current="automatic")
@@ -389,19 +399,15 @@ class RegistryTests(unittest.IsolatedAsyncioTestCase):
         for backend, values, expected in (
             (
                 "legacy_ble",
-                {"controller_fan_flag": False},
+                Readings(settings=LegacySettings(controller_fan_on=False)),
                 {"controller_fan_flag": False},
             ),
             (
                 "quick_connect",
-                {
-                    "running_estimate": None,
-                    "ota_in_progress": True,
-                    "automatic_mode": None,
-                    "timer_mode": None,
-                    "manual_mode": None,
-                    "humidity_monitor": None,
-                },
+                Readings(
+                    settings=QuickConnectSettings(),
+                    diagnostics=Diagnostics(ota_in_progress=True),
+                ),
                 {
                     "running_estimate": None,
                     "ota_in_progress": True,
@@ -419,7 +425,7 @@ class RegistryTests(unittest.IsolatedAsyncioTestCase):
                     backend=backend,
                     available=True,
                     freshness="fresh",
-                    state=Readings(**values),
+                    state=values,
                 )
             )
             entry.runtime_data = coordinator
@@ -449,9 +455,9 @@ class RegistryTests(unittest.IsolatedAsyncioTestCase):
             backend="quick_connect",
             available=True,
             freshness="fresh",
-            state=Readings(mode="automatic"),
+            state=Readings(settings=QuickConnectSettings(mode="automatic")),
         )
-        new = replace(old, state=Readings(mode="off"))
+        new = replace(old, state=Readings(settings=QuickConnectSettings(mode="off")))
         client.fetch_state.side_effect = [old, new]
         coordinator = GafctlCoordinator(self.hass, client, selected, entry)
         coordinator.async_set_updated_data(old)
@@ -479,9 +485,11 @@ class RegistryTests(unittest.IsolatedAsyncioTestCase):
         old = state_data(
             available=True,
             freshness="fresh",
-            state=Readings(timer_original_minutes=600),
+            state=Readings(settings=LegacySettings(timer_original_minutes=600)),
         )
-        new = replace(old, state=Readings(timer_original_minutes=1))
+        new = replace(
+            old, state=Readings(settings=LegacySettings(timer_original_minutes=1))
+        )
         client = AsyncMock()
         client.fetch_devices.return_value = [selected]
         client.fetch_state.side_effect = [old, new]
@@ -516,13 +524,21 @@ class RegistryTests(unittest.IsolatedAsyncioTestCase):
             available=True,
             freshness="fresh",
             state=Readings(
-                automatic_temperature_threshold_f=105.1,
-                automatic_humidity_threshold_percent=30.1,
-                timer_original_minutes=0,
+                settings=LegacySettings(
+                    automatic_temperature_tenths_f=1051,
+                    automatic_humidity_tenths_percent=301,
+                    timer_original_minutes=0,
+                )
             ),
         )
         new = replace(
-            old, state=replace(old.state, automatic_temperature_threshold_f=110.0)
+            old,
+            state=replace(
+                old.state,
+                settings=replace(
+                    old.state.settings, automatic_temperature_tenths_f=1100
+                ),
+            ),
         )
         client = AsyncMock()
         client.fetch_devices.return_value = [selected]
@@ -560,11 +576,19 @@ class RegistryTests(unittest.IsolatedAsyncioTestCase):
             backend="quick_connect",
             available=True,
             freshness="fresh",
-            state=Readings(automatic_temperature_f=105, automatic_humidity_percent=40),
+            state=Readings(
+                settings=QuickConnectSettings(
+                    automatic_temperature_f=105, automatic_humidity_percent=40
+                )
+            ),
         )
         new = replace(
             old,
-            state=Readings(automatic_temperature_f=110, automatic_humidity_percent=45),
+            state=Readings(
+                settings=QuickConnectSettings(
+                    automatic_temperature_f=110, automatic_humidity_percent=45
+                )
+            ),
         )
         self.hass.config_entries.async_update_entry(
             entry, data=dict(entry.data) | {"backend": "quick_connect"}
@@ -597,25 +621,28 @@ class RegistryTests(unittest.IsolatedAsyncioTestCase):
         )
         client = AsyncMock()
         client.fetch_devices.return_value = [selected]
-        old = state_data(
-            backend=backend,
-            state=Readings(
+        settings = (
+            QuickConnectSettings(mode="automatic")
+            if operation == "mode"
+            else LegacySettings(
                 mode="automatic",
-                automatic_temperature_threshold_f=105,
+                automatic_temperature_tenths_f=1050,
                 timer_original_minutes=0,
                 timer_remaining_minutes=0,
-            ),
+            )
         )
-        new = replace(
-            old,
-            state=replace(
-                old.state,
-                mode="manual" if operation == "mode" else "timer",
-                automatic_temperature_threshold_f=110,
+        old = state_data(backend=backend, state=Readings(settings=settings))
+        updated = (
+            QuickConnectSettings(mode="manual")
+            if operation == "mode"
+            else LegacySettings(
+                mode="timer",
+                automatic_temperature_tenths_f=1100,
                 timer_original_minutes=1,
                 timer_remaining_minutes=1,
-            ),
+            )
         )
+        new = replace(old, state=Readings(settings=updated))
         client.fetch_state.side_effect = [old, new]
         coordinator = GafctlCoordinator(self.hass, client, selected, entry)
         if operation == "mode":
@@ -761,8 +788,8 @@ class RegistryTests(unittest.IsolatedAsyncioTestCase):
             (
                 "automatic105_f30_percent",
                 {
-                    "automatic_temperature_threshold_f": 105,
-                    "automatic_humidity_threshold_percent": 30,
+                    "automatic_temperature_tenths_f": 1050,
+                    "automatic_humidity_tenths_percent": 300,
                 },
                 "timer",
                 False,
@@ -771,8 +798,8 @@ class RegistryTests(unittest.IsolatedAsyncioTestCase):
             (
                 "automatic105_f30_percent",
                 {
-                    "automatic_temperature_threshold_f": 105,
-                    "automatic_humidity_threshold_percent": 30,
+                    "automatic_temperature_tenths_f": 1050,
+                    "automatic_humidity_tenths_percent": 300,
                 },
                 "automatic",
                 False,
@@ -820,7 +847,11 @@ class RegistryTests(unittest.IsolatedAsyncioTestCase):
                     old,
                     replace(
                         old,
-                        state=Readings(mode=mode, controller_fan_flag=flag, **fields),
+                        state=Readings(
+                            settings=LegacySettings(
+                                mode=mode, controller_fan_on=flag, **fields
+                            )
+                        ),
                     ),
                 ]
                 if matches:
@@ -852,7 +883,9 @@ class RegistryTests(unittest.IsolatedAsyncioTestCase):
         client = AsyncMock()
         client.fetch_devices.return_value = [device()]
         client.refresh.return_value = state_data(
-            available=True, freshness="fresh", state=Readings(temperature_f=100)
+            available=True,
+            freshness="fresh",
+            state=Readings(settings=LegacySettings(), temperature_f=100),
         )
         client.fetch_state.return_value = client.refresh.return_value
         coordinator = GafctlCoordinator(self.hass, client, device(), entry)
@@ -872,7 +905,9 @@ class RegistryTests(unittest.IsolatedAsyncioTestCase):
         client.fetch_devices.return_value = [device()]
         client.refresh.side_effect = ApiError("device refresh did not complete")
         coordinator = GafctlCoordinator(self.hass, client, device(), entry)
-        old = state_data(available=True, state=Readings(temperature_f=99))
+        old = state_data(
+            available=True, state=Readings(settings=LegacySettings(), temperature_f=99)
+        )
         coordinator.async_set_updated_data(old)
         with self.assertRaises(HomeAssistantError):
             await GafctlRefreshButton(coordinator, entry).async_press()
@@ -899,7 +934,7 @@ class RegistryTests(unittest.IsolatedAsyncioTestCase):
         client = AsyncMock()
         client.fetch_devices.return_value = [device()]
         client.refresh.return_value = state_data(
-            available=True, state=Readings(temperature_f=100)
+            available=True, state=Readings(settings=LegacySettings(), temperature_f=100)
         )
         client.fetch_state.return_value = state_data(available=False, state=None)
         coordinator = GafctlCoordinator(self.hass, client, device(), entry)
@@ -917,7 +952,8 @@ class RegistryTests(unittest.IsolatedAsyncioTestCase):
             client = AsyncMock()
             client.fetch_devices.side_effect = [[device()], [changed]]
             client.refresh.return_value = state_data(
-                available=True, state=Readings(temperature_f=99)
+                available=True,
+                state=Readings(settings=LegacySettings(), temperature_f=99),
             )
             coordinator = GafctlCoordinator(self.hass, client, device(), entry)
             old = state_data(available=False, state=None)
@@ -933,10 +969,14 @@ class RegistryTests(unittest.IsolatedAsyncioTestCase):
         client = AsyncMock()
         client.fetch_devices.return_value = [device()]
         newer = state_data(
-            available=True, freshness="fresh", state=Readings(temperature_f=110)
+            available=True,
+            freshness="fresh",
+            state=Readings(settings=LegacySettings(), temperature_f=110),
         )
         older = state_data(
-            available=True, freshness="fresh", state=Readings(temperature_f=100)
+            available=True,
+            freshness="fresh",
+            state=Readings(settings=LegacySettings(), temperature_f=100),
         )
         coordinator = GafctlCoordinator(self.hass, client, device(), entry)
 
@@ -1059,7 +1099,7 @@ class RegistryTests(unittest.IsolatedAsyncioTestCase):
 
         client.fetch_devices.side_effect = ApiError("inventory unavailable")
         client.fetch_state.return_value = state_data(
-            available=True, state=Readings(temperature_f=100)
+            available=True, state=Readings(settings=LegacySettings(), temperature_f=100)
         )
         coordinator = GafctlCoordinator(self.hass, client, device(), entry)
         with self.assertRaises(UpdateFailed):

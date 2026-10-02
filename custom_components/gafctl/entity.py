@@ -55,7 +55,7 @@ class GafctlEntity(CoordinatorEntity[GafctlCoordinator]):
             model="GAF Wi-Fi Vent"
             if device.backend == "legacy_ble"
             else "GAF QuickConnect Vent",
-            sw_version=self.state_values.firmware_version
+            sw_version=self.state_values.diagnostics.firmware_version
             if self.state_values
             else None,
         )
