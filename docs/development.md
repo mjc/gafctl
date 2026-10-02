@@ -66,17 +66,18 @@ Replace `TEST_NAME` with a test name or substring. For the Python tests:
 python3 -m unittest discover -s tests -p test_gafctl_client.py
 ```
 
-The HA integration uses Python 3.14, typed config-entry runtime data, and shared
-entity descriptions. `models.py` holds frozen records for readings, diagnostics,
-and each controller's settings. `client.py` reads the fixed Rust API response
-fields directly into those records. JSON is dynamically typed only inside the
-client; the adapter uses typed records. The server owns scalar types and bounds.
-The client checks identity, backend agreement, ownership, availability, and
-command confirmation. Missing response structure becomes an API error.
-`controls.py` defines number controls for entity setup, command validation and
-readback checks. The coordinator serializes writes, checks current ownership and
-capabilities, sends once, and refreshes state after the response. Entities expose
-readings and translate API errors for HA.
+The HA integration uses Python 3.14 and typed config-entry runtime data.
+`models.py` describes the fixed Rust API dictionaries with `TypedDict`.
+The client returns those dictionaries directly, checking device identity,
+backend agreement, ownership, availability and command confirmation.
+The server owns scalar types and bounds.
+
+`controls.py` defines entity eligibility, setting bounds and readback checks.
+The coordinator validates HA input, checks current ownership and capabilities,
+sends once under a lock, and refreshes state after the response.
+Config entries store the server address and device identity; capabilities come
+from inventory. Initial setup resolves inventory once through the coordinator.
+Entities use that coordinator for identity, availability and controls.
 
 Run `devenv tasks run check:python-types` for strict typing. Format and lint Python changes with
 `ruff format custom_components tests/*.py` and

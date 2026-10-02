@@ -1,13 +1,6 @@
 """Number controls for settings advertised by the device."""
 
-from dataclasses import dataclass
-from types import MappingProxyType
-
-from homeassistant.components.number import (
-    NumberEntity,
-    NumberEntityDescription,
-    NumberMode,
-)
+from homeassistant.components.number import NumberEntity, NumberMode
 from homeassistant.const import PERCENTAGE, UnitOfTemperature, UnitOfTime
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
@@ -16,33 +9,11 @@ from .controls import NUMBER_CONTROLS, NumberControl, entity_keys
 from .coordinator import GafctlConfigEntry, GafctlCoordinator
 from .entity import GafctlEntity, translate_api_errors
 
-
-@dataclass(frozen=True, kw_only=True)
-class GafctlNumberDescription(NumberEntityDescription):
-    control: NumberControl
-
-
-PRESENTATION = MappingProxyType(
-    {
-        "automatic_temperature": ("Target temperature", UnitOfTemperature.FAHRENHEIT),
-        "automatic_humidity": ("Target humidity", PERCENTAGE),
-        "timer_duration": ("Timer duration", UnitOfTime.MINUTES),
-    }
-)
-DESCRIPTIONS = MappingProxyType(
-    {
-        backend: tuple(
-            GafctlNumberDescription(
-                key=control.key,
-                name=PRESENTATION[control.key][0],
-                native_unit_of_measurement=PRESENTATION[control.key][1],
-                control=control,
-            )
-            for control in controls
-        )
-        for backend, controls in NUMBER_CONTROLS.items()
-    }
-)
+PRESENTATION = {
+    "automatic_temperature": ("Target temperature", UnitOfTemperature.FAHRENHEIT),
+    "automatic_humidity": ("Target humidity", PERCENTAGE),
+    "timer_duration": ("Timer duration", UnitOfTime.MINUTES),
+}
 
 
 async def async_setup_entry(
@@ -53,26 +24,22 @@ async def async_setup_entry(
     coordinator = entry.runtime_data
     keys = entity_keys(coordinator.device).get("number", set())
     async_add_entities(
-        GafctlNumber(coordinator, entry, description)
-        for description in DESCRIPTIONS[coordinator.device.backend]
-        if description.key in keys
+        GafctlNumber(coordinator, control)
+        for control in NUMBER_CONTROLS[entry.data["backend"]]
+        if control.key in keys
     )
 
 
 class GafctlNumber(GafctlEntity, NumberEntity):
-    entity_description: GafctlNumberDescription
     _attr_mode = NumberMode.BOX
     _attr_entity_category = None
 
-    def __init__(
-        self,
-        coordinator: GafctlCoordinator,
-        entry: GafctlConfigEntry,
-        description: GafctlNumberDescription,
-    ) -> None:
-        super().__init__(coordinator, entry, description.key)
-        self.entity_description = description
-        control = description.control
+    def __init__(self, coordinator: GafctlCoordinator, control: NumberControl) -> None:
+        super().__init__(coordinator, control.key)
+        self._control = control
+        self._attr_name, self._attr_native_unit_of_measurement = PRESENTATION[
+            control.key
+        ]
         self._attr_native_min_value = control.minimum
         self._attr_native_max_value = control.maximum
         self._attr_native_step = control.step
@@ -82,7 +49,7 @@ class GafctlNumber(GafctlEntity, NumberEntity):
         state = self.state_values
         if state is None:
             return None
-        control = self.entity_description.control
+        control = self._control
         value = control.reading(state)
         if control.backend == "legacy_ble" and control.key == "timer_duration":
             return value if control.accepts(value) else None
@@ -91,11 +58,9 @@ class GafctlNumber(GafctlEntity, NumberEntity):
     @property
     def available(self) -> bool:
         return super().available and self.coordinator.number_control_available(
-            self.entity_description.control
+            self._control
         )
 
     async def async_set_native_value(self, value: float) -> None:
         with translate_api_errors():
-            await self.coordinator.async_set_number(
-                self.entity_description.control, value
-            )
+            await self.coordinator.async_set_number(self._control, value)

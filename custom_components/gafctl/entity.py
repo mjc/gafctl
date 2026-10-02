@@ -5,10 +5,11 @@ from contextlib import contextmanager
 
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.device_registry import DeviceInfo
+from homeassistant.helpers.entity import EntityDescription
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .const import DOMAIN
-from .coordinator import GafctlConfigEntry, GafctlCoordinator
+from .coordinator import GafctlCoordinator
 from .models import ApiError, JsonObject, Readings
 
 
@@ -24,25 +25,34 @@ def translate_api_errors() -> Iterator[None]:
 class GafctlEntity(CoordinatorEntity[GafctlCoordinator]):
     _attr_has_entity_name = True
 
-    def __init__(
-        self, coordinator: GafctlCoordinator, entry: GafctlConfigEntry, key: str
-    ) -> None:
+    def __init__(self, coordinator: GafctlCoordinator, key: str) -> None:
         super().__init__(coordinator)
-        self._entry = entry
-        self._attr_unique_id = f"{entry.unique_id}_{key}"
+        self._entry = coordinator.entry
+        self._key = key
+        self._attr_unique_id = f"{coordinator.entry.unique_id}_{key}"
 
     @property
     def state_values(self) -> Readings | None:
         data = self.coordinator.data
-        return data.state if data else None
+        return data["state"] if data else None
 
     @property
     def reading_attributes(self) -> JsonObject:
         data = self.coordinator.data
         return {
-            "freshness": data.freshness if data else None,
-            "observed_at_unix_ms": data.observed_at_unix_ms if data else None,
-            "last_error": data.last_error if data else None,
+            "freshness": (
+                "fresh"
+                if data["available"]
+                else "unknown"
+                if data["inventory_status"] == "unknown"
+                else "stale"
+            )
+            if data
+            else None,
+            "observed_at_unix_ms": data["state"]["provenance"]["observed_at_unix_ms"]
+            if data and data["state"]
+            else None,
+            "last_error": data["last_error"] if data else None,
         }
 
     @property
@@ -50,12 +60,28 @@ class GafctlEntity(CoordinatorEntity[GafctlCoordinator]):
         device = self.coordinator.device
         return DeviceInfo(
             identifiers={(DOMAIN, self._entry.unique_id)},
-            name=device.name,
+            name=device["name"] if device else self._entry.title,
             manufacturer="GAF",
             model="GAF Wi-Fi Vent"
-            if device.backend == "legacy_ble"
+            if self._entry.data["backend"] == "legacy_ble"
             else "GAF QuickConnect Vent",
-            sw_version=self.state_values.diagnostics.firmware_version
-            if self.state_values
+            sw_version=self.state_values["diagnostics"]["firmware_version"]
+            if self.state_values and self.state_values["diagnostics"]
             else None,
         )
+
+
+class GafctlReadingEntity(GafctlEntity):
+    def __init__(
+        self, coordinator: GafctlCoordinator, description: EntityDescription
+    ) -> None:
+        super().__init__(coordinator, description.key)
+        self.entity_description = description
+
+    @property
+    def available(self) -> bool:
+        return super().available and self.coordinator.current_readings is not None
+
+    @property
+    def extra_state_attributes(self) -> JsonObject:
+        return self.reading_attributes

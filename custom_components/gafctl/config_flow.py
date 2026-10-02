@@ -8,15 +8,14 @@ from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
 from .client import ApiClient, normalize_api_url
 from .const import CONF_API_URL, CONF_DEVICE_ID, CONF_PROXY_ID, DEFAULT_API_URL, DOMAIN
-from .controls import entity_platforms, select_device
-from .models import ApiError, Device, JsonObject, JsonValue
+from .controls import entity_keys, select_device
+from .models import ApiError, Device, JsonObject, JsonValue, device_identity
 
 CONF_DEVICE_IDS = "device_ids"
 
 
 class GafctlConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     VERSION = 2
-
     _api_url: str
     _devices: dict[str, Device]
 
@@ -28,31 +27,31 @@ class GafctlConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     async def async_step_user(
         self, user_input: JsonObject | None = None
     ) -> ConfigFlowResult:
-        errors = {}
-        if user_input is not None:
-            try:
-                self._api_url = normalize_api_url(user_input[CONF_API_URL])
-            except ApiError:
-                errors["base"] = "invalid_url"
-            else:
-                try:
-                    devices = await self._fetch_devices(self._api_url)
-                    configured = {
-                        (entry.data[CONF_PROXY_ID], entry.data[CONF_DEVICE_ID])
-                        for entry in self._async_current_entries()
-                    }
-                    self._devices = {
-                        device.id: device
-                        for device in devices
-                        if (device.proxy_id, device.id) not in configured
-                        and entity_platforms(device)
-                    }
-                    if self._devices:
-                        return await self.async_step_device()
-                    errors["base"] = "no_device"
-                except ApiError:
-                    errors["base"] = "cannot_connect"
-        return self._address_form("user", DEFAULT_API_URL, errors)
+        if user_input is None:
+            return self._address_form("user", DEFAULT_API_URL, {})
+        try:
+            self._api_url = normalize_api_url(user_input[CONF_API_URL])
+        except ApiError:
+            return self._address_form("user", DEFAULT_API_URL, {"base": "invalid_url"})
+        try:
+            devices = await self._fetch_devices(self._api_url)
+        except ApiError:
+            return self._address_form(
+                "user", DEFAULT_API_URL, {"base": "cannot_connect"}
+            )
+        configured = {
+            (entry.data[CONF_PROXY_ID], entry.data[CONF_DEVICE_ID])
+            for entry in self._async_current_entries()
+        }
+        self._devices = {
+            device["id"]: device
+            for device in devices
+            if (device["proxy_id"], device["id"]) not in configured
+            and entity_keys(device)
+        }
+        if not self._devices:
+            return self._address_form("user", DEFAULT_API_URL, {"base": "no_device"})
+        return await self.async_step_device()
 
     async def async_step_device(
         self, user_input: JsonObject | None = None
@@ -76,13 +75,13 @@ class GafctlConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             except ApiError, KeyError:
                 errors["base"] = "device_unavailable"
         options = [
-            {"value": device_id, "label": f"{device.name} ({device_id})"}
+            {"value": device_id, "label": f"{device['name']} ({device_id})"}
             for device_id, device in self._devices.items()
         ]
         schema = vol.Schema(
             {
                 vol.Required(CONF_DEVICE_IDS): selector.SelectSelector(
-                    selector.SelectSelectorConfig(options=options, multiple=True),
+                    selector.SelectSelectorConfig(options=options, multiple=True)
                 )
             }
         )
@@ -102,7 +101,10 @@ class GafctlConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         devices = [
             select_device(current, device_id) for device_id in dict.fromkeys(selected)
         ]
-        if any(not same_device(self._devices[device.id], device) for device in devices):
+        if any(
+            device_identity(self._devices[device["id"]]) != device_identity(device)
+            for device in devices
+        ):
             raise ApiError("identity changed")
         return devices
 
@@ -112,9 +114,10 @@ class GafctlConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             device = select_device(
                 await self._fetch_devices(self._api_url), user_input[CONF_DEVICE_ID]
             )
-            if (
-                device.proxy_id != user_input[CONF_PROXY_ID]
-                or device.backend != user_input["backend"]
+            if device_identity(device) != (
+                user_input[CONF_PROXY_ID],
+                user_input[CONF_DEVICE_ID],
+                user_input["backend"],
             ):
                 raise ApiError("identity changed")
         except ApiError, KeyError:
@@ -122,41 +125,41 @@ class GafctlConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         return await self._create_device_entry(device)
 
     async def _create_device_entry(self, device: Device) -> ConfigFlowResult:
-        await self.async_set_unique_id(f"gafctl_{device.proxy_id}_{device.id}")
+        await self.async_set_unique_id(f"gafctl_{device['proxy_id']}_{device['id']}")
         self._abort_if_unique_id_configured()
         return self.async_create_entry(
-            title=device.name, data=device_data(self._api_url, device)
+            title=device["name"], data=device_data(self._api_url, device)
         )
 
     async def async_step_reconfigure(
         self, user_input: JsonObject | None = None
     ) -> ConfigFlowResult:
         entry = self._get_reconfigure_entry()
-        errors = {}
-        if user_input is not None:
-            try:
-                api_url = normalize_api_url(user_input[CONF_API_URL])
-            except ApiError:
-                errors["base"] = "invalid_url"
-            else:
-                try:
-                    device = select_device(
-                        await self._fetch_devices(api_url), entry.data[CONF_DEVICE_ID]
-                    )
-                    if (
-                        device.proxy_id != entry.data[CONF_PROXY_ID]
-                        or device.backend != entry.data["backend"]
-                    ):
-                        errors["base"] = "wrong_device"
-                    else:
-                        return self.async_update_reload_and_abort(
-                            entry,
-                            data_updates={CONF_API_URL: api_url},
-                            reason="reconfigure_successful",
-                        )
-                except ApiError:
-                    errors["base"] = "cannot_connect"
-        return self._address_form("reconfigure", entry.data[CONF_API_URL], errors)
+        default = entry.data[CONF_API_URL]
+        if user_input is None:
+            return self._address_form("reconfigure", default, {})
+        try:
+            api_url = normalize_api_url(user_input[CONF_API_URL])
+        except ApiError:
+            return self._address_form("reconfigure", default, {"base": "invalid_url"})
+        try:
+            device = select_device(
+                await self._fetch_devices(api_url), entry.data[CONF_DEVICE_ID]
+            )
+        except ApiError:
+            return self._address_form(
+                "reconfigure", default, {"base": "cannot_connect"}
+            )
+        identity = (
+            entry.data[CONF_PROXY_ID],
+            entry.data[CONF_DEVICE_ID],
+            entry.data["backend"],
+        )
+        if device_identity(device) != identity:
+            return self._address_form("reconfigure", default, {"base": "wrong_device"})
+        return self.async_update_reload_and_abort(
+            entry, data_updates={CONF_API_URL: api_url}, reason="reconfigure_successful"
+        )
 
     def _address_form(
         self, step_id: str, default: str, errors: dict[str, str]
@@ -165,25 +168,10 @@ class GafctlConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         return self.async_show_form(step_id=step_id, data_schema=schema, errors=errors)
 
 
-def same_device(previous: Device, current: Device) -> bool:
-    return (previous.proxy_id, previous.id, previous.backend) == (
-        current.proxy_id,
-        current.id,
-        current.backend,
-    )
-
-
 def device_data(api_url: str, device: Device) -> dict[str, object]:
     return {
         CONF_API_URL: api_url,
-        CONF_DEVICE_ID: device.id,
-        CONF_PROXY_ID: device.proxy_id,
-        "backend": device.backend,
-        "device_name": device.name,
-        "capabilities": {
-            "read_state": device.read_state,
-            "commands": [{"kind": kind} for kind in sorted(device.commands)],
-        },
-        "state_source": device.owner,
-        "command_source": device.owner,
+        CONF_DEVICE_ID: device["id"],
+        CONF_PROXY_ID: device["proxy_id"],
+        "backend": device["backend"],
     }

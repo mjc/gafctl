@@ -17,27 +17,37 @@ from .controls import (
     CONTROL_PRESETS,
     QUICKCONNECT_MODES,
     NumberControl,
+    command_kinds,
     entity_keys,
     preset_matches,
 )
-from .models import ApiError, Backend, Device, DeviceState, JsonObject, Readings
+from .models import (
+    ApiError,
+    Backend,
+    Device,
+    DeviceState,
+    JsonObject,
+    Readings,
+    device_identity,
+)
 
 LOGGER = logging.getLogger(__name__)
 
 
 class GafctlCoordinator(DataUpdateCoordinator[DeviceState]):
     def __init__(
-        self,
-        hass: HomeAssistant,
-        client: ApiClient,
-        device: Device,
-        entry: GafctlConfigEntry,
+        self, hass: HomeAssistant, client: ApiClient, entry: GafctlConfigEntry
     ) -> None:
         self.client = client
-        self.device = device
-        self.device_id = device.id
+        self.device: Device | None = None
+        self.device_id = entry.data[CONF_DEVICE_ID]
+        self._identity = (
+            entry.data[CONF_PROXY_ID],
+            self.device_id,
+            entry.data["backend"],
+        )
         self.entry = entry
-        self.loaded_entity_keys = entity_keys(device)
+        self.loaded_entity_keys: dict[str, set[str]] = {}
         self.command_lock = asyncio.Lock()
         self._reload_scheduled = False
         self._entities_loaded = False
@@ -45,7 +55,7 @@ class GafctlCoordinator(DataUpdateCoordinator[DeviceState]):
             hass,
             config_entry=entry,
             logger=LOGGER,
-            name=f"Gafctl {device.name}",
+            name=f"Gafctl {entry.title}",
             update_interval=UPDATE_INTERVAL,
         )
 
@@ -55,7 +65,7 @@ class GafctlCoordinator(DataUpdateCoordinator[DeviceState]):
             if current is None:
                 raise UpdateFailed("configured device is absent from this proxy")
             state = await self.client.fetch_state(self.device_id)
-            if state.backend != current.backend:
+            if state["backend"] != current["backend"]:
                 raise ApiError("proxy returned state for a different backend")
             return state
         except ApiError as error:
@@ -64,23 +74,19 @@ class GafctlCoordinator(DataUpdateCoordinator[DeviceState]):
     async def _async_resolve_device(self) -> Device | None:
         devices = await self.client.fetch_devices()
         current = next(
-            (
-                device
-                for device in devices
-                if device.id == self.device_id
-                and device.proxy_id == self.entry.data[CONF_PROXY_ID]
-                and device.backend == self.entry.data["backend"]
-            ),
+            (device for device in devices if device_identity(device) == self._identity),
             None,
         )
-        self.device = current or unavailable_device(self.entry)
+        self.device = current
+        if not self._entities_loaded:
+            async_cleanup_registry(self.hass, self.entry, self.device)
         self._reload_changed_entities()
         return current
 
     async def async_refresh_device(self) -> None:
         async with self.command_lock:
             current = await self._async_http_state_device()
-            await self.client.refresh(self.device_id, current.backend)
+            await self.client.refresh(self.device_id, current["backend"])
             await self._async_http_state_device()
             await self.async_refresh()
             if self.current_readings is None:
@@ -90,7 +96,11 @@ class GafctlCoordinator(DataUpdateCoordinator[DeviceState]):
 
     async def _async_http_state_device(self) -> Device:
         current = await self._async_resolve_device()
-        if current is None or not current.read_state or not self.http_owned:
+        if (
+            current is None
+            or not current["capabilities"]["read_state"]
+            or (not self.http_owned)
+        ):
             raise ApiError("this device does not own HTTP readings")
         return current
 
@@ -98,7 +108,7 @@ class GafctlCoordinator(DataUpdateCoordinator[DeviceState]):
         if (
             self._entities_loaded
             and entity_keys(self.device) != self.loaded_entity_keys
-            and not self._reload_scheduled
+            and (not self._reload_scheduled)
         ):
             self._reload_scheduled = True
             self.hass.async_create_task(self._reload_entry())
@@ -123,11 +133,13 @@ class GafctlCoordinator(DataUpdateCoordinator[DeviceState]):
             raise ApiError("unsupported device mode")
         async with self.command_lock:
             await self.async_refresh()
-            state = self._require_control("quick_connect_mode", "quick_connect")
+            current = self._require_control("quick_connect_mode", "quick_connect")[
+                "settings"
+            ]["mode"]
             if only_if_current is not None:
-                if state.settings.mode not in QUICKCONNECT_MODES:
+                if current not in QUICKCONNECT_MODES:
                     raise ApiError("current device mode is unknown")
-                if state.settings.mode != only_if_current:
+                if current != only_if_current:
                     return
             command = (
                 {
@@ -138,12 +150,13 @@ class GafctlCoordinator(DataUpdateCoordinator[DeviceState]):
                 else {"kind": "quick_connect_mode", "mode": mode}
             )
             await self._async_submit_control(command)
-            state = self._require_control("quick_connect_mode", "quick_connect")
+            current = self._require_control("quick_connect_mode", "quick_connect")[
+                "settings"
+            ]["mode"]
             matches = (
-                state.settings.mode == mode
+                current == mode
                 if only_if_current is None
-                else state.settings.mode in QUICKCONNECT_MODES
-                and state.settings.mode != only_if_current
+                else current in QUICKCONNECT_MODES and current != only_if_current
             )
             if not matches:
                 raise ApiError("confirmed control has no matching current mode")
@@ -166,12 +179,14 @@ class GafctlCoordinator(DataUpdateCoordinator[DeviceState]):
         async with self.command_lock:
             await self.async_refresh()
             self._require_control("legacy_preset", "legacy_ble")
-            await self._async_submit_control(preset)
+            await self._async_submit_control(
+                {"kind": "legacy_preset", "preset": preset}
+            )
             state = self._require_control("legacy_preset", "legacy_ble")
             if not preset_matches(state, preset):
                 raise ApiError("confirmed control has no matching current preset")
 
-    async def _async_submit_control(self, command: str | JsonObject) -> None:
+    async def _async_submit_control(self, command: JsonObject) -> None:
         control_error = None
         try:
             await self.client.set_control(self.device_id, command)
@@ -202,16 +217,20 @@ class GafctlCoordinator(DataUpdateCoordinator[DeviceState]):
         if not (
             self.last_update_success
             and self.http_owned
-            and self.device.read_state
+            and self.device is not None
+            and self.device["capabilities"]["read_state"]
             and data
-            and data.available
-            and data.freshness == "fresh"
+            and data["available"]
         ):
             return None
-        return data.state
+        return data["state"]
 
     def control_readings(self, capability: str, backend: Backend) -> Readings | None:
-        if self.device.backend != backend or not self.supports(capability):
+        if (
+            self.device is None
+            or self.device["backend"] != backend
+            or not self.supports(capability)
+        ):
             return None
         return self.current_readings
 
@@ -224,28 +243,20 @@ class GafctlCoordinator(DataUpdateCoordinator[DeviceState]):
         return state is not None and control.current_supported(state)
 
     def supports(self, command_kind: str) -> bool:
-        return self.http_owned and command_kind in self.device.commands
+        return (
+            self.device is not None
+            and self.http_owned
+            and command_kind in command_kinds(self.device)
+        )
 
     @property
     def http_owned(self) -> bool:
-        return self.device.owner == "http"
-
-
-def unavailable_device(entry: GafctlConfigEntry) -> Device:
-    return Device(
-        proxy_id=entry.data[CONF_PROXY_ID],
-        id=entry.data[CONF_DEVICE_ID],
-        name=entry.title,
-        backend=entry.data["backend"],
-        read_state=False,
-        commands=frozenset(),
-        owner="http",
-    )
+        return self.device is not None and self.device["state_source"] == "http"
 
 
 @callback
 def async_cleanup_registry(
-    hass: HomeAssistant, entry: GafctlConfigEntry, device: Device
+    hass: HomeAssistant, entry: GafctlConfigEntry, device: Device | None
 ) -> None:
     expected = {
         (platform, f"{entry.unique_id}_{key}")

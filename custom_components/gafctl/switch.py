@@ -17,28 +17,22 @@ async def async_setup_entry(
     coordinator = entry.runtime_data
     keys = entity_keys(coordinator.device).get("switch", set())
     async_add_entities(
-        GafctlModeSwitch(coordinator, entry, mode, f"{label} mode")
-        for mode, label in MODE_LABELS.items()
+        GafctlModeSwitch(coordinator, mode)
+        for mode in MODE_LABELS
         if f"{mode}_mode" in keys
     )
 
 
 class GafctlModeSwitch(GafctlEntity, SwitchEntity):
-    def __init__(
-        self,
-        coordinator: GafctlCoordinator,
-        entry: GafctlConfigEntry,
-        mode: str,
-        name: str,
-    ) -> None:
-        super().__init__(coordinator, entry, f"{mode}_mode")
+    def __init__(self, coordinator: GafctlCoordinator, mode: str) -> None:
+        super().__init__(coordinator, f"{mode}_mode")
         self._mode = mode
-        self._attr_name = name
+        self._attr_name = f"{MODE_LABELS[mode]} mode"
 
     @property
     def is_on(self) -> bool | None:
         state = self.state_values
-        mode = state.settings.mode if state else None
+        mode = state["settings"]["mode"] if state else None
         return mode == self._mode if mode in QUICKCONNECT_MODES else None
 
     @property
@@ -46,11 +40,9 @@ class GafctlModeSwitch(GafctlEntity, SwitchEntity):
         return bool(super().available and self.coordinator.mode_control_available)
 
     async def async_turn_on(self, **kwargs: object) -> None:
-        await self._set_mode(self._mode)
+        with translate_api_errors():
+            await self.coordinator.async_set_mode(self._mode, only_if_current=None)
 
     async def async_turn_off(self, **kwargs: object) -> None:
-        await self._set_mode("off", only_if_current=self._mode)
-
-    async def _set_mode(self, mode: str, *, only_if_current: str | None = None) -> None:
         with translate_api_errors():
-            await self.coordinator.async_set_mode(mode, only_if_current=only_if_current)
+            await self.coordinator.async_set_mode("off", only_if_current=self._mode)

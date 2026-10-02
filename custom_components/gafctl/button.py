@@ -1,4 +1,4 @@
-"""Request readings through the device's service backend."""
+"""Refresh readings and turn off cloud modes."""
 
 from homeassistant.components.button import ButtonEntity
 from homeassistant.const import EntityCategory
@@ -9,6 +9,11 @@ from .controls import entity_keys
 from .coordinator import GafctlConfigEntry, GafctlCoordinator
 from .entity import GafctlEntity, translate_api_errors
 
+BUTTONS = {
+    "refresh": ("Refresh readings", "mdi:refresh", EntityCategory.DIAGNOSTIC),
+    "all_off": ("All off", "mdi:fan-off", None),
+}
+
 
 async def async_setup_entry(
     hass: HomeAssistant,
@@ -17,52 +22,28 @@ async def async_setup_entry(
 ) -> None:
     coordinator = entry.runtime_data
     keys = entity_keys(coordinator.device).get("button", set())
-    async_add_entities(
-        entity(coordinator, entry)
-        for key, entity in (
-            ("refresh", GafctlRefreshButton),
-            ("all_off", GafctlAllOffButton),
-        )
-        if key in keys
-    )
+    async_add_entities(GafctlButton(coordinator, key) for key in BUTTONS if key in keys)
 
 
-class GafctlRefreshButton(GafctlEntity, ButtonEntity):
-    _attr_name = "Refresh readings"
-    _attr_icon = "mdi:refresh"
-    _attr_entity_category = EntityCategory.DIAGNOSTIC
-
-    def __init__(
-        self, coordinator: GafctlCoordinator, entry: GafctlConfigEntry
-    ) -> None:
-        super().__init__(coordinator, entry, "refresh")
+class GafctlButton(GafctlEntity, ButtonEntity):
+    def __init__(self, coordinator: GafctlCoordinator, key: str) -> None:
+        super().__init__(coordinator, key)
+        self._attr_name, self._attr_icon, self._attr_entity_category = BUTTONS[key]
 
     @property
     def available(self) -> bool:
-        return bool(
-            super().available
+        allowed = (
+            self.coordinator.device is not None
             and self.coordinator.http_owned
-            and self.coordinator.device.read_state
+            and self.coordinator.device["capabilities"]["read_state"]
+            if self._key == "refresh"
+            else self.coordinator.mode_control_available
         )
+        return super().available and allowed
 
     async def async_press(self) -> None:
         with translate_api_errors():
-            await self.coordinator.async_refresh_device()
-
-
-class GafctlAllOffButton(GafctlEntity, ButtonEntity):
-    _attr_name = "All off"
-    _attr_icon = "mdi:fan-off"
-
-    def __init__(
-        self, coordinator: GafctlCoordinator, entry: GafctlConfigEntry
-    ) -> None:
-        super().__init__(coordinator, entry, "all_off")
-
-    @property
-    def available(self) -> bool:
-        return bool(super().available and self.coordinator.mode_control_available)
-
-    async def async_press(self) -> None:
-        with translate_api_errors():
-            await self.coordinator.async_set_mode("off")
+            if self._key == "refresh":
+                await self.coordinator.async_refresh_device()
+            else:
+                await self.coordinator.async_set_mode("off")

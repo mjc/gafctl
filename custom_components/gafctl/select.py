@@ -1,7 +1,6 @@
 """Selectors for GAF threshold and timer presets and QuickConnect modes."""
 
 from collections.abc import Mapping
-from types import MappingProxyType
 
 from homeassistant.components.select import SelectEntity
 from homeassistant.const import EntityCategory
@@ -20,16 +19,12 @@ from .controls import (
 from .coordinator import GafctlConfigEntry, GafctlCoordinator
 from .entity import GafctlEntity, translate_api_errors
 
-THRESHOLD_OPTIONS = MappingProxyType(
-    {
-        f"{temperature:.1f}°F / {humidity:.1f}%": preset
-        for preset, (temperature, humidity) in THRESHOLDS.items()
-    }
-)
-TIMER_OPTIONS = MappingProxyType(
-    {label: preset for preset, (label, _) in TIMER_PRESETS.items()}
-)
-MODE_OPTIONS = MappingProxyType({label: mode for mode, label in MODE_LABELS.items()})
+THRESHOLD_OPTIONS = {
+    f"{temperature:.1f}°F / {humidity:.1f}%": preset
+    for preset, (temperature, humidity) in THRESHOLDS.items()
+}
+TIMER_OPTIONS = {label: preset for preset, (label, _) in TIMER_PRESETS.items()}
+MODE_OPTIONS = {label: mode for mode, label in MODE_LABELS.items()}
 
 
 async def async_setup_entry(
@@ -39,33 +34,17 @@ async def async_setup_entry(
 ) -> None:
     coordinator: GafctlCoordinator = entry.runtime_data
     control_keys = entity_keys(coordinator.device).get("select", set())
-    entities = []
-    if "automatic_thresholds" in control_keys:
-        entities.extend(
-            (
-                GafctlControlSelect(
-                    coordinator,
-                    entry,
-                    "automatic_thresholds",
-                    "Automatic thresholds",
-                    THRESHOLD_OPTIONS,
-                ),
-                GafctlControlSelect(
-                    coordinator, entry, "timer", "Fan timer", TIMER_OPTIONS
-                ),
+    async_add_entities(
+        (
+            GafctlControlSelect(coordinator, key, name, options)
+            for key, name, options in (
+                ("automatic_thresholds", "Automatic thresholds", THRESHOLD_OPTIONS),
+                ("timer", "Fan timer", TIMER_OPTIONS),
+                ("mode", "Mode", MODE_OPTIONS),
             )
+            if key in control_keys
         )
-    if "mode" in control_keys:
-        entities.append(
-            GafctlControlSelect(
-                coordinator,
-                entry,
-                "mode",
-                "Mode",
-                MODE_OPTIONS,
-            )
-        )
-    async_add_entities(entities)
+    )
 
 
 class GafctlControlSelect(GafctlEntity, SelectEntity):
@@ -76,13 +55,11 @@ class GafctlControlSelect(GafctlEntity, SelectEntity):
     def __init__(
         self,
         coordinator: GafctlCoordinator,
-        entry: GafctlConfigEntry,
         key: str,
         name: str,
         presets: Mapping[str, str],
     ) -> None:
-        super().__init__(coordinator, entry, key)
-        self._key = key
+        super().__init__(coordinator, key)
         self._presets = presets
         self._attr_name = name
         self._attr_options = list(presets)
@@ -93,7 +70,7 @@ class GafctlControlSelect(GafctlEntity, SelectEntity):
         return bool(
             super().available
             and self.coordinator.control_readings(
-                command_kind, self.coordinator.device.backend
+                command_kind, self._entry.data["backend"]
             )
             is not None
         )
@@ -104,7 +81,7 @@ class GafctlControlSelect(GafctlEntity, SelectEntity):
         if not state:
             return None
         current = (
-            state.settings.mode
+            state["settings"]["mode"]
             if self._key == "mode"
             else threshold_control_preset(state)
             if self._key == "automatic_thresholds"

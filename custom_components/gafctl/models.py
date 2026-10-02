@@ -1,97 +1,86 @@
-"""Immutable device data from the Gafctl API."""
+"""The fixed Gafctl HTTP response shapes."""
 
-from dataclasses import dataclass
-from typing import ClassVar, Literal
+from typing import Literal, TypedDict
 
+type Backend = Literal["legacy_ble", "quick_connect"]
+type EntitySource = Literal["http", "mqtt"]
 type JsonValue = (
     None | bool | int | float | str | list[JsonValue] | dict[str, JsonValue]
 )
-
-
 type JsonObject = dict[str, JsonValue]
 
 
-type Backend = Literal["legacy_ble", "quick_connect"]
+class Command(TypedDict):
+    kind: str
 
 
-type EntitySource = Literal["http", "mqtt"]
+class Capabilities(TypedDict):
+    read_state: bool
+    commands: list[Command]
 
 
-@dataclass(frozen=True, slots=True, kw_only=True)
-class Device:
+class Device(TypedDict):
     proxy_id: str
     id: str
     name: str
     backend: Backend
-    read_state: bool
-    commands: frozenset[str]
-    owner: EntitySource
+    capabilities: Capabilities
+    state_source: EntitySource
+    command_source: EntitySource
 
 
-@dataclass(frozen=True, slots=True, kw_only=True)
-class LegacySettings:
-    backend: ClassVar[Literal["legacy_ble"]] = "legacy_ble"
-    mode: str | None = None
-    controller_fan_on: bool | None = None
-    automatic_temperature_tenths_f: int | None = None
-    automatic_humidity_tenths_percent: int | None = None
-    timer_remaining_minutes: int | None = None
-    timer_original_minutes: int | None = None
-
-    @property
-    def automatic_temperature_f(self) -> float | None:
-        value = self.automatic_temperature_tenths_f
-        return value / 10 if value is not None else None
-
-    @property
-    def automatic_humidity_percent(self) -> float | None:
-        value = self.automatic_humidity_tenths_percent
-        return value / 10 if value is not None else None
-
-    @property
-    def timer_duration_minutes(self) -> int | None:
-        return self.timer_original_minutes
+class LegacySettings(TypedDict):
+    backend: Literal["legacy_ble"]
+    mode: str | None
+    controller_fan_on: bool | None
+    automatic_temperature_tenths_f: int | None
+    automatic_humidity_tenths_percent: int | None
+    timer_remaining_minutes: int | None
+    timer_original_minutes: int | None
 
 
-@dataclass(frozen=True, slots=True, kw_only=True)
-class QuickConnectSettings:
-    backend: ClassVar[Literal["quick_connect"]] = "quick_connect"
-    mode: str = "unknown"
-    automatic_temperature_f: int | None = None
-    automatic_humidity_percent: int | None = None
-    timer_duration_minutes: int | None = None
-    humidity_monitor: bool | None = None
-
-    def is_mode(self, mode: str) -> bool | None:
-        return None if self.mode in {"unknown", "conflicting"} else self.mode == mode
+class QuickConnectSettings(TypedDict):
+    backend: Literal["quick_connect"]
+    mode: str
+    automatic_temperature_f: int | None
+    automatic_humidity_percent: int | None
+    timer_duration_minutes: int | None
+    humidity_monitor: bool | None
 
 
-@dataclass(frozen=True, slots=True, kw_only=True)
-class Diagnostics:
-    firmware_version: str | None = None
-    signal_strength_raw: str | None = None
-    verified_raw: str | None = None
-    ota_in_progress: bool | None = None
+class Diagnostics(TypedDict):
+    firmware_version: str | None
+    signal_strength_raw: str | None
+    verified_raw: str | None
+    ota_in_progress: bool | None
 
 
-@dataclass(frozen=True, slots=True, kw_only=True)
-class Readings:
+class Provenance(TypedDict):
+    backend: Backend
+    fetched_at_unix_ms: int | None
+    observed_at_unix_ms: int | None
+
+
+class Readings(TypedDict):
+    temperature_f: float | None
+    humidity_percent: float | None
     settings: LegacySettings | QuickConnectSettings
-    temperature_f: float | None = None
-    humidity_percent: float | None = None
-    estimated_running: bool | None = None
-    diagnostics: Diagnostics = Diagnostics()
+    estimated_running: bool | None
+    diagnostics: Diagnostics | None
+    provenance: Provenance
 
 
-@dataclass(frozen=True, slots=True, kw_only=True)
-class DeviceState:
-    device_id: str
+class DeviceState(TypedDict):
+    id: str
     backend: Backend
     available: bool
-    freshness: Literal["fresh", "unknown", "stale"]
-    observed_at_unix_ms: int | None
+    inventory_status: Literal["unknown", "present", "missing", "unavailable"]
     last_error: str | None
     state: Readings | None
+
+
+def device_identity(device: Device) -> tuple[str, str, Backend]:
+    return device["proxy_id"], device["id"], device["backend"]
 
 
 class ApiError(Exception):
@@ -99,8 +88,6 @@ class ApiError(Exception):
 
 
 class ControlOutcomeUnknown(ApiError):
-    """The submitted command could not be confirmed."""
-
     def __init__(self, request_id: str) -> None:
         self.request_id = request_id
         super().__init__(
