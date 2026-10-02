@@ -1,4 +1,4 @@
-"""Discrete controls for the settings verified on the owner's GAF fan."""
+"""Selectors for GAF threshold and timer presets and QuickConnect modes."""
 
 from homeassistant.components.select import SelectEntity
 from homeassistant.config_entries import ConfigEntry
@@ -57,7 +57,7 @@ async def async_setup_entry(
 
 
 class GafctlControlSelect(CoordinatorEntity[GafctlCoordinator], SelectEntity):
-    """A small, fixed selector backed by an acknowledged BLE command and readback."""
+    """A preset selector that checks BLE acknowledgement and readback."""
 
     _attr_entity_category = EntityCategory.CONFIG
     _attr_has_entity_name = True

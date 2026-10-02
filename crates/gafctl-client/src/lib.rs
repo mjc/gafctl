@@ -186,7 +186,7 @@ fn transport_error(error: reqwest::Error) -> ClientError {
     }
 }
 
-/// Reusable client; commands never initialize BLE or cloud-account access.
+/// HTTP client for service discovery, readings, and controls.
 #[derive(Clone)]
 pub struct Client {
     http: reqwest::Client,
@@ -256,8 +256,8 @@ impl Client {
         Ok(result)
     }
 
-    /// Read through the service's existing device owner. Concurrent requests share
-    /// one worker; failed and superseded reads retain their explicit outcomes.
+    /// Read through the service's device backend. Concurrent requests share one
+    /// worker; failed and superseded reads return their status.
     pub async fn refresh(&self, id: &DeviceId) -> Result<DeviceRefreshV2Response, ClientError> {
         let descriptor = self.descriptor(id).await?;
         if !descriptor.capabilities.read_state {
@@ -320,7 +320,7 @@ impl Client {
     }
 }
 
-/// Capability-checked intent. Only this state can submit a device control.
+/// A control ready to submit after checking device capabilities.
 ///
 /// ```compile_fail
 /// use gafctl_client::PreparedControl;
@@ -334,7 +334,7 @@ pub struct PreparedControl<'a> {
 }
 
 impl PreparedControl<'_> {
-    /// Send exactly once, timestamped after preflight. Dropping the future does
+    /// Send once, timestamped after checking capabilities. Dropping the future does
     /// not guarantee that the service cancelled the submitted command.
     pub async fn submit(self, request_id: CommandId) -> Result<ControlResult, ClientError> {
         let request = DeviceControlV2Request {
@@ -380,8 +380,8 @@ pub struct ControlReceipt {
     response: DeviceControlV2Response,
 }
 
-/// Constructed only after a matching request ID, successful HTTP status, and
-/// confirmed backend outcome have all been checked.
+/// A control result with a matching request ID, successful HTTP status, and
+/// confirmed backend outcome.
 #[derive(Clone, Debug)]
 pub struct ConfirmedControl(ControlReceipt);
 

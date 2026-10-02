@@ -1,4 +1,4 @@
-"""Capability-driven device setting controls."""
+"""Number controls for settings advertised by the device."""
 
 import math
 from typing import Any

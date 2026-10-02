@@ -12,8 +12,8 @@ product, so the app and controller generation matter when setting it up.
 | Master Flow Wi-Fi Attic Vent with QuickConnect — Gable Mount | EGV5QCT | GAF Master Flow QuickConnect | Experimental cloud API |
 
 The model numbers identify product families; retail SKUs may also include a finish.
-This table identifies the hardware and connection methods. Gafctl's device tests
-cover one original controller, not every model, finish, or firmware revision.
+Gafctl's hardware tests cover one original controller. Other models, finishes
+and firmware revisions are untested.
 
 ## Original ERV5SMT and EGV5SMT
 
@@ -24,7 +24,8 @@ describe a direct connection using the GAF Wi-Fi Vent app over Wi-Fi or Bluetoot
 The [GAF Wi-Fi Vent app's release notes](https://apps.apple.com/us/app/gaf-wi-fi-vent/id1388395737)
 say firmware **3.0.0** adds Bluetooth Low Energy support. The controller tested
 with Gafctl reports that version. Gafctl reads temperature, humidity, mode,
-automatic thresholds, and timer state, and supports four fixed control presets.
+automatic thresholds, and timer state. It supports fixed presets and adjustable
+HTTP/HA controls.
 See the [README](../README.md#add-it-to-home-assistant) for the available controls.
 
 The original controller creates its own `GAFVent_XXXX` Wi-Fi access point. Gafctl
@@ -42,7 +43,7 @@ QuickConnect is GAF's newer Wi-Fi controller technology. It uses the
 GAF's [QuickConnect product sheet](https://documents.gaf.com/data-sheets/master-flow-wi-fi-attic-vent-resmf314-%2811-22%29-_sell-sheet.pdf)
 lists ERV5QCT and EGV5QCT. The
 [current roof-mount product page](https://www.gaf.com/en-us/roofing-materials/residential-roofing-materials/attic-vents-other-ventilation/master-flow-wi-fi-attic-vent-roof-mount)
-also describes QuickConnect; it is not a description of the original SMT controller.
+also describes QuickConnect.
 
 Gafctl's QuickConnect backend was implemented from a community integration's
 source and synthetic test data. Live account and fan compatibility have not been
@@ -53,6 +54,5 @@ disabled by default. Instructions are in
 
 ## Other fans
 
-Gafctl does not currently have backends for QuietCool fans or for ordinary
-Master Flow fans with a mechanical thermostat. A shared manufacturer or similar
-product name does not establish controller compatibility.
+QuietCool fans and Master Flow fans with mechanical thermostats are unsupported.
+Other models need separate controller and protocol checks.

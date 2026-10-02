@@ -148,7 +148,7 @@ impl ControlOutcome {
         })
     }
 
-    /// Return the ordinary control command that was sent.
+    /// Return the control command that was sent.
     #[must_use]
     pub const fn command(&self) -> ControlCommand {
         self.command

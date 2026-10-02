@@ -1,4 +1,4 @@
-//! Bluetooth discovery, state queries, and ordinary controls for GAF attic fans.
+//! Bluetooth discovery, state queries, and controls for GAF attic fans.
 
 use std::time::Duration;
 
@@ -37,11 +37,11 @@ pub struct ProbeOptions {
 pub enum ProbeMode {
     /// Discover candidates without connecting or sending commands.
     Scan,
-    /// Query one candidate, optionally changing an ordinary control setting.
+    /// Query one candidate, optionally changing a threshold or timer setting.
     Query {
         /// Exact peripheral ID returned by a previous scan, if needed.
         device_id: Option<String>,
-        /// Ordinary control write. Firmware update commands are not represented here.
+        /// Threshold or timer write.
         control_command: Option<ControlCommand>,
     },
 }
@@ -59,7 +59,7 @@ impl Default for ProbeOptions {
     }
 }
 
-/// Validated state and optional ordinary-control outcome from one device query.
+/// State and optional control result from one device query.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct QueryResult {
     /// All five state observations when every request completed.
@@ -68,7 +68,7 @@ pub struct QueryResult {
     pub state_error: Option<String>,
     /// Advertisement property failures elsewhere in the scan.
     pub discovery_failures: Vec<DiscoveryFailure>,
-    /// Outcome of the optional ordinary control request, interpreted with readback.
+    /// Control acknowledgement and readback, when a control was requested.
     pub control: Option<ControlOutcome>,
     /// Whether the BLE connection closed cleanly after the query.
     pub disconnect: DisconnectOutcome,

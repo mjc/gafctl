@@ -1,7 +1,7 @@
 # HTTP API reference
 
 The service provides device discovery, cached state, and controls under
-`/api/v2`. There is no v1 HTTP API. Use the service's base URL without `/api/v2`
+`/api/v2`. Use the service's base URL without `/api/v2`
 when configuring the CLI or Home Assistant.
 
 The default listener is `127.0.0.1:8787`. Remote listeners require
@@ -24,8 +24,8 @@ curl -X POST http://127.0.0.1:8787/api/v2/devices/configured/refresh
 ```
 
 Overlapping refreshes for one device share one read. The read uses the same
-backend owner and transaction lock as controls; it does not start a second BLE
-connection owner. Cancelling an HTTP request leaves the shared worker running.
+backend and transaction lock as controls. Cancelling an HTTP request leaves
+the shared worker running.
 Periodic BLE reads use this operation too.
 
 The response contains the state fields shown below plus `status`: `fresh`
@@ -47,9 +47,9 @@ current state so a delayed response cannot replace newer readings.
 curl http://127.0.0.1:8787/api/v2/devices
 ```
 
-A Bluetooth device description looks like this. The capability list below is
-abbreviated to one preset; the original-controller list includes four presets
-and the three adjustable controls below:
+A Bluetooth device descriptor contains these fields. This example shows one
+preset; the full capability list includes four presets and three adjustable
+controls:
 
 ```json
 {
@@ -122,17 +122,18 @@ Example original-controller state:
 }
 ```
 
-This reads cached state and does not trigger a fan query. The service polls every
+The endpoint returns cached state. The service polls every
 30 seconds; original-controller state becomes unavailable after 90 seconds
-without a complete reading. Check `available` and timestamps rather than
-`/health` for device freshness.
+without a complete reading. Use `available` and state timestamps to check device
+freshness. `/health` checks the process.
 
 Unknown measurements are `null`. An unavailable device has `state: null` and
 `available: false`. `inventory_status` is `unknown`, `present`, `missing`, or
-`unavailable`. It describes inventory, not motor operation. `controller_fan_on`
-is a controller report; `estimated_running` is an inference and may be `null`.
+`unavailable`. It records whether the device is in the inventory.
+`controller_fan_on` reports controller state; `estimated_running` is calculated
+from settings and measurements and may be `null`. Neither measures motor operation.
 
-Nullable fields are included explicitly. Clients may accept additional fields,
+Nullable fields are included. Clients may accept additional fields,
 but missing required fields or inconsistent values are errors.
 
 ## Controls
@@ -146,7 +147,7 @@ POST a JSON object containing:
 | `issued_at_unix_ms` | Current Unix time in milliseconds |
 | `command` | One of the command objects below |
 
-Example body, with an illustrative timestamp that must be replaced before sending:
+Replace the example timestamp with the current time before sending:
 
 ```json
 {
@@ -180,8 +181,8 @@ disable sentinel is preserved when changing temperature.
 
 The original controller advertises `legacy_automatic_temperature`,
 `legacy_automatic_humidity`, and `legacy_timer` capabilities. Broader values
-within the app ranges still need owned-device readback acceptance; the
-previously verified presets remain available.
+within the app ranges have not all been tested with readback on the controller.
+The four tested presets remain available.
 
 QuickConnect commands:
 
@@ -229,7 +230,7 @@ controls are serialized per device.
 
 Responses include the submitted `request_id` and a `status`. Treat only
 `confirmed` as success: it requires a successful backend response and matching
-readback. A controller reply or submitted cloud request alone is insufficient.
+readback.
 
 Each device caches 64 completed requests in memory. Repeating an ID with the
 same command returns its cached result; changing the command returns
@@ -239,7 +240,7 @@ The cache does not survive service restart.
 At most eight distinct request IDs can be in flight per device. Repeating an
 in-flight ID joins its existing execution. Excess requests return `busy` before
 another worker is started. A failed worker records `control_failed` for replay
-handling instead of silently allowing another write.
+handling.
 
 A client timeout does not stop the worker or prove that the write failed. Read
 current state before deciding to retry.

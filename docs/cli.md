@@ -1,10 +1,10 @@
 # Command line interface
 
-The standalone `gafctl` executable can access a fan directly over Bluetooth
-or act as an HTTP client of a running Gafctl service. Run `gafctl --help`
+`gafctl` reads and controls fans over Bluetooth or through a running service's
+HTTP API. Run `gafctl --help`
 and any command's `--help` for the full argument reference. The `gafctl`
-command `server` launches the adjacent `gafctl-server` executable, or finds it on `PATH`.
-Arguments after `server` are passed to that executable unchanged, including `--help`.
+command `server` launches `gafctl-server` from the same directory, falling back
+to `PATH`. It forwards all arguments after `server`, including `--help`.
 On Unix, the server replaces the CLI process and receives signals directly.
 
 For development, use the repository's pinned environment:
@@ -44,8 +44,8 @@ gafctl control qc-local timer-duration 60
 Use the local device ID returned by `devices`. A local ID contains 1–64 ASCII
 letters, digits, underscores, or hyphens. It is distinct from a BLE peripheral ID
 and a cloud provider's private ID. State and control require an explicit local
-ID. The client checks the inventory and advertised capabilities before reading
-state or submitting control. The service checks them again and owns execution,
+ID. The client checks inventory and advertised capabilities before reading
+state or submitting control. The service checks them again and handles execution,
 write gates, serialization, and replay handling.
 
 The URL is chosen in this order:
@@ -61,10 +61,10 @@ redirects, proxies, and automatic retries. It never falls back to BLE when a
 service request fails. Client commands require no QuickConnect account secrets
 and do not initialize Bluetooth.
 
-The service has no built-in authentication. Use the existing protected HTTP or
-HTTPS deployment; see [deployment](deployment.md). HA `state_source` and
-`command_source` describe entity ownership and do not gate administrative CLI
-access.
+The service has no built-in authentication. Configure protected HTTP or HTTPS
+access as described in [deployment](deployment.md). HA `state_source` and
+`command_source` select HA entities. They do not restrict administrative HTTP
+or MQTT commands.
 
 `state` returns the service's cached snapshot. Inspect `available`,
 `inventory_status`, `last_error`, and `state.provenance` observation/fetch
@@ -73,7 +73,7 @@ does not start a fresh physical fan query.
 
 ### Controls
 
-The friendly legacy preset names map to the existing API wire values:
+CLI preset names map to API values:
 
 | CLI preset | API value | Requested setting |
 | --- | --- | --- |
@@ -89,19 +89,19 @@ them and the service's write gate admits them:
 - `targets`: both `--temperature-f` and `--humidity-percent` are required.
   Temperature must be an integer from 90–120 °F; humidity must be an integer from
   30–80%.
-- `timer-duration`: 30–360 minutes in 30-minute steps. This sets configured
-  duration, not a remaining countdown.
+- `timer-duration`: 30–360 minutes in 30-minute steps. This sets the configured
+  duration; saving it leaves timer mode unchanged.
 
 The CLI rejects invalid arguments before accessing the transport. Backend
-validation remains authoritative.
+validation also runs for each command.
 
 ### Deadlines and request IDs
 
 The connection timeout is five seconds. Total discovery/state request deadlines
 default to ten seconds; control defaults to 300 seconds to allow the backend's
 preparation, write, and readback phases. `--timeout-seconds POSITIVE_INTEGER`
-overrides read and control deadlines. It is a client deadline, not a service
-completion guarantee.
+overrides read and control deadlines. The service may continue after the client
+deadline expires.
 
 Control uses a new UUID by default. `--request-id ID` accepts the same 1–64 ASCII
 letter/digit/underscore/hyphen syntax as local IDs. The Unix-millisecond timestamp
@@ -114,8 +114,8 @@ gafctl control configured preset timer-clear --format json --request-id attic-1
 ```
 
 Success requires a matching request ID, a successful HTTP status, and the
-backend's `confirmed` outcome. Acknowledgement alone is insufficient. Unknown
-future backend outcomes are retained and count as unconfirmed.
+backend's `confirmed` outcome. Other outcomes, including unknown future values,
+are retained as unconfirmed.
 
 A timeout or lost control response means the outcome is unknown. The output
 retains the request ID; the worker may continue after the CLI exits. Controls
@@ -137,11 +137,10 @@ gafctl ble control --device-id <peripheral-id> preset automatic-105-1-f-30-1-per
 
 `scan` discovers advertisements without connecting or sending protocol requests.
 `state` performs a fresh direct device query. It auto-selects only one
-unambiguous candidate under the existing discovery rules. With multiple
+unambiguous candidate. With multiple
 candidates, supply the platform peripheral ID returned by the scan. Direct
 `control` always requires this ID and exposes exactly the four verified presets
-listed above. It uses the existing transport, identity validation, and readback
-confirmation logic.
+listed above. It validates identity and checks acknowledgement and readback.
 
 BLE discovery defaults to six seconds (`--scan-seconds`). GATT setup, each command
 write, and each response wait default to three seconds (`--timeout-seconds`).
@@ -154,8 +153,8 @@ command tree, including after `preset`.
 Partial snapshots retain successfully decoded fields, nullable values, field
 errors, control acknowledgement/readback, discovery warnings, and disconnect
 failures. A write with missing or mismatched readback exits unsuccessfully.
-The `controller_fan_on` flag is reported controller state and does not prove
-motor operation or airflow. There is no verified standalone legacy on/off
+The `controller_fan_on` flag reports the controller's on/off state; motor
+operation and airflow are not measured. There is no verified standalone legacy on/off
 command. `estimated_running` stays unknown for legacy BLE.
 
 Raw identity payload bytes are omitted from both text and JSON. Supply
@@ -171,9 +170,9 @@ gafctl-server probe ble --device-id <peripheral-id> --set-auto-thresholds-tenths
 gafctl-server probe ble --device-id <peripheral-id> --set-timer-minutes 1
 ```
 
-Diagnostic controls accept the existing raw `u16` values. That interface does
-not establish verified hardware limits for arbitrary settings; use the normal
-verified presets for routine BLE control. Server options use the `GAFCTL_` environment variables documented in the service guide.
+Diagnostic controls accept raw `u16` values. The controller's full range has not
+been tested. Use the four tested presets for direct BLE control. Server options
+use the `GAFCTL_` environment variables in the service guide.
 
 ## Output and exit codes
 
@@ -203,7 +202,7 @@ Service control retains `request_id` and `status`, adding the HTTP status:
 ```
 
 Structured control outcomes are preserved even for non-2xx HTTP responses.
-Other execution failures use this envelope; absent context is explicit null:
+Other execution failures use this envelope; missing context is `null`:
 
 ```json
 {"error":{"kind":"timeout","message":"control outcome unknown for request attic-1: service request timed out","request_id":"attic-1","http_status":null}}
@@ -256,6 +255,5 @@ consuming `submit` sends it once. A `ControlResult::Confirmed` contains a privat
 confirmation checks. Libraries do not depend on clap, MQTT, the BLE runtime,
 or service handlers.
 
-Automated tests use local HTTP servers and the existing fake BLE transports.
-They establish software behavior. Physical device evidence is recorded separately
-in the [protocol findings](protocol-findings.md).
+Automated tests check software behavior with local HTTP servers and fake BLE
+transports. Hardware test results are in the [protocol findings](protocol-findings.md).

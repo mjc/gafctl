@@ -1,4 +1,4 @@
-//! Typed interpretations of observed replies, kept beside their wire frames.
+//! Decoded replies and their original wire frames.
 
 use std::time::{Duration, Instant, SystemTime};
 
@@ -87,7 +87,7 @@ impl FanState {
 pub struct DeviceMode {
     /// Automatic, timer, or reported OTA mode.
     pub mode: OperatingMode,
-    /// The controller's reported fan flag, not a physical airflow measurement.
+    /// The controller's reported on/off flag. Airflow is not measured.
     pub fan: FanState,
 }
 

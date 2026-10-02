@@ -74,7 +74,7 @@ struct ServeOptions {
     )]
     mqtt_username: Option<String>,
 
-    /// Publish Home Assistant MQTT discovery. Choose this instead of the HTTP integration to avoid duplicate entities.
+    /// Enable MQTT discovery for devices whose Home Assistant source is MQTT.
     #[cfg(feature = "mqtt")]
     #[arg(long, env = "GAFCTL_MQTT_DISCOVERY", requires = "mqtt_host")]
     mqtt_discovery: bool,
@@ -83,7 +83,7 @@ struct ServeOptions {
     #[arg(long, env = "GAFCTL_QUICKCONNECT_ROLE", default_value = "contractor")]
     quickconnect_role: String,
 
-    /// Explicitly enable QuickConnect settings writes. Disabled by default.
+    /// Enable QuickConnect settings writes. Disabled by default.
     #[arg(long, env = "GAFCTL_QUICKCONNECT_WRITES_ENABLED")]
     quickconnect_writes_enabled: bool,
 }
@@ -131,9 +131,8 @@ struct BleOptions {
     #[arg(long)]
     show_identity: bool,
 
-    /// Set automatic thresholds before reading state. Values are tenths: e.g.
-    /// 1050 means 105.0°F and 300 means 30.0% humidity. This is a normal
-    /// fan-control write, not a firmware operation.
+    /// Set automatic thresholds before reading state. Values are tenths:
+    /// 1050 means 105.0°F and 300 means 30.0% humidity.
     #[arg(
         long,
         action = clap::ArgAction::Set,

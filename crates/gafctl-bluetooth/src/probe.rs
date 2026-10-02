@@ -19,10 +19,10 @@ use crate::{
     session::query_peripheral,
 };
 
-/// Reusable BLE client for long-running callers.
+/// BLE client that retains its manager and adapter across queries.
 ///
 /// The manager and adapter are initialized lazily and retained for the client's
-/// lifetime. This is required by btleplug's Linux backend, whose manager starts
+/// lifetime. On Linux, btleplug's manager starts
 /// a detached D-Bus task that keeps its socket open after the manager is dropped.
 pub struct ProbeClient {
     backend: Arc<Mutex<BleBackend>>,
@@ -37,7 +37,7 @@ struct BleBackend {
 }
 
 impl ProbeClient {
-    /// Create a client without opening a Bluetooth connection yet.
+    /// Create a client without opening a Bluetooth connection.
     #[must_use]
     pub fn new() -> Self {
         Self {
@@ -131,8 +131,8 @@ impl Default for ProbeClient {
     }
 }
 
-/// Discover GAF BLE peripherals and, when selected unambiguously, issue the
-/// read-only queries plus an optional ordinary control-setting write.
+/// Discover GAF BLE peripherals and query one selected device, with an optional
+/// threshold or timer write.
 pub async fn probe(options: ProbeOptions) -> Result<ProbeResult, ProbeError> {
     ProbeClient::new().probe(options).await
 }

@@ -38,7 +38,7 @@ enum Command {
     Devices(ServiceOptions),
     /// Read a device's cached service snapshot, including availability and timestamps.
     State(StateOptions),
-    /// Issue a supported control through the running service's transaction owner.
+    /// Send a supported control through the running service.
     Control(ControlOptions),
     /// Scan, read, or control a fan directly over Bluetooth.
     Ble(BleCommand),

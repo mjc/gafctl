@@ -1,4 +1,4 @@
-"""Small, validated client for the local Gafctl API."""
+"""HTTP client for the Gafctl API."""
 
 import asyncio
 import math
@@ -28,11 +28,11 @@ CONTROL_HTTP_STATUSES = {
 }
 
 class ApiError(Exception):
-    """A safe-to-display Gafctl API error."""
+    """Gafctl API error with a message suitable for display."""
 
 
 class ControlOutcomeUnknown(ApiError):
-    """The submitted request has no trustworthy confirmation."""
+    """The submitted command could not be confirmed."""
 
     def __init__(self, request_id: str) -> None:
         self.request_id = request_id
@@ -240,7 +240,7 @@ LEGACY_SENSOR_KEYS = {
 
 
 def select_device(devices: list[dict[str, Any]], device_id: str) -> dict[str, Any]:
-    """Resolve the explicitly selected HTTP-owned device from current inventory."""
+    """Find the selected device and check its HTTP ownership."""
     device = next((item for item in devices if item["id"] == device_id), None)
     if device is None or not entity_platforms(device):
         raise ApiError("selected device is unavailable")
@@ -253,7 +253,7 @@ def entity_platforms(device: Mapping[str, Any]) -> set[str]:
 
 
 def entity_keys(device: Mapping[str, Any]) -> dict[str, set[str]]:
-    """Project device ownership and capabilities into exact HA entity keys."""
+    """Return entity keys for the device's ownership and capabilities."""
     capabilities = device.get("capabilities")
     commands = device.get("commands")
     if isinstance(capabilities, Mapping):

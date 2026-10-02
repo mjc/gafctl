@@ -1,14 +1,12 @@
 # Original Master Flow Bluetooth protocol
 
-This describes the Bluetooth protocol used by the original GAF Master Flow Wi-Fi
-Attic Vent models ERV5SMT and EGV5SMT. It is based on the GAF Wi-Fi Vent app,
+Original GAF Master Flow Wi-Fi Attic Vent models ERV5SMT and EGV5SMT use this
+Bluetooth protocol. The description comes from the GAF Wi-Fi Vent app,
 bundled firmware, and captures from one controller reporting firmware `030000`
 (3.0.0). See [protocol findings](protocol-findings.md) for recorded replies.
 
-The filename retains the original revision-1 name. That revision covered reads
-and automatic thresholds; the current implementation also exposes timer presets
-and adjustable targets through HTTP and Home Assistant. Protocol revision numbers
-are documentation versions and are not negotiated with the fan.
+The `v1` filename denotes the document revision. The fan does not negotiate
+protocol revisions.
 
 ## Bluetooth and framing
 
@@ -20,8 +18,8 @@ are documentation versions and are not negotiated with the fan.
   captured read replies use lowercase hexadecimal.
 - A notification may contain a fragment or several frames. Join fragments through
   LF and split complete frames before decoding.
-- Gafctl rejects frames over 1024 bytes. This is an implementation bound, not a
-  measured controller limit.
+- Gafctl rejects frames over 1024 bytes. The controller's frame-size limit is
+  unknown.
 
 ## Reads
 
@@ -35,7 +33,7 @@ are documentation versions and are not negotiated with the fan.
 
 All five reads produced decoded replies on the tested controller. The identity
 suffix is opaque; the parser does not infer a serial number or roof/gable model
-from it. The fan flag is controller state rather than airflow feedback.
+from it. The fan flag reports the controller's on/off state; airflow is not measured.
 
 ## Controls
 
@@ -45,31 +43,32 @@ from it. The fan flag is controller state rather than airflow feedback.
 | Timer | `#tms` + four-digit uppercase hex minutes + LF | `#tmr0\n` | Timer values match; mode is timer. A zero clear also requires the fan flag off. |
 
 The direct Bluetooth CLI exposes four presets captured on the controller.
-HTTP and Home Assistant also retain these presets:
+HTTP and Home Assistant expose the same presets:
 
 - Automatic: 105.0 °F / 30.0% (`041A012C`).
 - Automatic: 105.1 °F / 30.1% (`041B012D`).
 - Timer clear: zero minutes (`0000`).
 - Timer start: one minute (`0001`).
 
-HTTP and Home Assistant additionally expose adjustable temperature (90–120 °F),
+HTTP and Home Assistant also expose adjustable temperature (90–120 °F),
 humidity (30–80%), and timer duration (0–360 minutes), in whole-unit steps. These
 bounds come from the manufacturer app; zero clears the timer. Changing one
 threshold first reads and preserves the other raw threshold under the same
-device transaction. Missing preservation readback prevents the write.
+device transaction. If the unchanged threshold cannot be read, the service
+rejects the write.
 
-Owned-device acceptance confirmed 110 °F, 40%, a two-minute timer, and clear,
+Tests on one controller confirmed 110 °F, 40%, a two-minute timer, and clear,
 then restored automatic mode at 105 °F / 30%. The range endpoints have not all
-been tested on hardware. See [control evidence](protocol-findings.md#adjustable-control-acceptance).
+been tested on hardware. See [control tests](protocol-findings.md#adjustable-control-tests).
 
-A reply alone is not confirmation. A mismatched, missing, or undecodable readback
+A mismatched, missing, or undecodable readback
 leaves the write unconfirmed. A timer that appears to have expired before readback
 is also unconfirmed. Clearing the timer leaves timer mode active; an automatic
 write is needed to return to automatic mode.
 
-The diagnostic probe accepts other raw `u16` values. The complete hardware range,
-especially the upper timer bound, has not been established. Diagnostic arguments
-do not extend the bounded service controls.
+The diagnostic probe accepts raw `u16` values. The controller's full range,
+including its maximum timer duration, has not been tested. Service controls
+remain limited to the app-derived ranges.
 
 ## Unsupported operations
 
@@ -79,7 +78,7 @@ firmware are recorded in the findings for research only. Direct Wi-Fi/TLS contro
 has not been implemented; its listener port and authentication are unresolved.
 
 The tested Bluetooth connection did not capture a pairing or authentication
-exchange. That does not establish how other firmware or pairing states behave.
+exchange. Other firmware versions and pairing states have not been tested.
 
 ## Timeouts and recovery
 
@@ -106,5 +105,5 @@ state read cannot interleave with a control/readback transaction.
 
 QuickConnect has a separate backend and
 [separate cloud protocol](quickconnect-contract.md). Its account/device IDs are
-mapped to persistent local IDs in `GAFCTL_IDENTITY_STORE`. They are never treated
-as a substitute for `configured`.
+mapped to persistent local IDs in `GAFCTL_IDENTITY_STORE`. The ID `configured`
+is reserved for the original Bluetooth controller.

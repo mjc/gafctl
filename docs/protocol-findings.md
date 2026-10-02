@@ -1,8 +1,8 @@
 # Original Master Flow controller: protocol findings
 
 The original **GAF Master Flow Wi-Fi Attic Vent** models are **ERV5SMT**
-(roof mount) and **EGV5SMT** (gable mount). These notes describe their original
-controller and the GAF Wi-Fi Vent app. QuickConnect uses a separate controller
+(roof mount) and **EGV5SMT** (gable mount). Their original controller uses the
+GAF Wi-Fi Vent app. QuickConnect uses a separate controller
 and API; see [fan models](hardware.md) for manufacturer sources.
 
 App: GAF Wi-Fi Vent 2.1 (`com.gaf.wifivent`). Firmware: `GAFVent_030000.bin`. BLE reads and controls were tested against one device; its identifier is redacted. No OTA command was sent.
@@ -24,8 +24,8 @@ App: GAF Wi-Fi Vent 2.1 (`com.gaf.wifivent`). Firmware: `GAFVent_030000.bin`. BL
 - Setter encoding: uppercase, zero-padded hexadecimal (`%04X`).
 - Reply encoding: lowercase hexadecimal (`%04x`) or decimal digits (`%1d`).
 - `amr` and `tmr` payload `0`: acknowledgement.
-- Both setters acknowledged and read back. The complete hardware ranges have not
-  been established; adjustable service bounds and sampled acceptance are below.
+- Both setters acknowledged and read back. The controller's full range is
+  untested; the adjustable settings and test results are below.
 
 | Request | Response | Meaning |
 | --- | --- | --- |
@@ -62,13 +62,13 @@ On 2026-09-29, Gafctl scanned for service `00FF`, connected to characteristic `F
 | `#tms0000\n` | `#tmr0\n` | timer 0/0 | timer/off |
 | `#ams041A012C\n` | `#amr0\n` | thresholds 105.0°F / 30.0%; timer 0/0 | automatic/off; 99.7°F / 15.8% |
 
-## Adjustable control acceptance
+## Adjustable control tests
 
-On 2026-10-01, owned-device acceptance confirmed 110°F, 40% humidity, a two-minute
-timer, and timer clear, then restored automatic mode at 105°F / 30%. These checks
+On 2026-10-01, tests on the owner's controller confirmed 110°F, 40% humidity,
+a two-minute timer, and timer clear, then restored automatic mode at 105°F / 30%. These checks
 verified acknowledgement and readback, without measuring airflow. The
-manufacturer Android app establishes whole-unit bounds of 90–120°F, 30–80%, and
-1–360 timer minutes; zero clear is independently verified. HTTP and HA expose
+manufacturer Android app allows whole-unit settings of 90–120°F, 30–80%, and
+1–360 timer minutes; timer clear was also tested. HTTP and HA expose
 these bounded settings and preserve the untouched threshold during a change.
 The range endpoints have not all been physically tested. The direct Bluetooth
 CLI retains the four fixed presets in the earlier capture.
@@ -76,8 +76,8 @@ CLI retains the four fixed presets in the earlier capture.
 ## Evidence limits
 
 - Check additional controllers and firmware revisions. The captured device reports
-  3.0.0; its identity reply does not establish the roof/gable model.
+  3.0.0; its identity reply does not identify the roof or gable model.
 - Wi-Fi/TLS implementation and investigation remain paused. No home-LAN
-  provisioning or Wi-Fi control acceptance is recorded.
-- Adjustable bounds are app evidence plus the sampled acceptance above. Motor
-  operation and airflow require separate measurements from controller state.
+  provisioning or Wi-Fi control tests are recorded.
+- Adjustable ranges come from the app; the tested values are listed above.
+  Motor operation and airflow require separate measurements.

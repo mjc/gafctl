@@ -31,16 +31,16 @@ The automatic selector sets both thresholds and automatic mode. Clearing the
 timer leaves the controller in timer mode; use an automatic preset to return to
 automatic operation. A selector shows unknown when the current settings do not
 match an available choice. An expired timer does not show as an active one-minute
-timer. These thresholds are tested presets, not recommendations for your attic.
+timer. The presets were tested on one controller; choose thresholds for your
+attic's conditions.
 
 The adjustable numbers use ranges and whole-unit steps from the original
 manufacturer app. Temperature and humidity commands change only the selected
 value; the service reads and preserves the other raw threshold under the same
 transaction before writing. Both select automatic mode. Timer duration starts
-timer mode and reports the original requested minutes, separate from remaining
-time. Fractional threshold readback is displayed without rounding; new settings
-use whole units. Physical acceptance of the broader ranges is separate from
-the verified presets.
+timer mode and reports the requested minutes. Remaining time is a separate
+sensor. Fractional threshold readback is displayed without rounding; new
+settings use whole units. The full ranges have not been tested on hardware.
 
 QuickConnect devices expose temperature, humidity, and available diagnostics.
 They include the Refresh readings button without enabling cloud writes.
@@ -63,13 +63,12 @@ Mode selectors, switches, and All off use the same serialized mode command.
 They recheck proxy identity, HTTP ownership, current capabilities and state
 before writing, then require confirmed control and matching current mode.
 Turning off a switch for an inactive mode leaves the active mode unchanged.
-Conditional off rejects unknown mode. These cloud controls have source and
-contract coverage; newer-controller physical acceptance is unavailable.
+Conditional off rejects unknown mode. These cloud controls are tested with
+synthetic responses and have not been tested on a QuickConnect fan.
 
-QuickConnect timer duration is a configured setting, not a countdown. Saving the
-duration does not start the timer. Its Running diagnostic is estimated from the
-reported mode and measurements. Neither that estimate nor the original
-controller's fan flag measures airflow.
+QuickConnect timer duration sets the length of a future timer run; saving it
+leaves timer mode unchanged. Running is estimated from mode and measurements.
+Airflow is not measured by either backend.
 
 ## Availability and updates
 
@@ -95,7 +94,8 @@ original Bluetooth fan, using local ID `configured`.
 ## MQTT setup
 
 MQTT discovery exposes applicable entities for both original Bluetooth and
-QuickConnect devices, using the same persistent proxy UUID and local device ID as HTTP. Configure Home Assistant's MQTT integration first. The broker must
+QuickConnect devices, using the same persistent proxy UUID and local device ID
+as HTTP. Configure Home Assistant's MQTT integration first. The broker must
 support **MQTT 5**.
 
 Set these variables in the service environment, using your own broker and account:
@@ -149,12 +149,13 @@ only these permissions:
 | Home Assistant | Subscribe | `gafctl/+/availability`, `gafctl/+/+/state`, `gafctl/+/+/availability`, `gafctl/+/+/control/result`, `gafctl/+/+/refresh/result`, `homeassistant/+/gafctl/+/config` |
 
 Avoid a publish grant on all of `gafctl/#`; that would let a command client
-publish service state too. Every proxy has its own namespace. There are no unscoped aliases.
+publish service state too. Every proxy has its own namespace.
 
 Read `proxy_id` and device `id` from `/api/v2/devices`. Device topics use
-`gafctl/{proxy_id}/{id}/...`; discovery uses `homeassistant/{component}/gafctl/{identifier}_{key}/config`,
-with both IDs in the identifier. MQTT
-client IDs include the proxy UUID so separate services can share a broker.
+`gafctl/{proxy_id}/{id}/...`; discovery uses
+`homeassistant/{component}/gafctl/{identifier}_{key}/config`, with both IDs in the
+identifier. MQTT client IDs include the proxy UUID so separate services can
+share a broker.
 
 Device state and availability messages are retained. Process availability has
 its own last-will topic, `gafctl/{proxy_id}/availability`. It does not replace each fan's
@@ -214,7 +215,7 @@ per-device refresh worker as HTTP, including coalescing, serialization, and the
 270-second backend deadline. A `fresh`, `failed`, or `superseded` result arrives
 on `gafctl/{proxy_id}/{id}/refresh/result` without retention. Current state is
 published on the usual state topic. MQTT waits up to 300 seconds for a result;
-a missing result does not establish whether the backend read completed.
+If no result arrives, the backend read may still have completed.
 
 The discovered refresh button requires process availability but can read an
 unavailable device. Other controls require both process and device availability.

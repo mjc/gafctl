@@ -8,7 +8,7 @@ devenv allow
 devenv shell
 ```
 
-Inside that shell, select the control CLI explicitly:
+Run the CLI inside that shell:
 
 ```sh
 cargo run --no-default-features --features cli --bin gafctl -- ble scan
@@ -16,7 +16,7 @@ cargo run --no-default-features --features cli --bin gafctl -- devices --format 
 ```
 
 Start the server directly with `cargo run --bin gafctl-server --`, using the
-configuration described in the deployment guide. To exercise CLI delegation,
+configuration in the deployment guide. To run `gafctl server`,
 build both executables first:
 
 ```sh
@@ -39,10 +39,10 @@ HTTP-only tests, Rust doctests, and the Python Home Assistant client tests.
 
 On native Linux, `check:all` also runs `check:ha-registry`. That task uses Home
 Assistant and MQTT dependencies pinned by `devenv.lock`, generates discovery
-fixtures from the Rust implementation, and exercises HA entity/device registries,
+fixtures from Rust, and checks HA entity/device registries,
 onboarding, reconfiguration, ownership transitions and MQTT templates. Each run
-uses an isolated configuration directory under `target/ha-registry`; it does not
-connect to a deployed Home Assistant instance or the fan. It runs without a VM.
+uses a configuration directory under `target/ha-registry` and runs natively.
+The suite uses synthetic data and has no connection to the deployed HA or fan.
 
 Run that suite separately on native Linux:
 
@@ -50,8 +50,7 @@ Run that suite separately on native Linux:
 devenv tasks run check:ha-registry
 ```
 
-The HA package supports Linux, so this task is absent from the macOS environment.
-The other checks run on both platforms.
+The HA package and registry task require Linux. Other checks run on both platforms.
 
 For a focused Rust test inside the shell:
 
@@ -68,8 +67,8 @@ python3 -m unittest discover -s tests -p test_gafctl_client.py
 Tests use fake Bluetooth transports, local HTTP servers, and synthetic cloud
 fixtures. They check parsing, request validation, timeouts, state handling,
 controls, and Home Assistant mapping. Hardware captures are documented in
-[protocol findings](protocol-findings.md); QuickConnect tests do not establish
-live cloud compatibility.
+[protocol findings](protocol-findings.md). QuickConnect tests use synthetic data;
+live account compatibility is untested.
 
 ## Repository layout
 

@@ -1,4 +1,4 @@
-"""Request current readings through the device's existing service backend."""
+"""Request readings through the device's service backend."""
 
 from homeassistant.components.button import ButtonEntity
 from homeassistant.config_entries import ConfigEntry

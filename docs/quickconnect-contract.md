@@ -5,7 +5,7 @@ and EGV5QCT product families. It has a separate cloud API from the original
 ERV5SMT/EGV5SMT Bluetooth controller. See [fan models](hardware.md) for product
 sources and [deployment](deployment.md#quickconnect-experimental) for configuration.
 
-These notes record the API described by a community Home Assistant integration.
+The API description comes from a community Home Assistant integration.
 All repository fixtures are synthetic. There is no live account capture or
 physical QuickConnect fan test in this repository.
 
@@ -35,10 +35,10 @@ Gafctl uses those roots too; their live compatibility is unverified.
 The login pool is `us-east-2_F6aHzg32w`; roles are `contractor` (default) and
 `consumer`. The ID token is sent literally in `Authorization`, without a
 `Bearer ` prefix. The reference logs in again and retries once after a 401/403.
-It does not establish a refresh-token grant or proactive renewal flow.
+The reference contains no refresh-token or scheduled token-renewal implementation.
 
-Unlike the reference's fallback to an empty inventory, Gafctl reports malformed
-inventory as an error. Read requests can retry transient failures and refresh
+Gafctl reports malformed inventory as an error. Read requests can retry transient
+failures and refresh
 authentication. Settings writes are submitted once and are not automatically
 retried after a timeout or authentication error.
 
@@ -57,9 +57,9 @@ retried after a timeout or authentication error.
 | `deviceSettings.humidityMonitor` | Readable setting; the reference says writes reject it |
 
 The reference chooses a displayed mode by prioritizing truthy flags. Gafctl
-keeps missing and conflicting mode flags explicit. Its Running value is inferred
+reports missing and conflicting mode flags as unknown. Running is calculated
 from mode and measurements and remains unknown when required data is missing.
-It is not direct motor feedback.
+Motor operation is not measured.
 
 ## Write bodies
 
@@ -76,11 +76,11 @@ is `(true,false,false)`, Timer is `(false,true,false)`, and Manual is
 `(false,false,true)`. Saving timer duration preserves whether timer mode is
 active; it does not activate it.
 
-The call sites send JSON integers. Although an API docstring mentions floats,
-the number platform says the service rejects floats with HTTP 417 and service
-status 4444. Gafctl accepts integer temperature targets from 90–120 °F, humidity
+The reference sends JSON integers. Its number platform reports that floats are
+rejected with HTTP 417 and service status 4444. Gafctl accepts integer temperature
+targets from 90–120 °F, humidity
 from 30–80%, and timer durations from 30–360 minutes in 30-minute steps. These
-bounds come from the reference UI, not tests of each physical model.
+bounds come from the reference UI. They have not been tested on hardware.
 
 Gafctl reads settings before preparing a write and checks them again afterward.
 A submitted request with an ambiguous response is unconfirmed. A successful
@@ -94,7 +94,7 @@ metadata is not sent to the service. The fixtures cover login, inventory shapes,
 state fields, request bodies, malformed data, and a rejected settings response.
 No fixture records a real successful settings response.
 
-Live account/device evidence is still needed for:
+Untested behavior:
 
 - The accepted-write envelope and application status fields.
 - Whether the endpoints still accept the pinned reference's requests.

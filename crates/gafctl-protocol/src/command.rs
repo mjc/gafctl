@@ -1,6 +1,6 @@
 use crate::values::{AutomaticThresholds, Minutes};
 
-/// A command that reads device state and does not intentionally change it.
+/// A command that reads device state.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ReadCommand {
     /// Read the device identity.
@@ -41,7 +41,7 @@ impl ReadCommand {
     }
 }
 
-/// A non-firmware command that changes ordinary fan-control settings.
+/// A command that changes automatic thresholds or timer settings.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ControlCommand {
     /// Select automatic mode and set temperature/humidity thresholds.
@@ -51,7 +51,7 @@ pub enum ControlCommand {
 }
 
 impl ControlCommand {
-    /// Encode the observed setter frame. This command does not update firmware.
+    /// Encode the setter frame observed in the manufacturer app.
     #[must_use]
     pub fn frame(self) -> EncodedControlFrame {
         match self {
@@ -114,12 +114,12 @@ fn encode_hex_word(bytes: &mut [u8], offset: usize, value: u16) {
         });
 }
 
-/// A state read or an ordinary fan-control write.
+/// A state read or fan-control write.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Request {
     /// Query one state field.
     Read(ReadCommand),
-    /// Change an ordinary fan setting.
+    /// Change a fan setting.
     Control(ControlCommand),
 }
 
@@ -169,7 +169,7 @@ impl Request {
 pub enum RequestFrame {
     /// A fixed read-only getter frame.
     Read(ReadCommand),
-    /// An ordinary setting frame stored inline.
+    /// A setting frame stored inline.
     Control(EncodedControlFrame),
 }
 

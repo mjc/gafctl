@@ -12,7 +12,7 @@ pub enum QuickConnectCommandMode {
     Manual,
 }
 
-/// A QuickConnect settings change, separate from legacy device presets.
+/// A QuickConnect settings change.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum QuickConnectCommand {
     SetMode {

@@ -16,7 +16,7 @@ impl InventoryDevice {
         &self.provider_id
     }
 
-    /// Consume the inventory entry for a retained device-read target.
+    /// Move the provider ID out of this inventory entry.
     pub fn into_provider_id(self) -> String {
         self.provider_id
     }
@@ -37,7 +37,7 @@ impl fmt::Debug for InventoryDevice {
     }
 }
 
-/// Decoded mode flags; malformed or incomplete flags remain explicit.
+/// Decoded mode flags, including missing and conflicting values.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DeviceModeStatus {
     Off,
@@ -58,7 +58,7 @@ pub struct QuickConnectSettings {
     pub humidity_monitor: Option<bool>,
 }
 
-/// Diagnostic values whose units or semantics are not yet established.
+/// Raw diagnostic values with unknown units or meaning.
 #[derive(Clone, Debug, PartialEq)]
 pub struct QuickConnectDiagnostics {
     pub firmware_version: Option<String>,

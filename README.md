@@ -5,15 +5,14 @@ Gafctl connects **GAF Master Flow Wi-Fi Attic Vent** fans to Home Assistant:
 - **ERV5SMT** — roof mount.
 - **EGV5SMT** — gable mount.
 
-These are the original models that use the **GAF Wi-Fi Vent** app. Gafctl talks
-to their controller over Bluetooth, then provides temperature, humidity, fan
-settings, and controls through a service on your network. You can also use the
-command line without Home Assistant. No GAF account or Internet connection is
-needed for these models.
+These models use the **GAF Wi-Fi Vent** app. Gafctl reads and controls them over
+Bluetooth. Its HTTP API and MQTT bridge provide temperature, humidity, settings,
+and controls to Home Assistant. The CLI can also read and control a fan directly.
+These models require no GAF account or Internet connection.
 
 The newer **Master Flow QuickConnect** models use a different app and cloud
-service. Gafctl includes an experimental backend for those; see
-[fan models and compatibility](docs/hardware.md) before choosing a setup.
+service. Their backend is experimental; see
+[fan models and compatibility](docs/hardware.md).
 
 ## What you need
 
@@ -24,8 +23,8 @@ service. Gafctl includes an experimental backend for those; see
   use a Linux computer with BlueZ. macOS can run the Bluetooth command line too.
 - Home Assistant, if you want its dashboard and automations.
 
-Gafctl connects directly over Bluetooth. You do not need to join the fan's
-`GAFVent_XXXX` Wi-Fi network. It does not install or update fan firmware.
+Gafctl uses Bluetooth and leaves the computer on its normal network. Fan
+firmware updates require the manufacturer's app.
 
 ## Install
 
@@ -40,9 +39,11 @@ devenv allow
 devenv shell -- cargo build --release --locked
 ```
 
-This builds `gafctl` and `gafctl-server`. `gafctl server` launches `gafctl-server` and forwards its arguments. The
-examples below use `target/release/gafctl` and `target/release/gafctl-server` from
-the repository root. A service-only build uses `--no-default-features --features http,mqtt --bin gafctl-server`. On Linux, install and start BlueZ using your
+The build produces `gafctl` and `gafctl-server`. `gafctl server` launches
+`gafctl-server` and forwards its arguments. Run the examples from the repository
+root. For a service-only build, add
+`--no-default-features --features http,mqtt --bin gafctl-server`.
+On Linux, install and start BlueZ using your
 distribution's package manager. On macOS, allow Bluetooth access if prompted.
 
 ## Find your fan
@@ -57,9 +58,9 @@ Copy the fan's peripheral ID from the output, then read its state:
 ./target/release/gafctl ble state --device-id 'PERIPHERAL_ID'
 ```
 
-Replace `PERIPHERAL_ID` with the ID from the scan. It is a platform-specific
-Bluetooth identifier, not the fan's model number. A successful read shows
-temperature, humidity, mode, thresholds, and timer values. If no fan appears,
+Replace `PERIPHERAL_ID` with the platform-specific Bluetooth ID from the scan.
+A successful read shows temperature, humidity, mode, thresholds, and timer values.
+If no fan appears,
 check Bluetooth, move the computer closer, and close the GAF app before retrying.
 
 ## Start the service
@@ -110,10 +111,10 @@ For automatic startup and logs, follow the [service setup guide](docs/deployment
 Home Assistant exposes measurements, diagnostics, selectors, adjustable target
 numbers, timer duration and refresh for the original controller. Numbers use
 90–120 °F, 30–80%, and 0–360 timer minutes in whole-unit steps. The service reads
-and preserves the unchanged target before writing. The existing verified
-threshold and one-minute/clear presets remain available. A separate on/off
-switch is not exposed for the original controller. The controller fan flag
-reports controller state, without measuring airflow.
+and preserves the unchanged target before writing. Fixed threshold presets and
+one-minute/clear timer presets are also available. A separate on/off
+switch is not exposed for the original controller. The fan flag reports the
+controller's on/off state; airflow is not measured.
 
 To change the API address, open the entry's menu and choose **Reconfigure**.
 The new address must report the same persistent proxy UUID, device ID and
@@ -132,7 +133,8 @@ With the service running:
 ./target/release/gafctl control configured preset automatic-105-f-30-percent
 ```
 
-For a remote service, add `--server http://GAFCTL_HOST:8787`. The separate `gafctl` binary can also control the fan directly over Bluetooth:
+For a remote service, add `--server http://GAFCTL_HOST:8787`. To control the fan
+directly over Bluetooth:
 
 ```sh
 ./target/release/gafctl ble control --device-id 'PERIPHERAL_ID' preset timer-one-minute

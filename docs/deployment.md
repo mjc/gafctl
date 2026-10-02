@@ -2,7 +2,7 @@
 
 First build Gafctl and confirm a direct state read using the
 [README](../README.md). The service computer needs Bluetooth within range of an
-original ERV5SMT or EGV5SMT. QuickConnect uses the Internet instead of Bluetooth.
+original ERV5SMT or EGV5SMT. QuickConnect requires Internet access.
 
 ## Listen for Home Assistant
 
@@ -17,21 +17,19 @@ gafctl server --device-id 'PERIPHERAL_ID' \
 
 Replace the peripheral ID with the value from `gafctl ble scan` and choose a
 private writable identity-store path. Keep the identity file across restarts.
-Restrict port
-8787 to your trusted network or Home Assistant host. The API has no built-in
-login. An authenticated reverse proxy can provide HTTPS for remote clients.
+Restrict port 8787 to your trusted network or Home Assistant host. The API has
+no built-in login. An authenticated reverse proxy can provide HTTPS for remote clients.
 
-`--device-id` configures one original Bluetooth fan. Without it, the service
-still starts, but no Bluetooth device is registered. Configuring any fan requires
-an identity store. QuickConnect can run alone
-or alongside that fan.
+`--device-id` registers one original Bluetooth fan. An identity store is required
+when configuring any fan. The service supports Bluetooth, QuickConnect, or both;
+it can also start with no devices configured.
 
 ## Linux with systemd
 
 These instructions are for a Linux distribution where you manage service files
 manually. On NixOS, manage the package, user, Bluetooth, firewall, and systemd
-unit declaratively. This repository does not yet export a NixOS package or
-service module; the current build workflow is devenv.
+unit declaratively. This repository builds with devenv and exports no NixOS
+package or service module.
 
 Install both executables from the repository root after the release build:
 
@@ -100,8 +98,8 @@ readings before you add the [Home Assistant integration](../README.md#add-it-to-
 ## QuickConnect (experimental)
 
 Use this only for a fan configured in the **GAF Master Flow QuickConnect** app.
-It does not connect an original ERV5SMT or EGV5SMT to the cloud. Live compatibility
-has not been verified; see [hardware](hardware.md#quickconnect) and
+Original ERV5SMT and EGV5SMT controllers use Bluetooth. QuickConnect has not been
+tested with a live account or fan; see [hardware](hardware.md#quickconnect) and
 [API research](quickconnect-contract.md).
 
 The required settings are:
@@ -155,8 +153,8 @@ passwords in command-line arguments or tracked configuration.
 
 Cloud controls are disabled by default. To opt into experimental mode, target,
 and timer-duration writes, set `GAFCTL_QUICKCONNECT_WRITES_ENABLED=true` and
-restart. This advertises controls to Home Assistant and the CLI; enabling it
-does not establish that your model's cloud writes work. The CLI guide lists the
+restart. This advertises controls to Home Assistant and the CLI. Cloud writes
+have not been tested on a QuickConnect fan. The CLI guide lists the
 [commands and limits](cli.md#controls).
 
 Cloud polling runs separately from Bluetooth polling. A login or Internet failure
@@ -191,7 +189,8 @@ to be recreated for an upgrade that retains its integration domain and identity.
 
 The rename changes executable names, the HA integration domain, MQTT namespaces,
 environment variables, and shared Nix service, user, credential, and state paths.
-It requires a coordinated deployment; there is no automatic compatibility layer.
+Deploy the renamed service, HA integration and broker configuration together.
+Existing installations require manual migration.
 
 1. Stop the old service before starting `gafctl-server`.
 2. Preserve the existing identity-store contents, including the proxy UUID and
@@ -200,12 +199,13 @@ It requires a coordinated deployment; there is no automatic compatibility layer.
    and use `GAFCTL_` variables.
 3. Back up the HA configuration. Plan the domain/registry migration before
    replacing `custom_components/updraft` with `custom_components/gafctl`; copying
-   the directory does not migrate existing entries. Preserve entity IDs used by
-   dashboards and automations, and verify proxy/device identity after migration.
+   the directory leaves existing entries under the old domain. Preserve entity
+   IDs used by dashboards and automations, and verify proxy/device identity
+   after migration.
 4. Remove the old retained MQTT discovery configurations before enabling the new
    publisher. Update broker permissions for `gafctl/` and the discovery node
    `homeassistant/+/gafctl/+/config` described in the MQTT guide.
 5. Verify state freshness, entity ownership, and control readback, then remove
    the old component and service configuration. Keep the migration backup for
-   rollback; restoring only an executable does not undo a domain or state-path
-   change.
+   rollback. Restore the matching HA domain, broker configuration and state
+   paths along with the old executable.

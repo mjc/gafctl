@@ -280,7 +280,7 @@ enum ServiceControl {
         #[arg(long)]
         humidity_percent: TargetHumidityPercent,
     },
-    /// Set configured QuickConnect duration, not a remaining countdown.
+    /// Set the configured QuickConnect timer duration.
     TimerDuration { minutes: TimerDurationMinutes },
 }
 
@@ -411,7 +411,7 @@ enum BleOperation {
         #[arg(long)]
         device_id: Option<PeripheralId>,
     },
-    /// Apply a verified preset to an explicitly selected fan.
+    /// Apply a tested preset to the selected fan.
     Control {
         #[arg(long)]
         device_id: PeripheralId,

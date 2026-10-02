@@ -1,4 +1,4 @@
-"""Select HTTP-owned devices from an Gafctl proxy."""
+"""Select devices whose Home Assistant source is HTTP."""
 
 import voluptuous as vol
 from homeassistant import config_entries
