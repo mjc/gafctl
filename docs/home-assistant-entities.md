@@ -185,8 +185,15 @@ not retained. A successful control requires acknowledgement and matching state
 readback. Home Assistant does not display a requested setting as if it had
 already succeeded.
 
-If no result arrives, read current state before retrying: the write might have
-completed. Updraft caches 64 completed requests per device. Repeating a cached
+HA and the Rust client allow 300 seconds for a control response. Timeout,
+disconnect, malformed or mismatched confirmation leaves the outcome unknown;
+HA reports the submitted request ID and sends no automatic retry. MQTT publishes
+a correlated `outcome_unknown` result when its 300-second wait expires or the
+worker closes, if the broker is available. Result publication has a separate
+30-second bound so stalled brokers cannot hold result slots indefinitely.
+
+If no result arrives, read current state before sending another command: the
+write might have completed. Updraft caches 64 completed requests per device. Repeating a cached
 ID with the same command returns its result; a different command with that ID is
 rejected. The cache is in memory and is lost on restart. It cannot guarantee that
 a retry after a restart will avoid another write.

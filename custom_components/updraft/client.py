@@ -8,8 +8,35 @@ from typing import Any
 from urllib.parse import urljoin, urlparse
 from uuid import UUID, RFC_4122, uuid4
 
+
+CONTROL_HTTP_STATUSES = {
+    "confirmed": 200,
+    "unconfirmed": 502,
+    "submitted_unconfirmed": 502,
+    "readback_mismatch": 502,
+    "readback_unavailable": 502,
+    "rejected": 422,
+    "unsupported_command": 422,
+    "stale_request": 422,
+    "request_id_reused": 422,
+    "unknown_device": 404,
+    "device_unavailable": 404,
+    "backend_unavailable": 503,
+    "busy": 429,
+    "control_failed": 500,
+    "invalid_request_id": 400,
+}
+
 class ApiError(Exception):
     """A safe-to-display Updraft API error."""
+
+
+class ControlOutcomeUnknown(ApiError):
+    """The submitted request has no trustworthy confirmation."""
+
+    def __init__(self, request_id: str) -> None:
+        self.request_id = request_id
+        super().__init__(f"Control outcome unknown for request {request_id}; read current state before sending another command")
 
 
 def normalize_api_url(value: str) -> str:
@@ -120,7 +147,7 @@ class ApiClient:
             raise ApiError("cannot refresh readings from the local proxy") from error
 
     async def set_control(self, device_id: str, command: str | Mapping[str, Any]) -> None:
-        """Send one typed command and require a matching confirmed response."""
+        """Send exactly once and require a matching confirmed response."""
         if not _valid_identifier(device_id):
             raise ApiError("invalid configured device")
         command = _control_command(command)
@@ -134,21 +161,23 @@ class ApiClient:
                     "issued_at_unix_ms": time.time_ns() // 1_000_000,
                     "command": command,
                 },
-                timeout=90,
+                timeout=300,
             ) as response:
                 payload = await response.json()
-                if response.status != 200 or not isinstance(payload, Mapping):
-                    raise ApiError(_control_error(payload, response.status))
-                if payload.get("request_id") != request_id:
-                    raise ApiError("proxy returned a mismatched control confirmation")
-                if payload.get("status") != "confirmed":
-                    raise ApiError(_control_error(payload, response.status))
+                http_status = response.status
         except asyncio.CancelledError:
             raise
-        except ApiError:
-            raise
         except Exception as error:
-            raise ApiError("cannot send control to the local proxy") from error
+            raise ControlOutcomeUnknown(request_id) from error
+        if (
+            not isinstance(payload, Mapping)
+            or payload.get("request_id") != request_id
+            or not isinstance(payload.get("status"), str)
+            or CONTROL_HTTP_STATUSES.get(payload["status"]) != http_status
+        ):
+            raise ControlOutcomeUnknown(request_id)
+        if http_status != 200 or payload["status"] != "confirmed":
+            raise ApiError(f"{_control_error(payload, http_status)} (request {request_id})")
 
     async def _get_json(self, path: str) -> Any:
         url = urljoin(self._base_url, path)

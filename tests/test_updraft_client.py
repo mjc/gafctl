@@ -523,9 +523,24 @@ class ApiClientTests(unittest.TestCase):
         )
         self.assertTrue(request["request_id"])
         self.assertIsInstance(request["issued_at_unix_ms"], int)
-        self.assertEqual(session.posts[0]["timeout"], 90)
+        self.assertEqual(session.posts[0]["timeout"], 300)
         with self.assertRaisesRegex(ApiError, "unsupported control preset"):
             asyncio.run(client.set_control("configured", "timer_999"))
+
+    def test_control_timeout_and_disconnect_preserve_unknown_request_without_retry(self):
+        class LostResponse(FakeResponse):
+            async def __aenter__(self):
+                raise self.payload
+        for error in (asyncio.TimeoutError("private host"), OSError("private connection")):
+            session = FakeSession([LostResponse(error)])
+            client = ApiClient("http://proxy", session)
+            with self.assertRaises(ApiError) as raised:
+                asyncio.run(client.set_control("configured", "timer_clear"))
+            self.assertEqual(raised.exception.request_id, session.posts[0]["json"]["request_id"])
+            self.assertIn("outcome unknown", str(raised.exception))
+            self.assertIn(raised.exception.request_id, str(raised.exception))
+            self.assertNotIn("private", str(raised.exception))
+            self.assertEqual(len(session.posts), 1)
 
     def test_sends_quickconnect_mode_with_correlation_and_exact_command_shape(self):
         response = FakeResponse({"request_id": "$request_id", "status": "confirmed"})
@@ -598,7 +613,7 @@ class ApiClientTests(unittest.TestCase):
                 [
                     FakeResponse(
                         {
-                            "request_id": "ignored",
+                            "request_id": "$request_id",
                             "status": "unconfirmed",
                             "message": "readback differed",
                         },
@@ -610,6 +625,15 @@ class ApiClientTests(unittest.TestCase):
 
         with self.assertRaisesRegex(ApiError, "readback differed"):
             asyncio.run(client.set_control("configured", "timer_clear"))
+
+    def test_unknown_or_inconsistent_control_reply_preserves_uncertain_submission(self):
+        for status, http_status in (("banana", 200), ("confirmed", 502), (None, 200)):
+            session = FakeSession([FakeResponse({"request_id": "$request_id", "status": status}, http_status)])
+            with self.assertRaises(CLIENT.ControlOutcomeUnknown) as raised:
+                asyncio.run(ApiClient("http://proxy", session).set_control("configured", "timer_clear"))
+            self.assertEqual(raised.exception.request_id, session.posts[0]["json"]["request_id"])
+            self.assertIn("outcome unknown", str(raised.exception))
+            self.assertEqual(len(session.posts), 1)
 
     def test_rejects_mismatched_control_confirmation(self):
         client = ApiClient(
@@ -623,7 +647,7 @@ class ApiClientTests(unittest.TestCase):
             ),
         )
 
-        with self.assertRaisesRegex(ApiError, "mismatched control confirmation"):
+        with self.assertRaisesRegex(ApiError, "outcome unknown"):
             asyncio.run(client.set_control("configured", "timer_clear"))
 
 

@@ -384,6 +384,11 @@ fn enqueue_control(
     permit: OwnedSemaphorePermit,
 ) {
     let (reply, response) = oneshot::channel();
+    let uncertain = MqttReply::Rejected {
+        request_id: request.request_id().as_str().to_owned(),
+        status: "outcome_unknown",
+        kind: request.kind(),
+    };
     match controls.try_send(MqttDeviceWork {
         device_id: device.clone(),
         request,
@@ -394,6 +399,7 @@ fn enqueue_control(
                 connection.clone(),
                 device,
                 response,
+                uncertain,
                 permit,
             ));
         }
@@ -410,27 +416,28 @@ async fn publish_control_reply(
     connection: MqttConnection,
     device: DeviceId,
     response: oneshot::Receiver<MqttReply>,
+    uncertain: MqttReply,
     _permit: OwnedSemaphorePermit,
 ) {
+    let result = wait_for_device_reply(response, uncertain).await;
     if timeout(
-        CONTROL_RESPONSE_TIMEOUT,
-        wait_and_publish_reply(&connection, &device, response),
+        Duration::from_secs(30),
+        connection.publish_result(&device, &result),
     )
     .await
     .is_err()
     {
-        tracing::warn!("MQTT control response or publication timed out");
+        tracing::warn!("MQTT result publication timed out");
     }
 }
 
-async fn wait_and_publish_reply(
-    connection: &MqttConnection,
-    device: &DeviceId,
+async fn wait_for_device_reply(
     response: oneshot::Receiver<MqttReply>,
-) {
-    match response.await {
-        Ok(result) => connection.publish_result(device, &result).await,
-        Err(_) => tracing::warn!("MQTT control worker ended before returning a result"),
+    uncertain: MqttReply,
+) -> MqttReply {
+    match timeout(CONTROL_RESPONSE_TIMEOUT, response).await {
+        Ok(Ok(result)) => result,
+        Ok(Err(_)) | Err(_) => uncertain,
     }
 }
 
@@ -720,6 +727,26 @@ mod tests {
 
     fn request(id: &str) -> Vec<u8> {
         serde_json::to_vec(&json!({"request_id": id, "issued_at_unix_ms": unix_millis(SystemTime::now()).unwrap(), "command": {"kind": "quick_connect_mode", "mode": "automatic"}})).unwrap()
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn mqtt_deadline_or_closed_worker_returns_correlated_unknown_outcome() {
+        for closed in [false, true] {
+            let (sender, response) = oneshot::channel();
+            let uncertain = MqttReply::Rejected {
+                request_id: "uncertain".to_owned(),
+                status: "outcome_unknown",
+                kind: RequestKind::Control,
+            };
+            let sender = (!closed).then_some(sender);
+            let response = wait_for_device_reply(response, uncertain).await;
+            let response = serde_json::to_value(response).unwrap();
+            assert_eq!(response["request_id"], "uncertain");
+            assert_eq!(response["status"], "outcome_unknown");
+            if let Some(sender) = sender {
+                assert!(sender.is_closed());
+            }
+        }
     }
 
     #[test]
