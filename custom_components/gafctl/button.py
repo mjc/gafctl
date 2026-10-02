@@ -3,13 +3,11 @@
 from homeassistant.components.button import ButtonEntity
 from homeassistant.const import EntityCategory
 from homeassistant.core import HomeAssistant
-from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .controls import entity_keys
 from .coordinator import GafctlConfigEntry, GafctlCoordinator
-from .entity import GafctlEntity
-from .models import ApiError
+from .entity import GafctlEntity, translate_api_errors
 
 
 async def async_setup_entry(
@@ -43,15 +41,13 @@ class GafctlRefreshButton(GafctlEntity, ButtonEntity):
     def available(self) -> bool:
         return bool(
             super().available
-            and self.coordinator.http_state_owned
+            and self.coordinator.http_owned
             and self.coordinator.device.read_state
         )
 
     async def async_press(self) -> None:
-        try:
+        with translate_api_errors():
             await self.coordinator.async_refresh_device()
-        except ApiError as error:
-            raise HomeAssistantError(str(error)) from error
 
 
 class GafctlAllOffButton(GafctlEntity, ButtonEntity):
@@ -68,7 +64,5 @@ class GafctlAllOffButton(GafctlEntity, ButtonEntity):
         return bool(super().available and self.coordinator.mode_control_available)
 
     async def async_press(self) -> None:
-        try:
+        with translate_api_errors():
             await self.coordinator.async_set_mode("off")
-        except ApiError as error:
-            raise HomeAssistantError(str(error)) from error

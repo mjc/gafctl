@@ -135,13 +135,7 @@ class GafctlSensor(GafctlEntity, SensorEntity):
 
     @property
     def available(self) -> bool:
-        return bool(
-            super().available
-            and self.coordinator.http_state_owned
-            and self.coordinator.data
-            and self.coordinator.data.available
-            and self.coordinator.data.state is not None
-        )
+        return super().available and self.coordinator.current_readings is not None
 
     @property
     def extra_state_attributes(self) -> JsonObject:

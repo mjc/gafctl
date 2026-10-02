@@ -29,57 +29,10 @@ CONTROL_HTTP_STATUSES = MappingProxyType(
 )
 
 
-CONTROL_PRESETS = frozenset(
-    {
-        "automatic105_f30_percent",
-        "automatic105_1_f30_1_percent",
-        "timer_clear",
-        "timer_one_minute",
-    }
+MODE_LABELS = MappingProxyType(
+    {"off": "Off", "automatic": "Automatic", "timer": "Timer", "manual": "Manual"}
 )
-
-
-QUICKCONNECT_MODES = frozenset({"off", "automatic", "timer", "manual"})
-
-
-QUICKCONNECT_NUMBER_RANGES = MappingProxyType(
-    {
-        "automatic_temperature": (90, 120, 1),
-        "automatic_humidity": (30, 80, 1),
-        "timer_duration": (30, 360, 30),
-    }
-)
-
-
-LEGACY_NUMBER_RANGES = MappingProxyType(
-    {
-        "automatic_temperature": (90, 120, 1),
-        "automatic_humidity": (30, 80, 1),
-        "timer_duration": (0, 360, 1),
-    }
-)
-
-
-LEGACY_NUMBER_COMMANDS = MappingProxyType(
-    {
-        "automatic_temperature": ("legacy_automatic_temperature", "temperature_f"),
-        "automatic_humidity": ("legacy_automatic_humidity", "humidity_percent"),
-        "timer_duration": ("legacy_timer", "minutes"),
-    }
-)
-
-
-QUICKCONNECT_NUMBER_COMMANDS = MappingProxyType(
-    {
-        "automatic_temperature": (
-            "quick_connect_automatic_temperature",
-            "temperature_f",
-        ),
-        "automatic_humidity": ("quick_connect_automatic_humidity", "humidity_percent"),
-        "timer_duration": ("quick_connect_timer_duration", "minutes"),
-    }
-)
-
+QUICKCONNECT_MODES = frozenset(MODE_LABELS)
 
 QUICKCONNECT_SENSOR_KEYS = frozenset(
     {
@@ -111,7 +64,6 @@ LEGACY_SENSOR_KEYS = frozenset(
 class NumberControl:
     key: str
     backend: Backend
-    capability: str
     command_kind: str
     command_field: str
     reading: Callable[[Readings], float | int | None]
@@ -119,12 +71,24 @@ class NumberControl:
     maximum: int
     step: int
 
+    @property
+    def capability(self) -> str:
+        if self.backend == "quick_connect" and self.key != "timer_duration":
+            return "quick_connect_targets"
+        return self.command_kind
+
+    def accepts(self, value: object) -> TypeGuard[int]:
+        return (
+            type(value) is int
+            and self.minimum <= value <= self.maximum
+            and (value - self.minimum) % self.step == 0
+        )
+
     def validate(self, value: object) -> int:
         if (
             not _is_finite_number(value)
-            or not self.minimum <= value <= self.maximum
             or value != int(value)
-            or (value - self.minimum) % self.step != 0
+            or not self.accepts(int(value))
         ):
             raise ApiError("value is outside the supported device range")
         return int(value)
@@ -141,73 +105,87 @@ class NumberControl:
                 or self.key == "timer_duration"
                 and value == 600
             )
-        if self.capability == "quick_connect_targets" and not (
-            _integer_in_range(readings.automatic_temperature_f, 90, 120)
-            and _integer_in_range(readings.automatic_humidity_percent, 30, 80)
-        ):
-            return False
-        return (
-            _integer_in_range(value, self.minimum, self.maximum)
-            and (value - self.minimum) % self.step == 0
+        return self.accepts(value) and (
+            self.capability != "quick_connect_targets"
+            or all(
+                target.accepts(target.reading(readings))
+                for target in NUMBER_CONTROLS[self.backend]
+                if target.capability == self.capability
+            )
         )
 
     def command(self, value: int) -> JsonObject:
         return {"kind": self.command_kind, self.command_field: value}
 
 
-NUMBER_READINGS: Mapping[
-    Backend, Mapping[str, Callable[[Readings], float | int | None]]
-] = MappingProxyType(
+NUMBER_CONTROLS: Mapping[Backend, tuple[NumberControl, ...]] = MappingProxyType(
     {
-        "legacy_ble": MappingProxyType(
-            {
-                "automatic_temperature": lambda readings: (
-                    readings.automatic_temperature_threshold_f
-                ),
-                "automatic_humidity": lambda readings: (
-                    readings.automatic_humidity_threshold_percent
-                ),
-                "timer_duration": lambda readings: readings.timer_original_minutes,
-            }
+        "legacy_ble": (
+            NumberControl(
+                key="automatic_temperature",
+                backend="legacy_ble",
+                command_kind="legacy_automatic_temperature",
+                command_field="temperature_f",
+                reading=lambda readings: readings.automatic_temperature_threshold_f,
+                minimum=90,
+                maximum=120,
+                step=1,
+            ),
+            NumberControl(
+                key="automatic_humidity",
+                backend="legacy_ble",
+                command_kind="legacy_automatic_humidity",
+                command_field="humidity_percent",
+                reading=lambda readings: readings.automatic_humidity_threshold_percent,
+                minimum=30,
+                maximum=80,
+                step=1,
+            ),
+            NumberControl(
+                key="timer_duration",
+                backend="legacy_ble",
+                command_kind="legacy_timer",
+                command_field="minutes",
+                reading=lambda readings: readings.timer_original_minutes,
+                minimum=0,
+                maximum=360,
+                step=1,
+            ),
         ),
-        "quick_connect": MappingProxyType(
-            {
-                "automatic_temperature": lambda readings: (
-                    readings.automatic_temperature_f
-                ),
-                "automatic_humidity": lambda readings: (
-                    readings.automatic_humidity_percent
-                ),
-                "timer_duration": lambda readings: readings.timer_duration_minutes,
-            }
+        "quick_connect": (
+            NumberControl(
+                key="automatic_temperature",
+                backend="quick_connect",
+                command_kind="quick_connect_automatic_temperature",
+                command_field="temperature_f",
+                reading=lambda readings: readings.automatic_temperature_f,
+                minimum=90,
+                maximum=120,
+                step=1,
+            ),
+            NumberControl(
+                key="automatic_humidity",
+                backend="quick_connect",
+                command_kind="quick_connect_automatic_humidity",
+                command_field="humidity_percent",
+                reading=lambda readings: readings.automatic_humidity_percent,
+                minimum=30,
+                maximum=80,
+                step=1,
+            ),
+            NumberControl(
+                key="timer_duration",
+                backend="quick_connect",
+                command_kind="quick_connect_timer_duration",
+                command_field="minutes",
+                reading=lambda readings: readings.timer_duration_minutes,
+                minimum=30,
+                maximum=360,
+                step=30,
+            ),
         ),
     }
 )
-
-
-def number_controls(backend: Backend) -> tuple[NumberControl, ...]:
-    commands, ranges = (
-        (LEGACY_NUMBER_COMMANDS, LEGACY_NUMBER_RANGES)
-        if backend == "legacy_ble"
-        else (QUICKCONNECT_NUMBER_COMMANDS, QUICKCONNECT_NUMBER_RANGES)
-    )
-    return tuple(
-        NumberControl(
-            key=key,
-            backend=backend,
-            capability="quick_connect_targets"
-            if backend == "quick_connect" and key != "timer_duration"
-            else kind,
-            command_kind=kind,
-            command_field=field,
-            reading=NUMBER_READINGS[backend][key],
-            minimum=ranges[key][0],
-            maximum=ranges[key][1],
-            step=ranges[key][2],
-        )
-        for key, (kind, field) in commands.items()
-    )
-
 
 THRESHOLDS = MappingProxyType(
     {
@@ -215,6 +193,12 @@ THRESHOLDS = MappingProxyType(
         "automatic105_1_f30_1_percent": (105.1, 30.1),
     }
 )
+
+
+TIMER_PRESETS = MappingProxyType(
+    {"timer_clear": ("Clear timer", 0), "timer_one_minute": ("1 minute", 1)}
+)
+CONTROL_PRESETS = frozenset((*THRESHOLDS, *TIMER_PRESETS))
 
 
 def threshold_control_preset(readings: Readings) -> str | None:
@@ -281,30 +265,17 @@ def entity_keys(device: Device) -> dict[str, set[str]]:
             entities["binary_sensor"] = {"controller_fan_flag"}
     if backend == "legacy_ble" and "legacy_preset" in command_kinds:
         entities["select"] = {"automatic_thresholds", "timer"}
-    if backend == "legacy_ble":
-        number_keys = {
-            key
-            for key, (capability, _) in LEGACY_NUMBER_COMMANDS.items()
-            if capability in command_kinds
-        }
-        if number_keys:
-            entities["number"] = number_keys
-    if backend == "quick_connect":
-        if "quick_connect_mode" in command_kinds:
-            entities["select"] = {"mode"}
-            entities["switch"] = {"automatic_mode", "timer_mode", "manual_mode"}
-            entities.setdefault("button", set()).add("all_off")
-        number_keys = {
-            key
-            for key, capability in (
-                ("automatic_temperature", "quick_connect_targets"),
-                ("automatic_humidity", "quick_connect_targets"),
-                ("timer_duration", "quick_connect_timer_duration"),
-            )
-            if capability in command_kinds
-        }
-        if number_keys:
-            entities["number"] = number_keys
+    if backend == "quick_connect" and "quick_connect_mode" in command_kinds:
+        entities["select"] = {"mode"}
+        entities["switch"] = {f"{mode}_mode" for mode in MODE_LABELS if mode != "off"}
+        entities.setdefault("button", set()).add("all_off")
+    number_keys = {
+        control.key
+        for control in NUMBER_CONTROLS[backend]
+        if control.capability in command_kinds
+    }
+    if number_keys:
+        entities["number"] = number_keys
     return entities
 
 
@@ -330,50 +301,38 @@ def _control_command(command: str | Mapping[str, JsonValue]) -> JsonObject:
             and value in QUICKCONNECT_MODES
         ):
             return dict(command)
-    for commands, ranges in (
-        (LEGACY_NUMBER_COMMANDS, LEGACY_NUMBER_RANGES),
-        (QUICKCONNECT_NUMBER_COMMANDS, QUICKCONNECT_NUMBER_RANGES),
-    ):
-        for key, (capability, field) in commands.items():
-            if kind != capability or set(command) != {"kind", field}:
-                continue
-            minimum, maximum, step = ranges[key]
-            value = command[field]
+    for controls in NUMBER_CONTROLS.values():
+        for control in controls:
             if (
-                _integer_in_range(value, minimum, maximum)
-                and (value - minimum) % step == 0
+                kind == control.command_kind
+                and set(command) == {"kind", control.command_field}
+                and control.accepts(command[control.command_field])
             ):
                 return dict(command)
+    targets = tuple(
+        control
+        for control in NUMBER_CONTROLS["quick_connect"]
+        if control.capability == "quick_connect_targets"
+    )
     if (
         kind == "quick_connect_targets"
-        and set(command)
-        == {
-            "kind",
-            "temperature_f",
-            "humidity_percent",
-        }
-        and all(
-            _integer_in_range(command[field], *QUICKCONNECT_NUMBER_RANGES[key][:2])
-            for key, field in (
-                ("automatic_temperature", "temperature_f"),
-                ("automatic_humidity", "humidity_percent"),
-            )
-        )
+        and set(command) == {"kind", *(control.command_field for control in targets)}
+        and all(control.accepts(command[control.command_field]) for control in targets)
     ):
         return dict(command)
     raise ApiError("invalid device control command")
 
 
-def _integer_in_range(value: object, minimum: int, maximum: int) -> TypeGuard[int]:
-    return type(value) is int and minimum <= value <= maximum
-
-
 def timer_control_preset(state: Readings) -> str | None:
-    presets: Mapping[tuple[int | None, int | None], str] = {
-        (0, 0): "timer_clear",
-        (1, 1): "timer_one_minute",
-    }
-    return presets.get((state.timer_remaining_minutes, state.timer_original_minutes))
+    current = (state.timer_remaining_minutes, state.timer_original_minutes)
+    return next(
+        (
+            preset
+            for preset, (_, duration) in TIMER_PRESETS.items()
+            if current == (duration, duration)
+        ),
+        None,
+    )
 
 
 def _is_finite_number(value: object) -> TypeGuard[int | float]:

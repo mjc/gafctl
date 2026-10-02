@@ -1,6 +1,7 @@
 """Number controls for settings advertised by the device."""
 
 from dataclasses import dataclass
+from types import MappingProxyType
 
 from homeassistant.components.number import (
     NumberEntity,
@@ -9,13 +10,11 @@ from homeassistant.components.number import (
 )
 from homeassistant.const import PERCENTAGE, UnitOfTemperature, UnitOfTime
 from homeassistant.core import HomeAssistant
-from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
-from .controls import NumberControl, entity_keys, number_controls
+from .controls import NUMBER_CONTROLS, NumberControl, entity_keys
 from .coordinator import GafctlConfigEntry, GafctlCoordinator
-from .entity import GafctlEntity
-from .models import ApiError
+from .entity import GafctlEntity, translate_api_errors
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -23,29 +22,27 @@ class GafctlNumberDescription(NumberEntityDescription):
     control: NumberControl
 
 
-PRESENTATION = (
-    ("Target temperature", UnitOfTemperature.FAHRENHEIT),
-    ("Target humidity", PERCENTAGE),
-    ("Timer duration", UnitOfTime.MINUTES),
+PRESENTATION = MappingProxyType(
+    {
+        "automatic_temperature": ("Target temperature", UnitOfTemperature.FAHRENHEIT),
+        "automatic_humidity": ("Target humidity", PERCENTAGE),
+        "timer_duration": ("Timer duration", UnitOfTime.MINUTES),
+    }
 )
-
-
-def descriptions(
-    controls: tuple[NumberControl, ...],
-) -> tuple[GafctlNumberDescription, ...]:
-    return tuple(
-        GafctlNumberDescription(
-            key=control.key,
-            name=name,
-            native_unit_of_measurement=unit,
-            control=control,
+DESCRIPTIONS = MappingProxyType(
+    {
+        backend: tuple(
+            GafctlNumberDescription(
+                key=control.key,
+                name=PRESENTATION[control.key][0],
+                native_unit_of_measurement=PRESENTATION[control.key][1],
+                control=control,
+            )
+            for control in controls
         )
-        for control, (name, unit) in zip(controls, PRESENTATION, strict=True)
-    )
-
-
-CONTROLS = descriptions(number_controls("quick_connect"))
-LEGACY_CONTROLS = descriptions(number_controls("legacy_ble"))
+        for backend, controls in NUMBER_CONTROLS.items()
+    }
+)
 
 
 async def async_setup_entry(
@@ -55,12 +52,9 @@ async def async_setup_entry(
 ) -> None:
     coordinator = entry.runtime_data
     keys = entity_keys(coordinator.device).get("number", set())
-    controls = (
-        LEGACY_CONTROLS if coordinator.device.backend == "legacy_ble" else CONTROLS
-    )
     async_add_entities(
         GafctlNumber(coordinator, entry, description)
-        for description in controls
+        for description in DESCRIPTIONS[coordinator.device.backend]
         if description.key in keys
     )
 
@@ -91,7 +85,7 @@ class GafctlNumber(GafctlEntity, NumberEntity):
         control = self.entity_description.control
         value = control.reading(state)
         if control.backend == "legacy_ble" and control.key == "timer_duration":
-            return value if value is not None and 0 <= value <= 360 else None
+            return value if control.accepts(value) else None
         return value
 
     @property
@@ -101,9 +95,7 @@ class GafctlNumber(GafctlEntity, NumberEntity):
         )
 
     async def async_set_native_value(self, value: float) -> None:
-        try:
+        with translate_api_errors():
             await self.coordinator.async_set_number(
                 self.entity_description.control, value
             )
-        except ApiError as error:
-            raise HomeAssistantError(str(error)) from error

@@ -99,15 +99,7 @@ class GafctlBinarySensor(GafctlEntity, BinarySensorEntity):
 
     @property
     def available(self) -> bool:
-        data = self.coordinator.data
-        return bool(
-            super().available
-            and self.coordinator.http_state_owned
-            and data is not None
-            and data.available is True
-            and data.freshness == "fresh"
-            and data.state is not None
-        )
+        return super().available and self.coordinator.current_readings is not None
 
     @property
     def extra_state_attributes(self) -> JsonObject:

@@ -187,7 +187,7 @@ class ApiClientTests(unittest.IsolatedAsyncioTestCase):
 
     def test_number_controls_validate_bounds_without_coercion(self) -> None:
         for backend in ("legacy_ble", "quick_connect"):
-            for control in CONTROLS.number_controls(backend):
+            for control in CONTROLS.NUMBER_CONTROLS[backend]:
                 with self.subTest(backend=backend, control=control.key):
                     self.assertEqual(control.validate(control.minimum), control.minimum)
                     self.assertEqual(
@@ -493,7 +493,10 @@ class ApiClientTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertNotIn("number", CONTROLS.entity_platforms(devices[0]))
         self.assertEqual(
-            CONTROLS.QUICKCONNECT_NUMBER_RANGES,
+            {
+                control.key: (control.minimum, control.maximum, control.step)
+                for control in CONTROLS.NUMBER_CONTROLS["quick_connect"]
+            },
             {
                 "automatic_temperature": (90, 120, 1),
                 "automatic_humidity": (30, 80, 1),

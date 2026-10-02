@@ -1,20 +1,12 @@
 """Mutually exclusive cloud mode controls."""
 
-from types import MappingProxyType
-
 from homeassistant.components.switch import SwitchEntity
 from homeassistant.core import HomeAssistant
-from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
-from .controls import QUICKCONNECT_MODES, entity_keys
+from .controls import MODE_LABELS, QUICKCONNECT_MODES, entity_keys
 from .coordinator import GafctlConfigEntry, GafctlCoordinator
-from .entity import GafctlEntity
-from .models import ApiError
-
-MODES = MappingProxyType(
-    {"automatic": "Automatic mode", "timer": "Timer mode", "manual": "Manual mode"}
-)
+from .entity import GafctlEntity, translate_api_errors
 
 
 async def async_setup_entry(
@@ -25,8 +17,8 @@ async def async_setup_entry(
     coordinator = entry.runtime_data
     keys = entity_keys(coordinator.device).get("switch", set())
     async_add_entities(
-        GafctlModeSwitch(coordinator, entry, mode, name)
-        for mode, name in MODES.items()
+        GafctlModeSwitch(coordinator, entry, mode, f"{label} mode")
+        for mode, label in MODE_LABELS.items()
         if f"{mode}_mode" in keys
     )
 
@@ -60,7 +52,5 @@ class GafctlModeSwitch(GafctlEntity, SwitchEntity):
         await self._set_mode("off", only_if_current=self._mode)
 
     async def _set_mode(self, mode: str, *, only_if_current: str | None = None) -> None:
-        try:
+        with translate_api_errors():
             await self.coordinator.async_set_mode(mode, only_if_current=only_if_current)
-        except ApiError as error:
-            raise HomeAssistantError(str(error)) from error

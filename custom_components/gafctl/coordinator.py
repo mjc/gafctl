@@ -20,7 +20,7 @@ from .controls import (
     entity_keys,
     preset_matches,
 )
-from .models import ApiError, Device, DeviceState, JsonObject, Readings
+from .models import ApiError, Backend, Device, DeviceState, JsonObject, Readings
 
 LOGGER = logging.getLogger(__name__)
 
@@ -83,21 +83,14 @@ class GafctlCoordinator(DataUpdateCoordinator[DeviceState]):
             await self.client.refresh(self.device_id, current.backend)
             await self._async_http_state_device()
             await self.async_refresh()
-            if not (
-                self.last_update_success
-                and self.http_state_owned
-                and self.device.read_state
-                and self.data
-                and self.data.available is True
-                and self.data.freshness == "fresh"
-            ):
+            if self.current_readings is None:
                 raise ApiError(
                     "device was refreshed, but current HTTP readings are unavailable"
                 )
 
     async def _async_http_state_device(self) -> Device:
         current = await self._async_resolve_device()
-        if current is None or not current.read_state or not self.http_state_owned:
+        if current is None or not current.read_state or not self.http_owned:
             raise ApiError("this device does not own HTTP readings")
         return current
 
@@ -185,7 +178,7 @@ class GafctlCoordinator(DataUpdateCoordinator[DeviceState]):
             control_error = error
         try:
             await self.async_refresh()
-            if not self.fresh_readings:
+            if self.current_readings is None:
                 raise ApiError("current state refresh failed")
         except Exception as error:
             if control_error is not None:
@@ -196,57 +189,44 @@ class GafctlCoordinator(DataUpdateCoordinator[DeviceState]):
         if control_error is not None:
             raise control_error
 
-    def _require_control(self, capability: str, backend: str) -> Readings:
-        if not (
-            self.fresh_readings
-            and self.device.backend == backend
-            and self.supports(capability)
-        ):
-            raise ApiError("the selected device has no current control")
-        state = self.data.state if self.data else None
+    def _require_control(self, capability: str, backend: Backend) -> Readings:
+        state = self.control_readings(capability, backend)
         if state is None:
-            raise ApiError("the selected device has no current readings")
+            raise ApiError("the selected device has no current control")
         return state
 
     @property
-    def fresh_readings(self) -> bool:
-        return bool(
+    def current_readings(self) -> Readings | None:
+        data = self.data
+        if not (
             self.last_update_success
-            and self.http_state_owned
+            and self.http_owned
             and self.device.read_state
-            and self.data
-            and self.data.available
-            and self.data.freshness == "fresh"
-            and self.data.state is not None
-        )
+            and data
+            and data.available
+            and data.freshness == "fresh"
+        ):
+            return None
+        return data.state
+
+    def control_readings(self, capability: str, backend: Backend) -> Readings | None:
+        if self.device.backend != backend or not self.supports(capability):
+            return None
+        return self.current_readings
 
     @property
     def mode_control_available(self) -> bool:
-        return (
-            self.fresh_readings
-            and self.supports("quick_connect_mode")
-            and self.device.backend == "quick_connect"
-        )
+        return self.control_readings("quick_connect_mode", "quick_connect") is not None
 
     def number_control_available(self, control: NumberControl) -> bool:
-        return bool(
-            self.fresh_readings
-            and self.device.backend == control.backend
-            and self.supports(control.capability)
-            and self.data is not None
-            and self.data.state is not None
-            and control.current_supported(self.data.state)
-        )
+        state = self.control_readings(control.capability, control.backend)
+        return state is not None and control.current_supported(state)
 
     def supports(self, command_kind: str) -> bool:
-        return self.http_command_owned and command_kind in self.device.commands
+        return self.http_owned and command_kind in self.device.commands
 
     @property
-    def http_state_owned(self) -> bool:
-        return self.device.owner == "http"
-
-    @property
-    def http_command_owned(self) -> bool:
+    def http_owned(self) -> bool:
         return self.device.owner == "http"
 
 

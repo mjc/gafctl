@@ -9,20 +9,27 @@ from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
-from .controls import entity_keys, threshold_control_preset, timer_control_preset
+from .controls import (
+    MODE_LABELS,
+    THRESHOLDS,
+    TIMER_PRESETS,
+    entity_keys,
+    threshold_control_preset,
+    timer_control_preset,
+)
 from .coordinator import GafctlConfigEntry, GafctlCoordinator
-from .entity import GafctlEntity
-from .models import ApiError
+from .entity import GafctlEntity, translate_api_errors
 
-THRESHOLD_PRESETS = MappingProxyType(
+THRESHOLD_OPTIONS = MappingProxyType(
     {
-        "105.0°F / 30.0%": "automatic105_f30_percent",
-        "105.1°F / 30.1%": "automatic105_1_f30_1_percent",
+        f"{temperature:.1f}°F / {humidity:.1f}%": preset
+        for preset, (temperature, humidity) in THRESHOLDS.items()
     }
 )
-TIMER_PRESETS = MappingProxyType(
-    {"Clear timer": "timer_clear", "1 minute": "timer_one_minute"}
+TIMER_OPTIONS = MappingProxyType(
+    {label: preset for preset, (label, _) in TIMER_PRESETS.items()}
 )
+MODE_OPTIONS = MappingProxyType({label: mode for mode, label in MODE_LABELS.items()})
 
 
 async def async_setup_entry(
@@ -41,10 +48,10 @@ async def async_setup_entry(
                     entry,
                     "automatic_thresholds",
                     "Automatic thresholds",
-                    THRESHOLD_PRESETS,
+                    THRESHOLD_OPTIONS,
                 ),
                 GafctlControlSelect(
-                    coordinator, entry, "timer", "Fan timer", TIMER_PRESETS
+                    coordinator, entry, "timer", "Fan timer", TIMER_OPTIONS
                 ),
             )
         )
@@ -55,12 +62,7 @@ async def async_setup_entry(
                 entry,
                 "mode",
                 "Mode",
-                {
-                    "Off": "off",
-                    "Automatic": "automatic",
-                    "Timer": "timer",
-                    "Manual": "manual",
-                },
+                MODE_OPTIONS,
             )
         )
     async_add_entities(entities)
@@ -90,8 +92,10 @@ class GafctlControlSelect(GafctlEntity, SelectEntity):
         command_kind = "quick_connect_mode" if self._key == "mode" else "legacy_preset"
         return bool(
             super().available
-            and self.coordinator.fresh_readings
-            and self.coordinator.supports(command_kind)
+            and self.coordinator.control_readings(
+                command_kind, self.coordinator.device.backend
+            )
+            is not None
         )
 
     @property
@@ -115,10 +119,8 @@ class GafctlControlSelect(GafctlEntity, SelectEntity):
         value = self._presets.get(option)
         if value is None:
             raise HomeAssistantError("Unsupported fan control option")
-        try:
+        with translate_api_errors():
             if self._key == "mode":
                 await self.coordinator.async_set_mode(value)
             else:
                 await self.coordinator.async_set_preset(value)
-        except ApiError as error:
-            raise HomeAssistantError(str(error)) from error

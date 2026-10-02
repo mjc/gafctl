@@ -36,7 +36,7 @@ from custom_components.gafctl import sensor as gafctl_sensor
 from custom_components.gafctl import switch as gafctl_switch
 from custom_components.gafctl.button import GafctlRefreshButton
 from custom_components.gafctl.config_flow import GafctlConfigFlow
-from custom_components.gafctl.controls import number_controls
+from custom_components.gafctl.controls import NUMBER_CONTROLS
 from custom_components.gafctl.models import (
     ApiError,
     ControlOutcomeUnknown,
@@ -622,7 +622,7 @@ class RegistryTests(unittest.IsolatedAsyncioTestCase):
             submit = partial(coordinator.async_set_mode, "manual")
         elif operation == "number":
             submit = partial(
-                coordinator.async_set_number, number_controls("legacy_ble")[0], 110
+                coordinator.async_set_number, NUMBER_CONTROLS["legacy_ble"][0], 110
             )
         else:
             submit = partial(coordinator.async_set_preset, "timer_one_minute")
