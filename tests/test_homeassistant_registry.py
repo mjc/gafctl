@@ -524,13 +524,13 @@ class RegistryTests(unittest.IsolatedAsyncioTestCase):
             }
             schemas[topic.split("/")[1]].DISCOVERY_SCHEMA(config)
             template = config.get("value_template")
-            if not template or topic.endswith("/control_result/config"):
+            if not template or topic.endswith("_control_result/config"):
                 continue
             rendered = [Template(template, self.hass).async_render({"value_json": payload})
                         for payload in (initial, expired, partial, normal)]
-            if topic.endswith("/automatic_temperature_threshold/config"):
+            if topic.endswith("_automatic_temperature_threshold/config"):
                 self.assertEqual(rendered, [None, None, None, 105.0])
-            if topic.endswith("/freshness/config"):
+            if topic.endswith("_freshness/config"):
                 self.assertEqual(rendered, ["unknown", "stale", "fresh", "fresh"])
 
     async def test_generated_mqtt_commands_preserve_types_and_switch_conditions(self):
@@ -552,11 +552,11 @@ class RegistryTests(unittest.IsolatedAsyncioTestCase):
                 for value in (True, "garbage", 90.5, None):
                     self.assertIsNone(render(value)["command"][value_field])
             elif domain == "switch":
-                mode = topic.split("/")[-2].removesuffix("_mode")
+                mode = config["unique_id"].rsplit("_", 2)[-2]
                 self.assertEqual(render("ON")["command"], {"kind": "quick_connect_mode", "mode": mode})
                 self.assertEqual(render("OFF")["command"], {"kind": "quick_connect_conditional_off", "only_if_current": mode})
                 self.assertIsNone(render("invalid")["command"])
-            elif topic.endswith("/refresh/config"):
+            elif topic.endswith("_refresh/config"):
                 self.assertEqual(set(render("PRESS")), {"request_id", "issued_at_unix_ms"})
                 self.assertEqual(len(config["availability"]), 1)
 
@@ -567,14 +567,14 @@ class RegistryTests(unittest.IsolatedAsyncioTestCase):
         for topic, config in json.loads(Path(fixture).read_text()):
             render = lambda settings: Template(config["value_template"], self.hass).async_render({"value_json": {"state": {"settings": settings}}})
             if "/binary_sensor/" in topic and topic.endswith("_mode/config"):
-                mode = topic.split("/")[-2].removesuffix("_mode")
+                mode = config["unique_id"].rsplit("_", 2)[-2]
                 self.assertEqual(render({"mode": mode}), "ON")
                 self.assertEqual(render({"mode": "off"}), "OFF")
                 self.assertIsNone(render({"mode": "conflicting"}))
                 self.assertIsNone(render({}))
-            elif topic.endswith("/automatic_thresholds/config"):
+            elif topic.endswith("_automatic_thresholds/config"):
                 self.assertEqual(render({"mode": "timer", "automatic_temperature_tenths_f": 1050, "automatic_humidity_tenths_percent": 300}), "automatic105_f30_percent")
-            elif "/select/" in topic and topic.endswith("/timer/config"):
+            elif "/select/" in topic and topic.endswith("_timer/config"):
                 self.assertEqual(render({"mode": "automatic", "timer_remaining_minutes": 0, "timer_original_minutes": 0}), "timer_clear")
                 self.assertIsNone(render({"timer_remaining_minutes": 0, "timer_original_minutes": 1}))
 

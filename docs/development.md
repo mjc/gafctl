@@ -15,8 +15,14 @@ cargo run --no-default-features --features cli --bin gafctl -- ble scan
 cargo run --no-default-features --features cli --bin gafctl -- devices --format json
 ```
 
-Start the server with `cargo run -- server` or `gafctl-server`, using the
-configuration described in the deployment guide.
+Start the server directly with `cargo run --bin gafctl-server --`, using the
+configuration described in the deployment guide. To exercise CLI delegation,
+build both executables first:
+
+```sh
+cargo build --bins
+./target/debug/gafctl server
+```
 
 If `DEVENV_ROOT` points to this repository, run Cargo commands directly. If it
 points elsewhere, start a fresh command from this repository's root.
