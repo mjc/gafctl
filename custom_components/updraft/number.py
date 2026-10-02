@@ -174,7 +174,7 @@ class UpdraftNumber(CoordinatorEntity[UpdraftCoordinator], NumberEntity):
             ):
                 raise HomeAssistantError("The selected device has no fresh state")
             try:
-                command = self._command(state, int(value))
+                command = self._command(int(value))
                 await self.coordinator.client.set_control(
                     self.coordinator.device_id, command
                 )
@@ -198,29 +198,17 @@ class UpdraftNumber(CoordinatorEntity[UpdraftCoordinator], NumberEntity):
                     "Control was confirmed but state refresh failed"
                 )
 
-    def _command(self, state: dict[str, Any], value: int) -> dict[str, Any]:
+    def _command(self, value: int) -> dict[str, Any]:
         key = self._control["key"]
         if self.coordinator.device["backend"] == "legacy_ble":
             kind, field = LEGACY_NUMBER_COMMANDS[key]
-            return {"kind": kind, field: value}
-        if key == "timer_duration":
-            return {
-                "kind": "quick_connect_timer_duration",
-                "minutes": value,
-            }
-        temperature = state.get("automatic_temperature_f")
-        humidity = state.get("automatic_humidity_percent")
-        if key == "automatic_temperature":
-            temperature = value
         else:
-            humidity = value
-        if type(temperature) is not int or type(humidity) is not int:
-            raise HomeAssistantError("Current targets are missing or invalid")
-        return {
-            "kind": "quick_connect_targets",
-            "temperature_f": temperature,
-            "humidity_percent": humidity,
-        }
+            kind, field = {
+                "automatic_temperature": ("quick_connect_automatic_temperature", "temperature_f"),
+                "automatic_humidity": ("quick_connect_automatic_humidity", "humidity_percent"),
+                "timer_duration": ("quick_connect_timer_duration", "minutes"),
+            }[key]
+        return {"kind": kind, field: value}
 
     @property
     def device_info(self) -> dr.DeviceInfo:

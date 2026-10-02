@@ -194,6 +194,25 @@ QuickConnect commands:
 ```
 
 ```json
+{"kind":"quick_connect_automatic_temperature","temperature_f":110}
+```
+
+```json
+{"kind":"quick_connect_automatic_humidity","humidity_percent":40}
+```
+
+```json
+{"kind":"quick_connect_conditional_off","only_if_current":"automatic"}
+```
+
+Single-target commands preserve the other target from a fresh backend read under
+the device transaction. Conditional off changes the mode only when the fresh
+backend mode matches `only_if_current`; another known mode confirms without a
+write. Unknown or conflicting mode prevents the write. HA number controls and
+mode switches use these commands.
+
+
+```json
 {"kind":"quick_connect_timer_duration","minutes":90}
 ```
 

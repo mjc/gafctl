@@ -296,6 +296,15 @@ def _control_command(command: str | Mapping[str, Any]) -> dict[str, Any]:
     if kind == "quick_connect_mode" and set(command) == {"kind", "mode"}:
         if isinstance(command["mode"], str) and command["mode"] in QUICKCONNECT_MODES:
             return dict(command)
+    if kind == "quick_connect_conditional_off" and set(command) == {"kind", "only_if_current"}:
+        if isinstance(command["only_if_current"], str) and command["only_if_current"] in QUICKCONNECT_MODES:
+            return dict(command)
+    for kind_name, field, minimum, maximum in (
+        ("quick_connect_automatic_temperature", "temperature_f", 90, 120),
+        ("quick_connect_automatic_humidity", "humidity_percent", 30, 80),
+    ):
+        if kind == kind_name and set(command) == {"kind", field} and _integer_in_range(command[field], minimum, maximum):
+            return dict(command)
     if kind == "quick_connect_targets" and set(command) == {
         "kind",
         "temperature_f",

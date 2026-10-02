@@ -16,7 +16,10 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers import device_registry as dr, entity_registry as er
 from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers.template import Template
-from homeassistant.components.mqtt import sensor as mqtt_sensor, select as mqtt_select
+from homeassistant.components.mqtt import (
+    sensor as mqtt_sensor, select as mqtt_select, number as mqtt_number,
+    binary_sensor as mqtt_binary, button as mqtt_button, switch as mqtt_switch,
+)
 
 from custom_components.updraft import UpdraftCoordinator
 from custom_components.updraft.button import UpdraftRefreshButton
@@ -139,7 +142,7 @@ class RegistryTests(unittest.IsolatedAsyncioTestCase):
         coordinator = UpdraftCoordinator(self.hass, client, selected, entry)
         coordinator.async_set_updated_data(old)
         await coordinator.async_set_mode("off", only_if_current="automatic")
-        client.set_control.assert_awaited_once_with("configured", {"kind": "quick_connect_mode", "mode": "off"})
+        client.set_control.assert_awaited_once_with("configured", {"kind": "quick_connect_conditional_off", "only_if_current": "automatic"})
         self.assertEqual(coordinator.data, new)
         client.set_control.reset_mock()
         client.fetch_state.side_effect = None
@@ -207,6 +210,23 @@ class RegistryTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(HomeAssistantError):
                 await temperature.async_set_native_value(invalid)
         self.assertEqual(client.set_control.await_count, 1)
+
+    async def test_cloud_number_sends_only_selected_target(self):
+        entry = await self.entry()
+        selected = device() | {"backend": "quick_connect", "commands": [{"kind": "quick_connect_targets"}]}
+        old = {"available": True, "freshness": "fresh", "state": {"automatic_temperature_f": 105, "automatic_humidity_percent": 40}}
+        new = old | {"state": {"automatic_temperature_f": 110, "automatic_humidity_percent": 45}}
+        self.hass.config_entries.async_update_entry(entry, data=dict(entry.data) | {"backend": "quick_connect"})
+        client = AsyncMock()
+        client.fetch_devices.return_value = [selected]
+        client.fetch_state.side_effect = [old, new]
+        coordinator = UpdraftCoordinator(self.hass, client, selected, entry)
+        coordinator.async_set_updated_data(old)
+        self.hass.data["updraft"] = {entry.entry_id: coordinator}
+        numbers = []
+        await updraft_number.async_setup_entry(self.hass, entry, numbers.extend)
+        await numbers[0].async_set_native_value(110)
+        client.set_control.assert_awaited_once_with("configured", {"kind": "quick_connect_automatic_temperature", "temperature_f": 110})
 
     async def asyncSetUp(self):
         self.directory = tempfile.TemporaryDirectory()
@@ -403,8 +423,11 @@ class RegistryTests(unittest.IsolatedAsyncioTestCase):
         partial = normal | {"state": {"temperature_f": None, "humidity_percent": None, "diagnostics": None,
                                      "settings": {"automatic_temperature_tenths_f": None, "automatic_humidity_tenths_percent": None}}}
         for topic, config in configs:
-            schema = mqtt_select.DISCOVERY_SCHEMA if "/select/" in topic else mqtt_sensor.DISCOVERY_SCHEMA
-            schema(config)
+            schemas = {
+                "sensor": mqtt_sensor, "select": mqtt_select, "number": mqtt_number,
+                "binary_sensor": mqtt_binary, "button": mqtt_button, "switch": mqtt_switch,
+            }
+            schemas[topic.split("/")[1]].DISCOVERY_SCHEMA(config)
             template = config.get("value_template")
             if not template or topic.endswith("/control_result/config"):
                 continue
@@ -414,6 +437,51 @@ class RegistryTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(rendered, [None, None, None, 105.0])
             if topic.endswith("/freshness/config"):
                 self.assertEqual(rendered, ["unknown", "stale", "fresh", "fresh"])
+
+    async def test_generated_mqtt_commands_preserve_types_and_switch_conditions(self):
+        fixture = os.environ.get("UPDRAFT_DISCOVERY_FIXTURE")
+        if not fixture:
+            self.skipTest("set UPDRAFT_DISCOVERY_FIXTURE to generated discovery configs")
+        for topic, config in json.loads(Path(fixture).read_text()):
+            template = config.get("command_template")
+            if not template:
+                continue
+            render = lambda value: json.loads(Template(template, self.hass).async_render({"value": value}, parse_result=False))
+            domain = topic.split("/")[1]
+            if domain == "number":
+                valid = render(config["min"])
+                self.assertTrue(valid["request_id"])
+                self.assertGreater(valid["issued_at_unix_ms"], 0)
+                value_field = next(key for key in valid["command"] if key != "kind")
+                self.assertEqual(valid["command"][value_field], config["min"])
+                for value in (True, "garbage", 90.5, None):
+                    self.assertIsNone(render(value)["command"][value_field])
+            elif domain == "switch":
+                mode = topic.split("/")[-2].removesuffix("_mode")
+                self.assertEqual(render("ON")["command"], {"kind": "quick_connect_mode", "mode": mode})
+                self.assertEqual(render("OFF")["command"], {"kind": "quick_connect_conditional_off", "only_if_current": mode})
+                self.assertIsNone(render("invalid")["command"])
+            elif topic.endswith("/refresh/config"):
+                self.assertEqual(set(render("PRESS")), {"request_id", "issued_at_unix_ms"})
+                self.assertEqual(len(config["availability"]), 1)
+
+    async def test_generated_mqtt_binary_modes_and_presets_preserve_unknown(self):
+        fixture = os.environ.get("UPDRAFT_DISCOVERY_FIXTURE")
+        if not fixture:
+            self.skipTest("set UPDRAFT_DISCOVERY_FIXTURE to generated discovery configs")
+        for topic, config in json.loads(Path(fixture).read_text()):
+            render = lambda settings: Template(config["value_template"], self.hass).async_render({"value_json": {"state": {"settings": settings}}})
+            if "/binary_sensor/" in topic and topic.endswith("_mode/config"):
+                mode = topic.split("/")[-2].removesuffix("_mode")
+                self.assertEqual(render({"mode": mode}), "ON")
+                self.assertEqual(render({"mode": "off"}), "OFF")
+                self.assertIsNone(render({"mode": "conflicting"}))
+                self.assertIsNone(render({}))
+            elif topic.endswith("/automatic_thresholds/config"):
+                self.assertEqual(render({"mode": "timer", "automatic_temperature_tenths_f": 1050, "automatic_humidity_tenths_percent": 300}), "automatic105_f30_percent")
+            elif "/select/" in topic and topic.endswith("/timer/config"):
+                self.assertEqual(render({"mode": "automatic", "timer_remaining_minutes": 0, "timer_original_minutes": 0}), "timer_clear")
+                self.assertIsNone(render({"timer_remaining_minutes": 0, "timer_original_minutes": 1}))
 
 
 if __name__ == "__main__":

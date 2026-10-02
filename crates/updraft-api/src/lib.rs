@@ -6,5 +6,5 @@ mod response;
 
 pub use control::{CommandId, ControlPreset, ControlRequest, is_fresh_at, unix_millis};
 pub use device::*;
-pub use legacy::{LegacyHumidityPercent, LegacyTemperatureF, LegacyTimerMinutes};
+pub use legacy::{AutomaticHumidityPercent, AutomaticTemperatureF, LegacyTimerMinutes};
 pub use response::*;

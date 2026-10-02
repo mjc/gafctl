@@ -1,17 +1,17 @@
 use serde::{Deserialize, Serialize};
 
-/// Original controller target in whole degrees Fahrenheit (90–120).
+/// Automatic target in whole degrees Fahrenheit (90–120).
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(try_from = "u16", into = "u16")]
-pub struct LegacyTemperatureF(u16);
+pub struct AutomaticTemperatureF(u16);
 
-impl LegacyTemperatureF {
+impl AutomaticTemperatureF {
     pub const fn value(self) -> u16 {
         self.0
     }
 }
 
-impl TryFrom<u16> for LegacyTemperatureF {
+impl TryFrom<u16> for AutomaticTemperatureF {
     type Error = &'static str;
 
     fn try_from(value: u16) -> Result<Self, Self::Error> {
@@ -22,24 +22,24 @@ impl TryFrom<u16> for LegacyTemperatureF {
     }
 }
 
-impl From<LegacyTemperatureF> for u16 {
-    fn from(value: LegacyTemperatureF) -> Self {
+impl From<AutomaticTemperatureF> for u16 {
+    fn from(value: AutomaticTemperatureF) -> Self {
         value.0
     }
 }
 
-/// Original controller humidity target in whole percent (30–80).
+/// Automatic humidity target in whole percent (30–80).
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(try_from = "u16", into = "u16")]
-pub struct LegacyHumidityPercent(u16);
+pub struct AutomaticHumidityPercent(u16);
 
-impl LegacyHumidityPercent {
+impl AutomaticHumidityPercent {
     pub const fn value(self) -> u16 {
         self.0
     }
 }
 
-impl TryFrom<u16> for LegacyHumidityPercent {
+impl TryFrom<u16> for AutomaticHumidityPercent {
     type Error = &'static str;
 
     fn try_from(value: u16) -> Result<Self, Self::Error> {
@@ -50,8 +50,8 @@ impl TryFrom<u16> for LegacyHumidityPercent {
     }
 }
 
-impl From<LegacyHumidityPercent> for u16 {
-    fn from(value: LegacyHumidityPercent) -> Self {
+impl From<AutomaticHumidityPercent> for u16 {
+    fn from(value: AutomaticHumidityPercent) -> Self {
         value.0
     }
 }

@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::control::ControlPreset;
-use crate::{LegacyHumidityPercent, LegacyTemperatureF, LegacyTimerMinutes};
+use crate::{AutomaticHumidityPercent, AutomaticTemperatureF, LegacyTimerMinutes};
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(try_from = "uuid::Uuid", into = "uuid::Uuid")]
@@ -111,10 +111,10 @@ pub enum DeviceCommand {
         preset: ControlPreset,
     },
     LegacyAutomaticTemperature {
-        temperature_f: LegacyTemperatureF,
+        temperature_f: AutomaticTemperatureF,
     },
     LegacyAutomaticHumidity {
-        humidity_percent: LegacyHumidityPercent,
+        humidity_percent: AutomaticHumidityPercent,
     },
     LegacyTimer {
         minutes: LegacyTimerMinutes,
@@ -122,9 +122,18 @@ pub enum DeviceCommand {
     QuickConnectMode {
         mode: QuickConnectMode,
     },
+    QuickConnectConditionalOff {
+        only_if_current: QuickConnectMode,
+    },
     QuickConnectTargets {
         temperature_f: u16,
         humidity_percent: u16,
+    },
+    QuickConnectAutomaticTemperature {
+        temperature_f: AutomaticTemperatureF,
+    },
+    QuickConnectAutomaticHumidity {
+        humidity_percent: AutomaticHumidityPercent,
     },
     QuickConnectTimerDuration {
         minutes: u16,
@@ -218,8 +227,15 @@ impl DeviceCapabilities {
                 CommandCapability::LegacyAutomaticHumidity
             }
             DeviceCommand::LegacyTimer { .. } => CommandCapability::LegacyTimer,
-            DeviceCommand::QuickConnectMode { .. } => CommandCapability::QuickConnectMode,
-            DeviceCommand::QuickConnectTargets { .. } => CommandCapability::QuickConnectTargets,
+            DeviceCommand::QuickConnectMode { .. }
+            | DeviceCommand::QuickConnectConditionalOff { .. } => {
+                CommandCapability::QuickConnectMode
+            }
+            DeviceCommand::QuickConnectTargets { .. }
+            | DeviceCommand::QuickConnectAutomaticTemperature { .. }
+            | DeviceCommand::QuickConnectAutomaticHumidity { .. } => {
+                CommandCapability::QuickConnectTargets
+            }
             DeviceCommand::QuickConnectTimerDuration { .. } => {
                 CommandCapability::QuickConnectTimerDuration
             }

@@ -451,7 +451,7 @@ impl DeviceRegistry {
             .get(id)
             .ok_or(DeviceRegistryError::UnknownDevice)?;
         let capability = match command {
-            QuickConnectCommand::SetMode { .. } => {
+            QuickConnectCommand::SetMode { .. } | QuickConnectCommand::ClearMode { .. } => {
                 crate::device::CommandCapability::QuickConnectMode
             }
             QuickConnectCommand::SetAutomaticTargets { .. } => {
@@ -682,7 +682,10 @@ impl DeviceRegistry {
             (
                 DeviceBackend::QuickConnect,
                 DeviceCommand::QuickConnectMode { .. }
+                | DeviceCommand::QuickConnectConditionalOff { .. }
                 | DeviceCommand::QuickConnectTargets { .. }
+                | DeviceCommand::QuickConnectAutomaticTemperature { .. }
+                | DeviceCommand::QuickConnectAutomaticHumidity { .. }
                 | DeviceCommand::QuickConnectTimerDuration { .. },
             ) if descriptor.capabilities.supports(command) => Ok(DeviceBackend::QuickConnect),
             _ => Err(DeviceRegistryError::UnsupportedCommand),

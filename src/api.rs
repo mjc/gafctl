@@ -353,7 +353,7 @@ impl ApiState {
         let initial_state = self.mqtt_state_snapshot().await?;
         let bridge = crate::mqtt::start(config, initial_state);
         self.mqtt_updates = Some(bridge.state_updates);
-        tokio::spawn(process_mqtt_controls(self.clone(), bridge.control_requests));
+        tokio::spawn(process_mqtt_requests(self.clone(), bridge.device_requests));
         Ok(())
     }
 
@@ -1160,13 +1160,13 @@ fn v2_request_is_fresh_at(issued_at_unix_ms: u64, now: Option<u64>) -> bool {
 fn quickconnect_command(command: DeviceCommand) -> Option<QuickConnectCommand> {
     match command {
         DeviceCommand::QuickConnectMode { mode } => Some(QuickConnectCommand::SetMode {
-            mode: match mode {
-                crate::device::QuickConnectMode::Off => QuickConnectCommandMode::Off,
-                crate::device::QuickConnectMode::Automatic => QuickConnectCommandMode::Automatic,
-                crate::device::QuickConnectMode::Timer => QuickConnectCommandMode::Timer,
-                crate::device::QuickConnectMode::Manual => QuickConnectCommandMode::Manual,
-            },
+            mode: cloud_mode(mode),
         }),
+        DeviceCommand::QuickConnectConditionalOff { only_if_current } => {
+            Some(QuickConnectCommand::ClearMode {
+                mode: cloud_mode(only_if_current),
+            })
+        }
         DeviceCommand::QuickConnectTargets {
             temperature_f,
             humidity_percent,
@@ -1174,6 +1174,18 @@ fn quickconnect_command(command: DeviceCommand) -> Option<QuickConnectCommand> {
             temperature_f: Some(temperature_f),
             humidity_percent: Some(humidity_percent),
         }),
+        DeviceCommand::QuickConnectAutomaticTemperature { temperature_f } => {
+            Some(QuickConnectCommand::SetAutomaticTargets {
+                temperature_f: Some(temperature_f.value()),
+                humidity_percent: None,
+            })
+        }
+        DeviceCommand::QuickConnectAutomaticHumidity { humidity_percent } => {
+            Some(QuickConnectCommand::SetAutomaticTargets {
+                temperature_f: None,
+                humidity_percent: Some(humidity_percent.value()),
+            })
+        }
         DeviceCommand::QuickConnectTimerDuration { minutes } => {
             Some(QuickConnectCommand::SetTimerDuration {
                 duration_minutes: minutes,
@@ -1183,6 +1195,15 @@ fn quickconnect_command(command: DeviceCommand) -> Option<QuickConnectCommand> {
         | DeviceCommand::LegacyAutomaticTemperature { .. }
         | DeviceCommand::LegacyAutomaticHumidity { .. }
         | DeviceCommand::LegacyTimer { .. } => None,
+    }
+}
+
+const fn cloud_mode(mode: crate::device::QuickConnectMode) -> QuickConnectCommandMode {
+    match mode {
+        crate::device::QuickConnectMode::Off => QuickConnectCommandMode::Off,
+        crate::device::QuickConnectMode::Automatic => QuickConnectCommandMode::Automatic,
+        crate::device::QuickConnectMode::Timer => QuickConnectCommandMode::Timer,
+        crate::device::QuickConnectMode::Manual => QuickConnectCommandMode::Manual,
     }
 }
 
@@ -1223,39 +1244,81 @@ async fn health() -> Json<HealthResponse> {
 }
 
 #[cfg(feature = "mqtt")]
-async fn process_mqtt_controls(
+async fn process_mqtt_requests(
     state: ApiState,
-    controls: mpsc::Receiver<crate::mqtt::MqttControlWork>,
+    controls: mpsc::Receiver<crate::mqtt::MqttDeviceWork>,
 ) {
-    control_requests(controls)
+    device_requests(controls)
         .for_each_concurrent(Some(crate::mqtt::CONTROL_QUEUE_CAPACITY), |work| {
-            reply_to_device_control(&state, work)
+            reply_to_device_request(&state, work)
         })
         .await;
 }
 
 #[cfg(feature = "mqtt")]
-fn control_requests(
-    controls: mpsc::Receiver<crate::mqtt::MqttControlWork>,
-) -> impl Stream<Item = crate::mqtt::MqttControlWork> {
-    stream::unfold(controls, receive_control_request)
+fn device_requests(
+    controls: mpsc::Receiver<crate::mqtt::MqttDeviceWork>,
+) -> impl Stream<Item = crate::mqtt::MqttDeviceWork> {
+    stream::unfold(controls, receive_device_request)
 }
 
 #[cfg(feature = "mqtt")]
-async fn receive_control_request(
-    mut controls: mpsc::Receiver<crate::mqtt::MqttControlWork>,
+async fn receive_device_request(
+    mut controls: mpsc::Receiver<crate::mqtt::MqttDeviceWork>,
 ) -> Option<(
-    crate::mqtt::MqttControlWork,
-    mpsc::Receiver<crate::mqtt::MqttControlWork>,
+    crate::mqtt::MqttDeviceWork,
+    mpsc::Receiver<crate::mqtt::MqttDeviceWork>,
 )> {
     let work = controls.recv().await?;
     Some((work, controls))
 }
 
 #[cfg(feature = "mqtt")]
-async fn reply_to_device_control(state: &ApiState, work: crate::mqtt::MqttControlWork) {
-    let response = process_v2_control_request(state, work.device_id, work.request).await;
+async fn reply_to_device_request(state: &ApiState, work: crate::mqtt::MqttDeviceWork) {
+    let response = match work.request {
+        crate::mqtt::MqttRequest::Control(request) => crate::mqtt::MqttReply::Control(
+            process_v2_control_request(state, work.device_id, request)
+                .await
+                .response,
+        ),
+        crate::mqtt::MqttRequest::Refresh(request) => {
+            process_mqtt_refresh(state, &work.device_id, request).await
+        }
+    };
     let _ = work.reply.send(response);
+}
+
+#[cfg(feature = "mqtt")]
+async fn process_mqtt_refresh(
+    state: &ApiState,
+    device_id: &DeviceId,
+    request: crate::mqtt::MqttRefreshRequest,
+) -> crate::mqtt::MqttReply {
+    use crate::mqtt::{MqttReply, RequestKind};
+    let request_id = request.request_id.as_str().to_owned();
+    if !v2_request_is_fresh(request.issued_at_unix_ms) {
+        return MqttReply::Rejected {
+            request_id,
+            status: "stale_request",
+            kind: RequestKind::Refresh,
+        };
+    }
+    match state.refresh_device(device_id).await {
+        Ok(response) => MqttReply::Refresh {
+            request_id,
+            status: response.status,
+        },
+        Err(status) => MqttReply::Rejected {
+            request_id,
+            status: match status {
+                StatusCode::NOT_FOUND => "unknown_device",
+                StatusCode::SERVICE_UNAVAILABLE => "backend_unavailable",
+                StatusCode::UNPROCESSABLE_ENTITY => "unsupported_read",
+                _ => "refresh_failed",
+            },
+            kind: RequestKind::Refresh,
+        },
+    }
 }
 
 #[derive(Serialize)]
@@ -1411,6 +1474,39 @@ mod tests {
     use tower::ServiceExt;
 
     use super::*;
+
+    #[cfg(feature = "mqtt")]
+    #[tokio::test]
+    async fn mqtt_refresh_uses_device_reader_and_rechecks_queued_freshness() {
+        use crate::mqtt::{MqttRefreshRequest, MqttReply};
+        let (state, id, fixture, server, path) = refresh_fixture().await;
+        let request = |request_id, issued_at_unix_ms| MqttRefreshRequest {
+            request_id: CommandId::parse(request_id).unwrap(),
+            issued_at_unix_ms,
+        };
+        let stale = process_mqtt_refresh(&state, &id, request("stale-read", 0)).await;
+        assert_eq!(
+            serde_json::to_value(stale).unwrap()["status"],
+            "stale_request"
+        );
+        assert_eq!(fixture.reads.load(std::sync::atomic::Ordering::SeqCst), 0);
+        fixture.release.notify_one();
+        let response = process_mqtt_refresh(
+            &state,
+            &id,
+            request("fresh-read", unix_millis(SystemTime::now()).unwrap()),
+        )
+        .await;
+        let MqttReply::Refresh { request_id, status } = response else {
+            unreachable!()
+        };
+        assert_eq!(request_id, "fresh-read");
+        assert_eq!(status, DeviceRefreshStatus::Fresh);
+        assert_eq!(fixture.reads.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert!(device_state_v2_data(&state, &id).await.unwrap().available);
+        server.abort();
+        fs::remove_file(path).unwrap();
+    }
 
     #[tokio::test(start_paused = true)]
     async fn refresh_deadline_releases_worker_without_starting_a_second_ble_owner() {
@@ -2670,7 +2766,7 @@ mod tests {
 
     #[test]
     #[cfg(feature = "mqtt")]
-    fn mqtt_control_requests_reject_unknown_fields() {
+    fn mqtt_device_requests_reject_unknown_fields() {
         assert!(
             serde_json::from_str::<crate::control::ControlRequest>(
                 r#"{"preset":"timer_clear","duration_minutes":999}"#

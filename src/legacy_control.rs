@@ -34,7 +34,10 @@ pub(crate) fn prepare_control(
                 ))
         }
         DeviceCommand::QuickConnectMode { .. }
+        | DeviceCommand::QuickConnectConditionalOff { .. }
         | DeviceCommand::QuickConnectTargets { .. }
+        | DeviceCommand::QuickConnectAutomaticTemperature { .. }
+        | DeviceCommand::QuickConnectAutomaticHumidity { .. }
         | DeviceCommand::QuickConnectTimerDuration { .. } => None,
     }
 }
@@ -46,7 +49,10 @@ pub(crate) const fn needs_threshold_read(command: DeviceCommand) -> bool {
         DeviceCommand::LegacyPreset { .. }
         | DeviceCommand::LegacyTimer { .. }
         | DeviceCommand::QuickConnectMode { .. }
+        | DeviceCommand::QuickConnectConditionalOff { .. }
         | DeviceCommand::QuickConnectTargets { .. }
+        | DeviceCommand::QuickConnectAutomaticTemperature { .. }
+        | DeviceCommand::QuickConnectAutomaticHumidity { .. }
         | DeviceCommand::QuickConnectTimerDuration { .. } => false,
     }
 }

@@ -116,14 +116,20 @@ class UpdraftCoordinator(DataUpdateCoordinator[dict]):
                     return
             control_error = None
             try:
-                await self.client.set_control(self.device_id, {"kind": "quick_connect_mode", "mode": mode})
+                command = (
+                    {"kind": "quick_connect_conditional_off", "only_if_current": only_if_current}
+                    if only_if_current is not None else {"kind": "quick_connect_mode", "mode": mode}
+                )
+                await self.client.set_control(self.device_id, command)
             except ApiError as error:
                 control_error = error
             await self.async_refresh()
             self._require_mode_control()
             if control_error is not None:
                 raise control_error
-            if self.data["state"].get("mode") != mode:
+            current = self.data["state"].get("mode")
+            matches = current == mode if only_if_current is None else current in QUICKCONNECT_MODES and current != only_if_current
+            if not matches:
                 raise ApiError("confirmed control has no matching current mode")
 
     def _require_mode_control(self) -> None:

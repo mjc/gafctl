@@ -2,6 +2,41 @@ use serde_json::json;
 use updraft_api::{CommandId, ControlStatus, DeviceControlV2Request, DeviceStateV2Response};
 
 #[test]
+fn cloud_single_target_commands_accept_only_whole_in_range_values() {
+    for (kind, field, minimum, maximum) in [
+        (
+            "quick_connect_automatic_temperature",
+            "temperature_f",
+            90,
+            120,
+        ),
+        (
+            "quick_connect_automatic_humidity",
+            "humidity_percent",
+            30,
+            80,
+        ),
+    ] {
+        for value in [minimum, maximum] {
+            let mut command = json!({"kind":kind});
+            command[field] = json!(value);
+            assert!(serde_json::from_value::<updraft_api::DeviceCommand>(command).is_ok());
+        }
+        for value in [
+            json!(minimum - 1),
+            json!(maximum + 1),
+            json!(1.5),
+            json!(true),
+            json!(null),
+        ] {
+            let mut command = json!({"kind":kind});
+            command[field] = value;
+            assert!(serde_json::from_value::<updraft_api::DeviceCommand>(command).is_err());
+        }
+    }
+}
+
+#[test]
 fn adjustable_ble_controls_accept_original_app_ranges_and_reject_other_values() {
     for (kind, field, minimum, maximum) in [
         ("legacy_automatic_temperature", "temperature_f", 90, 120),

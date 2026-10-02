@@ -1,9 +1,25 @@
+use super::RequestKind;
 use crate::device::{DeviceId, ProxyId};
 
 #[derive(Clone, Copy)]
 pub(super) struct Topics(pub(super) ProxyId);
 
 impl Topics {
+    pub(super) fn request_device(self, topic: &str) -> Option<(DeviceId, RequestKind)> {
+        let scoped = topic.strip_prefix(&format!("updraft/{}/", self.0))?;
+        [
+            ("/control/set", RequestKind::Control),
+            ("/refresh/set", RequestKind::Refresh),
+        ]
+        .into_iter()
+        .find_map(|(suffix, kind)| {
+            DeviceId::parse(scoped.strip_suffix(suffix)?.to_owned()).map(|id| (id, kind))
+        })
+    }
+
+    pub(super) fn refreshes(self) -> String {
+        format!("updraft/{}/+/refresh/set", self.0)
+    }
     pub(super) fn client_id(self) -> String {
         format!("updraft-{}", self.0)
     }
@@ -18,13 +34,6 @@ impl Topics {
 
     pub(super) fn controls(self) -> String {
         format!("updraft/{}/+/control/set", self.0)
-    }
-
-    pub(super) fn control_device(self, topic: &str) -> Option<DeviceId> {
-        topic
-            .strip_prefix(&format!("updraft/{}/", self.0))?
-            .strip_suffix("/control/set")
-            .and_then(|id| DeviceId::parse(id.to_owned()))
     }
 
     pub(super) fn identifier(self, id: &DeviceId) -> String {

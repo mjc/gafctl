@@ -94,8 +94,8 @@ original Bluetooth fan, using local ID `configured`.
 
 ## MQTT setup
 
-MQTT discovery can add the original Bluetooth fan's entities instead of the HTTP
-integration. Configure Home Assistant's MQTT integration first. The broker must
+MQTT discovery exposes applicable entities for both original Bluetooth and
+QuickConnect devices, using the same persistent proxy UUID and local device ID as HTTP. Configure Home Assistant's MQTT integration first. The broker must
 support **MQTT 5**.
 
 Set these variables in the service environment, using your own broker and account:
@@ -142,11 +142,11 @@ only these permissions:
 
 | Account | Operation | Topics |
 | --- | --- | --- |
-| Updraft | Publish | `updraft/+/availability`, `updraft/+/+/state`, `updraft/+/+/availability`, `updraft/+/+/control/result` |
+| Updraft | Publish | `updraft/+/availability`, `updraft/+/+/state`, `updraft/+/+/availability`, `updraft/+/+/control/result`, `updraft/+/+/refresh/result` |
 | Updraft | Publish discovery | `homeassistant/+/+/+/config` |
-| Updraft | Subscribe | `updraft/+/+/control/set` |
-| Home Assistant | Publish | `updraft/+/+/control/set` |
-| Home Assistant | Subscribe | `updraft/+/availability`, `updraft/+/+/state`, `updraft/+/+/availability`, `updraft/+/+/control/result`, `homeassistant/+/+/+/config` |
+| Updraft | Subscribe | `updraft/+/+/control/set`, `updraft/+/+/refresh/set` |
+| Home Assistant | Publish | `updraft/+/+/control/set`, `updraft/+/+/refresh/set` |
+| Home Assistant | Subscribe | `updraft/+/availability`, `updraft/+/+/state`, `updraft/+/+/availability`, `updraft/+/+/control/result`, `updraft/+/+/refresh/result`, `homeassistant/+/+/+/config` |
 
 Avoid a publish grant on all of `updraft/#`; that would let a command client
 publish service state too. Every proxy has its own namespace. There are no unscoped aliases.
@@ -190,3 +190,27 @@ completed. Updraft caches 64 completed requests per device. Repeating a cached
 ID with the same command returns its result; a different command with that ID is
 rejected. The cache is in memory and is lost on restart. It cannot guarantee that
 a retry after a restart will avoid another write.
+
+### Refresh over MQTT
+
+Publish a non-retained QoS 1 request to `updraft/{proxy_id}/{id}/refresh/set`:
+
+```json
+{"request_id":"attic-refresh-1","issued_at_unix_ms":1790892000000}
+```
+
+Use the current timestamp. Refresh accepts only the request ID and timestamp;
+control-shaped or malformed payloads are discarded. Retained and stale requests
+return correlated rejections without reading the fan. Accepted reads use the same
+per-device refresh worker as HTTP, including coalescing, serialization, and the
+270-second backend deadline. A `fresh`, `failed`, or `superseded` result arrives
+on `updraft/{proxy_id}/{id}/refresh/result` without retention. Current state is
+published on the usual state topic. MQTT waits up to 300 seconds for a result;
+a missing result does not establish whether the backend read completed.
+
+The discovered refresh button requires process availability but can read an
+unavailable device. Other controls require both process and device availability.
+Numbers display confirmed state and send whole, bounded values. Switch-off uses
+the backend conditional-off command so a different current mode is preserved.
+Selectors for original-controller thresholds and timer settings are separate.
+Unavailable capabilities have their retained discovery configurations cleared.

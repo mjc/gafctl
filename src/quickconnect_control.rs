@@ -206,80 +206,95 @@ impl QuickConnectControlService {
             );
         }
 
-        let Some(Ok(before)) = self
-            .while_current(
-                &runtime,
-                generation,
-                self.client.read_device_state(&provider_id),
-            )
+        let status = self
+            .execute_locked(id, &intent, &runtime, &provider_id, generation)
+            .await;
+        QuickConnectControlOutcome::new(&intent.request_id, status)
+    }
+
+    async fn execute_locked(
+        &self,
+        id: &DeviceId,
+        intent: &QuickConnectControlIntent,
+        runtime: &Arc<DeviceRuntime>,
+        provider_id: &str,
+        generation: u64,
+    ) -> QuickConnectControlStatus {
+        let Some(before) = self
+            .read_current_state(id, intent, runtime, provider_id, generation)
             .await
         else {
-            return QuickConnectControlOutcome::new(
-                &intent.request_id,
-                QuickConnectControlStatus::Rejected,
-            );
+            return QuickConnectControlStatus::Rejected;
         };
-        if !self
-            .is_current(&intent, id, &runtime, &provider_id, generation)
-            .await
-            || !fresh_state(&before)
-        {
-            return QuickConnectControlOutcome::new(
-                &intent.request_id,
-                QuickConnectControlStatus::Rejected,
-            );
-        }
         let body =
             match updraft_quickconnect::build_settings_body(&intent.command, &before.settings) {
                 Ok(body) => body,
-                Err(_) => {
-                    return QuickConnectControlOutcome::new(
-                        &intent.request_id,
-                        QuickConnectControlStatus::Rejected,
-                    );
+                Err(updraft_quickconnect::QuickConnectCommandError::ModeAlreadyInactive) => {
+                    return if runtime
+                        .set_control_state_if_current(
+                            generation,
+                            crate::backend::common_state(before),
+                        )
+                        .await
+                    {
+                        QuickConnectControlStatus::Confirmed
+                    } else {
+                        QuickConnectControlStatus::Rejected
+                    };
                 }
+                Err(_) => return QuickConnectControlStatus::Rejected,
             };
         let Some(Ok(prepared)) = self
-            .while_current(&runtime, generation, self.client.prepare_settings_write())
+            .while_current(runtime, generation, self.client.prepare_settings_write())
             .await
         else {
-            return QuickConnectControlOutcome::new(
-                &intent.request_id,
-                QuickConnectControlStatus::Rejected,
-            );
+            return QuickConnectControlStatus::Rejected;
         };
         if !self
-            .is_current(&intent, id, &runtime, &provider_id, generation)
+            .is_current(intent, id, runtime, provider_id, generation)
             .await
         {
-            return QuickConnectControlOutcome::new(
-                &intent.request_id,
-                QuickConnectControlStatus::Rejected,
-            );
+            return QuickConnectControlStatus::Rejected;
         }
-
         match self
             .client
-            .save_device_settings_prepared(&provider_id, &body, prepared)
+            .save_device_settings_prepared(provider_id, &body, prepared)
             .await
         {
             Ok(_) => {
-                self.confirm_readback(&intent, &runtime, generation, &provider_id, &before, &body)
+                self.confirm_readback(runtime, generation, provider_id, &before, &body)
                     .await
             }
-            Err(error) if is_rejected_write(&error) => QuickConnectControlOutcome::new(
-                &intent.request_id,
-                QuickConnectControlStatus::Rejected,
-            ),
+            Err(error) if is_rejected_write(&error) => QuickConnectControlStatus::Rejected,
             Err(_) => {
-                self.read_and_publish(&runtime, generation, &provider_id)
+                self.read_and_publish(runtime, generation, provider_id)
                     .await;
-                QuickConnectControlOutcome::new(
-                    &intent.request_id,
-                    QuickConnectControlStatus::SubmittedUnconfirmed,
-                )
+                QuickConnectControlStatus::SubmittedUnconfirmed
             }
         }
+    }
+
+    async fn read_current_state(
+        &self,
+        id: &DeviceId,
+        intent: &QuickConnectControlIntent,
+        runtime: &Arc<DeviceRuntime>,
+        provider_id: &str,
+        generation: u64,
+    ) -> Option<updraft_quickconnect::QuickConnectDeviceState> {
+        let before = self
+            .while_current(
+                runtime,
+                generation,
+                self.client.read_device_state(provider_id),
+            )
+            .await?
+            .ok()?;
+        (self
+            .is_current(intent, id, runtime, provider_id, generation)
+            .await
+            && fresh_state(&before))
+        .then_some(before)
     }
 
     async fn control_target(
@@ -343,21 +358,17 @@ impl QuickConnectControlService {
 
     async fn confirm_readback(
         &self,
-        intent: &QuickConnectControlIntent,
         runtime: &DeviceRuntime,
         generation: u64,
         provider_id: &str,
         before: &updraft_quickconnect::QuickConnectDeviceState,
         body: &QuickConnectSettingsBody,
-    ) -> QuickConnectControlOutcome {
+    ) -> QuickConnectControlStatus {
         let result = self
             .readback(provider_id, &before.settings, body, runtime, generation)
             .await;
         if !runtime.is_current_control_intent(generation) {
-            return QuickConnectControlOutcome::new(
-                &intent.request_id,
-                QuickConnectControlStatus::SubmittedUnconfirmed,
-            );
+            return QuickConnectControlStatus::SubmittedUnconfirmed;
         }
         let status = if result.matched {
             QuickConnectControlStatus::Confirmed
@@ -372,10 +383,7 @@ impl QuickConnectControlService {
                     .set_control_state_if_current(generation, crate::backend::common_state(state))
                     .await
                 {
-                    return QuickConnectControlOutcome::new(
-                        &intent.request_id,
-                        QuickConnectControlStatus::SubmittedUnconfirmed,
-                    );
+                    return QuickConnectControlStatus::SubmittedUnconfirmed;
                 }
             }
             None => {
@@ -383,14 +391,11 @@ impl QuickConnectControlService {
                     .mark_control_state_unavailable_if_current(generation)
                     .await
                 {
-                    return QuickConnectControlOutcome::new(
-                        &intent.request_id,
-                        QuickConnectControlStatus::SubmittedUnconfirmed,
-                    );
+                    return QuickConnectControlStatus::SubmittedUnconfirmed;
                 }
             }
         }
-        QuickConnectControlOutcome::new(&intent.request_id, status)
+        status
     }
 
     async fn readback(
@@ -652,6 +657,27 @@ mod tests {
     fn clean_up(fixture: ControlFixture) {
         fixture.server.abort();
         std::fs::remove_dir_all(fixture.store_path.parent().unwrap()).ok();
+    }
+
+    #[tokio::test]
+    async fn conditional_off_of_inactive_mode_confirms_without_writing() {
+        let fixture = control_fixture(QuickConnectControlPolicy::for_test(), true).await;
+        let outcome = fixture
+            .service
+            .execute(
+                &fixture.device_id,
+                fresh_intent(
+                    "inactive-timer-off",
+                    QuickConnectCommand::ClearMode {
+                        mode: updraft_quickconnect::QuickConnectCommandMode::Timer,
+                    },
+                ),
+            )
+            .await;
+        assert_eq!(outcome.status(), QuickConnectControlStatus::Confirmed);
+        assert_eq!(fixture.mock.settings_writes.load(Ordering::SeqCst), 0);
+        assert_eq!(fixture.mock.detail_reads.load(Ordering::SeqCst), 1);
+        clean_up(fixture);
     }
 
     #[tokio::test]

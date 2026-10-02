@@ -18,6 +18,9 @@ pub enum QuickConnectCommand {
     SetMode {
         mode: QuickConnectCommandMode,
     },
+    ClearMode {
+        mode: QuickConnectCommandMode,
+    },
     SetAutomaticTargets {
         temperature_f: Option<u16>,
         humidity_percent: Option<u16>,
@@ -40,6 +43,8 @@ pub enum QuickConnectCommandError {
     OutOfRange,
     #[error("timer duration must use a 30-minute step")]
     InvalidTimerStep,
+    #[error("the selected mode is already inactive")]
+    ModeAlreadyInactive,
 }
 
 /// Exact settings payload accepted by the reference service.
@@ -128,21 +133,13 @@ pub fn build_settings_body(
     current: &QuickConnectSettings,
 ) -> Result<QuickConnectSettingsBody, QuickConnectCommandError> {
     match command {
-        QuickConnectCommand::SetMode { mode } => {
-            current_mode(current)?;
-            let automatic_temperature_f = preserved_temperature(current)?;
-            let automatic_humidity_percent = preserved_humidity(current)?;
-            let timer_duration_minutes = preserved_duration(current)?;
-            let (automatic_mode, timer_mode, fan_mode) = mode_flags(*mode);
-            Ok(QuickConnectSettingsBody::SetMode(SetModeBody {
-                automatic_mode,
-                desired_temp: automatic_temperature_f,
-                desired_humidity: automatic_humidity_percent,
-                timer_mode,
-                timer_value: timer_duration_minutes,
-                fan_mode,
-            }))
+        QuickConnectCommand::ClearMode { mode } => {
+            if current_mode(current)? != command_mode_status(*mode) {
+                return Err(QuickConnectCommandError::ModeAlreadyInactive);
+            }
+            mode_body(QuickConnectCommandMode::Off, current)
         }
+        QuickConnectCommand::SetMode { mode } => mode_body(*mode, current),
         QuickConnectCommand::SetAutomaticTargets {
             temperature_f,
             humidity_percent,
@@ -177,6 +174,31 @@ pub fn build_settings_body(
                 },
             ))
         }
+    }
+}
+
+fn mode_body(
+    mode: QuickConnectCommandMode,
+    current: &QuickConnectSettings,
+) -> Result<QuickConnectSettingsBody, QuickConnectCommandError> {
+    current_mode(current)?;
+    let (automatic_mode, timer_mode, fan_mode) = mode_flags(mode);
+    Ok(QuickConnectSettingsBody::SetMode(SetModeBody {
+        automatic_mode,
+        desired_temp: preserved_temperature(current)?,
+        desired_humidity: preserved_humidity(current)?,
+        timer_mode,
+        timer_value: preserved_duration(current)?,
+        fan_mode,
+    }))
+}
+
+const fn command_mode_status(mode: QuickConnectCommandMode) -> DeviceModeStatus {
+    match mode {
+        QuickConnectCommandMode::Off => DeviceModeStatus::Off,
+        QuickConnectCommandMode::Automatic => DeviceModeStatus::Automatic,
+        QuickConnectCommandMode::Timer => DeviceModeStatus::Timer,
+        QuickConnectCommandMode::Manual => DeviceModeStatus::Manual,
     }
 }
 
@@ -265,6 +287,27 @@ mod tests {
             timer_duration_minutes: Some(60),
             humidity_monitor: Some(true),
         }
+    }
+
+    #[test]
+    fn conditional_off_uses_current_mode_and_preserves_settings() {
+        let command = QuickConnectCommand::ClearMode {
+            mode: QuickConnectCommandMode::Automatic,
+        };
+        let body = build_settings_body(&command, &current_settings()).unwrap();
+        let body = serde_json::to_value(body).unwrap();
+        assert_eq!(
+            body,
+            json!({"automaticMode":false,"timerMode":false,"fanMode":false,"desiredTemp":105,"desiredHumidity":42,"timerValue":60})
+        );
+        let mut current = current_settings();
+        current.mode = DeviceModeStatus::Timer;
+        assert_eq!(
+            build_settings_body(&command, &current).unwrap_err(),
+            super::QuickConnectCommandError::ModeAlreadyInactive
+        );
+        current.mode = DeviceModeStatus::Unknown;
+        assert!(build_settings_body(&command, &current).is_err());
     }
 
     #[test]
