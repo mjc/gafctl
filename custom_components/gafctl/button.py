@@ -1,41 +1,42 @@
 """Request readings through the device's service backend."""
 
 from homeassistant.components.button import ButtonEntity
-from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import EntityCategory
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
-from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
-from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
-from . import GafctlCoordinator
 from .client import ApiError, entity_keys
-from .const import DOMAIN
+from .coordinator import GafctlConfigEntry, GafctlCoordinator
+from .entity import GafctlEntity
 
 
 async def async_setup_entry(
     hass: HomeAssistant,
-    entry: ConfigEntry,
+    entry: GafctlConfigEntry,
     async_add_entities: AddEntitiesCallback,
 ) -> None:
-    coordinator = hass.data[DOMAIN][entry.entry_id]
-    if "refresh" in entity_keys(coordinator.device).get("button", set()):
-        async_add_entities([GafctlRefreshButton(coordinator, entry)])
-    if "all_off" in entity_keys(coordinator.device).get("button", set()):
-        async_add_entities([GafctlAllOffButton(coordinator, entry)])
+    coordinator = entry.runtime_data
+    keys = entity_keys(coordinator.device).get("button", set())
+    async_add_entities(
+        entity(coordinator, entry)
+        for key, entity in (
+            ("refresh", GafctlRefreshButton),
+            ("all_off", GafctlAllOffButton),
+        )
+        if key in keys
+    )
 
 
-class GafctlRefreshButton(CoordinatorEntity[GafctlCoordinator], ButtonEntity):
-    _attr_has_entity_name = True
+class GafctlRefreshButton(GafctlEntity, ButtonEntity):
     _attr_name = "Refresh readings"
     _attr_icon = "mdi:refresh"
     _attr_entity_category = EntityCategory.DIAGNOSTIC
 
-    def __init__(self, coordinator: GafctlCoordinator, entry: ConfigEntry) -> None:
-        super().__init__(coordinator)
-        self._entry = entry
-        self._attr_unique_id = f"{entry.unique_id}_refresh"
+    def __init__(
+        self, coordinator: GafctlCoordinator, entry: GafctlConfigEntry
+    ) -> None:
+        super().__init__(coordinator, entry, "refresh")
 
     @property
     def available(self) -> bool:
@@ -51,25 +52,15 @@ class GafctlRefreshButton(CoordinatorEntity[GafctlCoordinator], ButtonEntity):
         except ApiError as error:
             raise HomeAssistantError(str(error)) from error
 
-    @property
-    def device_info(self) -> dr.DeviceInfo:
-        return dr.DeviceInfo(
-            identifiers={(DOMAIN, self._entry.unique_id)},
-            name=self.coordinator.device["name"],
-            manufacturer="GAF",
-            model=("GAF QuickConnect Vent" if self.coordinator.device["backend"] == "quick_connect" else "GAF Wi-Fi Vent"),
-        )
 
-
-class GafctlAllOffButton(CoordinatorEntity[GafctlCoordinator], ButtonEntity):
-    _attr_has_entity_name = True
+class GafctlAllOffButton(GafctlEntity, ButtonEntity):
     _attr_name = "All off"
     _attr_icon = "mdi:fan-off"
 
-    def __init__(self, coordinator: GafctlCoordinator, entry: ConfigEntry) -> None:
-        super().__init__(coordinator)
-        self._entry = entry
-        self._attr_unique_id = f"{entry.unique_id}_all_off"
+    def __init__(
+        self, coordinator: GafctlCoordinator, entry: GafctlConfigEntry
+    ) -> None:
+        super().__init__(coordinator, entry, "all_off")
 
     @property
     def available(self) -> bool:
@@ -80,8 +71,3 @@ class GafctlAllOffButton(CoordinatorEntity[GafctlCoordinator], ButtonEntity):
             await self.coordinator.async_set_mode("off")
         except ApiError as error:
             raise HomeAssistantError(str(error)) from error
-
-    @property
-    def device_info(self) -> dr.DeviceInfo:
-        return dr.DeviceInfo(identifiers={(DOMAIN, self._entry.unique_id)},
-                             name=self.coordinator.device["name"], manufacturer="GAF", model="GAF QuickConnect Vent")

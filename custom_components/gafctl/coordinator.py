@@ -1,0 +1,223 @@
+"""Device polling, transport ownership and serialized controls."""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+
+from homeassistant.config_entries import ConfigEntry
+from homeassistant.core import HomeAssistant, callback
+from homeassistant.helpers import device_registry as dr
+from homeassistant.helpers import entity_registry as er
+from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
+
+from .client import (
+    QUICKCONNECT_MODES,
+    ApiClient,
+    ApiError,
+    Device,
+    DeviceState,
+    entity_keys,
+)
+from .const import CONF_DEVICE_ID, CONF_PROXY_ID, UPDATE_INTERVAL
+
+LOGGER = logging.getLogger(__name__)
+
+
+class GafctlCoordinator(DataUpdateCoordinator[DeviceState]):
+    def __init__(
+        self,
+        hass: HomeAssistant,
+        client: ApiClient,
+        device: Device,
+        entry: GafctlConfigEntry,
+    ) -> None:
+        self.client = client
+        self.device = device
+        self.device_id = device["id"]
+        self.entry = entry
+        self.loaded_entity_keys = entity_keys(device)
+        self.command_lock = asyncio.Lock()
+        self._reload_scheduled = False
+        self._entities_loaded = False
+        super().__init__(
+            hass,
+            config_entry=entry,
+            logger=LOGGER,
+            name=f"Gafctl {device['name']}",
+            update_interval=UPDATE_INTERVAL,
+        )
+
+    async def _async_update_data(self) -> DeviceState:
+        try:
+            current = await self._async_resolve_device()
+            if current is None:
+                raise UpdateFailed("configured device is absent from this proxy")
+            return await self.client.fetch_state(self.device_id)
+        except ApiError as error:
+            raise UpdateFailed(str(error)) from error
+
+    async def _async_resolve_device(self) -> Device | None:
+        devices = await self.client.fetch_devices()
+        current = next(
+            (
+                device
+                for device in devices
+                if device["id"] == self.device_id
+                and device["proxy_id"] == self.entry.data[CONF_PROXY_ID]
+            ),
+            None,
+        )
+        self.device = current or unavailable_device(self.entry)
+        self._reload_changed_entities()
+        return current
+
+    async def async_refresh_device(self) -> None:
+        async with self.command_lock:
+            current = await self._async_http_state_device()
+            await self.client.refresh(self.device_id, current["backend"])
+            await self._async_http_state_device()
+            await self.async_refresh()
+            if not (
+                self.last_update_success
+                and self.http_state_owned
+                and self.device["state"]
+                and self.data
+                and self.data.get("available") is True
+                and self.data.get("freshness") == "fresh"
+            ):
+                raise ApiError(
+                    "device was refreshed, but current HTTP readings are unavailable"
+                )
+
+    async def _async_http_state_device(self) -> Device:
+        current = await self._async_resolve_device()
+        if current is None or not current["state"] or not self.http_state_owned:
+            raise ApiError("this device does not own HTTP readings")
+        return current
+
+    def _reload_changed_entities(self) -> None:
+        if (
+            self._entities_loaded
+            and entity_keys(self.device) != self.loaded_entity_keys
+            and not self._reload_scheduled
+        ):
+            self._reload_scheduled = True
+            self.hass.async_create_task(self._reload_entry())
+
+    async def _reload_entry(self) -> None:
+        try:
+            async_cleanup_registry(self.hass, self.entry, self.device)
+            reloaded = await self.hass.config_entries.async_reload(self.entry.entry_id)
+            if not reloaded:
+                self._reload_scheduled = False
+        except Exception:
+            self._reload_scheduled = False
+            LOGGER.exception("Could not reload changed Gafctl entities")
+
+    async def async_set_mode(
+        self, mode: str, *, only_if_current: str | None = None
+    ) -> None:
+        if mode not in QUICKCONNECT_MODES:
+            raise ApiError("unsupported device mode")
+        async with self.command_lock:
+            await self.async_refresh()
+            self._require_mode_control()
+            current = self.data["state"].get("mode")
+            if only_if_current is not None:
+                if current not in QUICKCONNECT_MODES:
+                    raise ApiError("current device mode is unknown")
+                if current != only_if_current:
+                    return
+            control_error = None
+            try:
+                command = (
+                    {
+                        "kind": "quick_connect_conditional_off",
+                        "only_if_current": only_if_current,
+                    }
+                    if only_if_current is not None
+                    else {"kind": "quick_connect_mode", "mode": mode}
+                )
+                await self.client.set_control(self.device_id, command)
+            except ApiError as error:
+                control_error = error
+            await self.async_refresh()
+            self._require_mode_control()
+            if control_error is not None:
+                raise control_error
+            current = self.data["state"].get("mode")
+            matches = (
+                current == mode
+                if only_if_current is None
+                else current in QUICKCONNECT_MODES and current != only_if_current
+            )
+            if not matches:
+                raise ApiError("confirmed control has no matching current mode")
+
+    def _require_mode_control(self) -> None:
+        if not self.mode_control_available:
+            raise ApiError("the selected device has no current mode control")
+
+    @property
+    def mode_control_available(self) -> bool:
+        data = self.data or {}
+        return bool(
+            self.last_update_success
+            and self.http_state_owned
+            and self.supports("quick_connect_mode")
+            and self.device["backend"] == "quick_connect"
+            and data.get("available") is True
+            and data.get("freshness") == "fresh"
+            and isinstance(data.get("state"), dict)
+        )
+
+    def supports(self, command_kind: str) -> bool:
+        return self.device["command_source"] == "http" and any(
+            command.get("kind") == command_kind
+            for command in self.device.get("commands", [])
+            if isinstance(command, dict)
+        )
+
+    @property
+    def http_state_owned(self) -> bool:
+        return self.device["state_source"] == "http"
+
+    @property
+    def http_command_owned(self) -> bool:
+        return self.device["command_source"] == "http"
+
+
+def unavailable_device(entry: GafctlConfigEntry) -> Device:
+    return {
+        "proxy_id": entry.data[CONF_PROXY_ID],
+        "id": entry.data[CONF_DEVICE_ID],
+        "name": entry.title,
+        "backend": entry.data["backend"],
+        "state": False,
+        "commands": [],
+        "state_source": "http",
+        "command_source": "http",
+    }
+
+
+@callback
+def async_cleanup_registry(
+    hass: HomeAssistant, entry: GafctlConfigEntry, device: Device
+) -> None:
+    expected = {
+        (platform, f"{entry.unique_id}_{key}")
+        for platform, keys in entity_keys(device).items()
+        for key in keys
+    }
+    entities = er.async_get(hass)
+    for entity in er.async_entries_for_config_entry(entities, entry.entry_id):
+        if (entity.domain, entity.unique_id) not in expected:
+            entities.async_remove(entity.entity_id)
+    devices = dr.async_get(hass)
+    for registered in dr.async_entries_for_config_entry(devices, entry.entry_id):
+        if not er.async_entries_for_device(entities, registered.id):
+            devices.async_remove_device(registered.id)
+
+
+type GafctlConfigEntry = ConfigEntry[GafctlCoordinator]

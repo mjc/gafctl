@@ -1,12 +1,50 @@
 """HTTP client for the Gafctl API."""
 
-import asyncio
+from __future__ import annotations
+
 import math
 import time
 from collections.abc import Mapping
-from typing import Any
+from typing import TYPE_CHECKING, Literal, NotRequired, TypedDict
 from urllib.parse import urljoin, urlparse
-from uuid import UUID, RFC_4122, uuid4
+from uuid import RFC_4122, UUID, uuid4
+
+if TYPE_CHECKING:
+    from aiohttp import ClientSession
+
+
+type JsonValue = (
+    None | bool | int | float | str | list[JsonValue] | dict[str, JsonValue]
+)
+type JsonObject = dict[str, JsonValue]
+type Backend = Literal["legacy_ble", "quick_connect"]
+type EntitySource = Literal["http", "mqtt"]
+
+
+class Capabilities(TypedDict):
+    read_state: bool
+    commands: list[JsonObject]
+
+
+class Device(TypedDict):
+    proxy_id: str
+    id: str
+    name: str
+    state: bool
+    backend: Backend
+    commands: list[JsonObject]
+    capabilities: NotRequired[Capabilities]
+    state_source: EntitySource
+    command_source: EntitySource
+
+
+class DeviceState(TypedDict):
+    device_id: str
+    available: bool
+    freshness: Literal["fresh", "unknown", "stale"]
+    observed_at_unix_ms: int | None
+    last_error: str | None
+    state: JsonObject | None
 
 
 CONTROL_HTTP_STATUSES = {
@@ -27,6 +65,7 @@ CONTROL_HTTP_STATUSES = {
     "invalid_request_id": 400,
 }
 
+
 class ApiError(Exception):
     """Gafctl API error with a message suitable for display."""
 
@@ -36,7 +75,9 @@ class ControlOutcomeUnknown(ApiError):
 
     def __init__(self, request_id: str) -> None:
         self.request_id = request_id
-        super().__init__(f"Control outcome unknown for request {request_id}; read current state before sending another command")
+        super().__init__(
+            f"Control outcome unknown for request {request_id}; read current state before sending another command"
+        )
 
 
 def normalize_api_url(value: str) -> str:
@@ -59,67 +100,31 @@ def normalize_api_url(value: str) -> str:
 
 
 class ApiClient:
-    def __init__(self, base_url: str, session: Any) -> None:
+    def __init__(self, base_url: str, session: ClientSession) -> None:
         self._base_url = base_url.rstrip("/") + "/"
         self._session = session
 
-    async def fetch_devices(self) -> list[dict[str, Any]]:
+    async def fetch_devices(self) -> list[Device]:
         payload = await self._get_json("api/v2/devices")
         devices = payload.get("devices") if isinstance(payload, Mapping) else None
         if not isinstance(devices, list):
             raise ApiError("proxy returned no devices")
-        if any(
-            not isinstance(device, Mapping)
-            or not _valid_proxy_id(device.get("proxy_id"))
-            or not isinstance(device.get("id"), str)
-            or not _valid_identifier(device["id"])
-            or not isinstance(device.get("name"), str)
-            or not isinstance(device.get("backend"), str)
-            or device["backend"] not in {"legacy_ble", "quick_connect"}
-            or not isinstance(device.get("capabilities"), Mapping)
-            or not isinstance(device["capabilities"].get("read_state"), bool)
-            or not isinstance(device["capabilities"].get("commands"), list)
-            or not all(
-                isinstance(command, Mapping)
-                and isinstance(command.get("kind"), str)
-                for command in device["capabilities"]["commands"]
-            )
-            or any(
-                not isinstance(device.get(source), str)
-                or device[source] not in {"http", "mqtt"}
-                for source in ("state_source", "command_source")
-            )
-            or device["state_source"] != device["command_source"]
-            for device in devices
-        ):
+        if not all(_valid_device(device) for device in devices):
             raise ApiError("proxy returned invalid device data")
         identifiers = [device["id"] for device in devices]
         if len({device["proxy_id"] for device in devices}) > 1:
             raise ApiError("proxy returned inconsistent proxy identities")
         if len(identifiers) != len(set(identifiers)):
             raise ApiError("proxy returned duplicate device identifiers")
-        return [
-            {
-                "proxy_id": device["proxy_id"],
-                "id": device["id"],
-                "name": device["name"],
-                "state": device["capabilities"]["read_state"],
-                "backend": device["backend"],
-                "commands": device["capabilities"]["commands"],
-                "capabilities": device["capabilities"],
-                "state_source": device["state_source"],
-                "command_source": device["command_source"],
-            }
-            for device in devices
-        ]
+        return [_device_values(device) for device in devices]
 
-    async def fetch_state(self, device_id: str) -> dict[str, Any]:
+    async def fetch_state(self, device_id: str) -> DeviceState:
         if not _valid_identifier(device_id):
             raise ApiError("invalid configured device")
         payload = await self._get_json(f"api/v2/devices/{device_id}/state")
         return _state_response(payload, device_id)
 
-    async def refresh(self, device_id: str, backend: str) -> dict[str, Any]:
+    async def refresh(self, device_id: str, backend: str) -> DeviceState:
         if not _valid_identifier(device_id):
             raise ApiError("invalid configured device")
         url = urljoin(self._base_url, f"api/v2/devices/{device_id}/refresh")
@@ -131,7 +136,9 @@ class ApiClient:
                 status = payload.get("status")
                 if response.status != 200 or status != "fresh":
                     if status == "superseded":
-                        raise ApiError("device refresh was superseded by another operation")
+                        raise ApiError(
+                            "device refresh was superseded by another operation"
+                        )
                     raise ApiError("device refresh did not complete")
                 result = _state_response(payload, device_id)
                 if payload["backend"] != backend:
@@ -139,14 +146,14 @@ class ApiClient:
                 if not result["available"] or payload["inventory_status"] != "present":
                     raise ApiError("proxy returned a refresh without current readings")
                 return result
-        except asyncio.CancelledError:
-            raise
         except ApiError:
             raise
         except Exception as error:
             raise ApiError("cannot refresh readings from the local proxy") from error
 
-    async def set_control(self, device_id: str, command: str | Mapping[str, Any]) -> None:
+    async def set_control(
+        self, device_id: str, command: str | Mapping[str, JsonValue]
+    ) -> None:
         """Send exactly once and require a matching confirmed response."""
         if not _valid_identifier(device_id):
             raise ApiError("invalid configured device")
@@ -165,8 +172,6 @@ class ApiClient:
             ) as response:
                 payload = await response.json()
                 http_status = response.status
-        except asyncio.CancelledError:
-            raise
         except Exception as error:
             raise ControlOutcomeUnknown(request_id) from error
         if (
@@ -177,21 +182,64 @@ class ApiClient:
         ):
             raise ControlOutcomeUnknown(request_id)
         if http_status != 200 or payload["status"] != "confirmed":
-            raise ApiError(f"{_control_error(payload, http_status)} (request {request_id})")
+            raise ApiError(
+                f"{_control_error(payload, http_status)} (request {request_id})"
+            )
 
-    async def _get_json(self, path: str) -> Any:
+    async def _get_json(self, path: str) -> JsonValue:
         url = urljoin(self._base_url, path)
         try:
             async with self._session.get(url, timeout=10) as response:
                 if response.status != 200:
                     raise ApiError(f"proxy returned HTTP {response.status}")
                 return await response.json()
-        except asyncio.CancelledError:
-            raise
         except ApiError:
             raise
         except Exception as error:
             raise ApiError("cannot connect to the local proxy") from error
+
+
+def _valid_device(device: object) -> bool:
+    if not isinstance(device, Mapping):
+        return False
+    capabilities = device.get("capabilities")
+    if not isinstance(capabilities, Mapping):
+        return False
+    commands = capabilities.get("commands")
+    return (
+        _valid_proxy_id(device.get("proxy_id"))
+        and isinstance(device.get("id"), str)
+        and _valid_identifier(device["id"])
+        and isinstance(device.get("name"), str)
+        and isinstance(device.get("backend"), str)
+        and device["backend"] in {"legacy_ble", "quick_connect"}
+        and isinstance(capabilities.get("read_state"), bool)
+        and isinstance(commands, list)
+        and all(
+            isinstance(command, Mapping) and isinstance(command.get("kind"), str)
+            for command in commands
+        )
+        and all(
+            isinstance(device.get(source), str) and device[source] in {"http", "mqtt"}
+            for source in ("state_source", "command_source")
+        )
+        and device["state_source"] == device["command_source"]
+    )
+
+
+def _device_values(device: Mapping) -> Device:
+    capabilities = device["capabilities"]
+    return {
+        "proxy_id": device["proxy_id"],
+        "id": device["id"],
+        "name": device["name"],
+        "state": capabilities["read_state"],
+        "backend": device["backend"],
+        "commands": capabilities["commands"],
+        "capabilities": capabilities,
+        "state_source": device["state_source"],
+        "command_source": device["command_source"],
+    }
 
 
 CONTROL_PRESETS = frozenset(
@@ -219,6 +267,11 @@ LEGACY_NUMBER_COMMANDS = {
     "automatic_humidity": ("legacy_automatic_humidity", "humidity_percent"),
     "timer_duration": ("legacy_timer", "minutes"),
 }
+QUICKCONNECT_NUMBER_COMMANDS = {
+    "automatic_temperature": ("quick_connect_automatic_temperature", "temperature_f"),
+    "automatic_humidity": ("quick_connect_automatic_humidity", "humidity_percent"),
+    "timer_duration": ("quick_connect_timer_duration", "minutes"),
+}
 QUICKCONNECT_SENSOR_KEYS = {
     "temperature",
     "humidity",
@@ -239,7 +292,7 @@ LEGACY_SENSOR_KEYS = {
 }
 
 
-def select_device(devices: list[dict[str, Any]], device_id: str) -> dict[str, Any]:
+def select_device(devices: list[Device], device_id: str) -> Device:
     """Find the selected device and check its HTTP ownership."""
     device = next((item for item in devices if item["id"] == device_id), None)
     if device is None or not entity_platforms(device):
@@ -247,12 +300,12 @@ def select_device(devices: list[dict[str, Any]], device_id: str) -> dict[str, An
     return device
 
 
-def entity_platforms(device: Mapping[str, Any]) -> set[str]:
+def entity_platforms(device: Mapping[str, JsonValue]) -> set[str]:
     """Return HA platforms owned by this adapter for the device capabilities."""
     return set(entity_keys(device))
 
 
-def entity_keys(device: Mapping[str, Any]) -> dict[str, set[str]]:
+def entity_keys(device: Mapping[str, JsonValue]) -> dict[str, set[str]]:
     """Return entity keys for the device's ownership and capabilities."""
     capabilities = device.get("capabilities")
     commands = device.get("commands")
@@ -276,7 +329,14 @@ def entity_keys(device: Mapping[str, Any]) -> dict[str, set[str]]:
             else set(QUICKCONNECT_SENSOR_KEYS)
         )
         if backend == "quick_connect":
-            entities["binary_sensor"] = {"running_estimate", "ota_in_progress", "automatic_mode", "timer_mode", "manual_mode", "humidity_monitor"}
+            entities["binary_sensor"] = {
+                "running_estimate",
+                "ota_in_progress",
+                "automatic_mode",
+                "timer_mode",
+                "manual_mode",
+                "humidity_monitor",
+            }
         else:
             entities["binary_sensor"] = {"controller_fan_flag"}
     if not commands_owned:
@@ -285,7 +345,8 @@ def entity_keys(device: Mapping[str, Any]) -> dict[str, set[str]]:
         entities["select"] = {"automatic_thresholds", "timer"}
     if backend == "legacy_ble":
         number_keys = {
-            key for key, (capability, _) in LEGACY_NUMBER_COMMANDS.items()
+            key
+            for key, (capability, _) in LEGACY_NUMBER_COMMANDS.items()
             if capability in command_kinds
         }
         if number_keys:
@@ -309,7 +370,7 @@ def entity_keys(device: Mapping[str, Any]) -> dict[str, set[str]]:
     return entities
 
 
-def _control_command(command: str | Mapping[str, Any]) -> dict[str, Any]:
+def _control_command(command: str | Mapping[str, JsonValue]) -> JsonObject:
     if isinstance(command, str):
         if command not in CONTROL_PRESETS:
             raise ApiError("unsupported control preset")
@@ -317,53 +378,59 @@ def _control_command(command: str | Mapping[str, Any]) -> dict[str, Any]:
     if not isinstance(command, Mapping):
         raise ApiError("unsupported control command")
     kind = command.get("kind")
-    for key, (capability, field) in LEGACY_NUMBER_COMMANDS.items():
-        if kind == capability and set(command) == {"kind", field}:
-            minimum, maximum, _ = LEGACY_NUMBER_RANGES[key]
-            if _integer_in_range(command[field], minimum, maximum):
-                return dict(command)
-    if kind == "quick_connect_mode" and set(command) == {"kind", "mode"}:
-        if isinstance(command["mode"], str) and command["mode"] in QUICKCONNECT_MODES:
-            return dict(command)
-    if kind == "quick_connect_conditional_off" and set(command) == {"kind", "only_if_current"}:
-        if isinstance(command["only_if_current"], str) and command["only_if_current"] in QUICKCONNECT_MODES:
-            return dict(command)
-    for kind_name, field, minimum, maximum in (
-        ("quick_connect_automatic_temperature", "temperature_f", 90, 120),
-        ("quick_connect_automatic_humidity", "humidity_percent", 30, 80),
-    ):
-        if kind == kind_name and set(command) == {"kind", field} and _integer_in_range(command[field], minimum, maximum):
-            return dict(command)
-    if kind == "quick_connect_targets" and set(command) == {
-        "kind",
-        "temperature_f",
-        "humidity_percent",
-    }:
-        temperature = command["temperature_f"]
-        humidity = command["humidity_percent"]
-        temperature_min, temperature_max, _ = QUICKCONNECT_NUMBER_RANGES[
-            "automatic_temperature"
-        ]
-        humidity_min, humidity_max, _ = QUICKCONNECT_NUMBER_RANGES[
-            "automatic_humidity"
-        ]
-        if _integer_in_range(temperature, temperature_min, temperature_max) and (
-            _integer_in_range(humidity, humidity_min, humidity_max)
+    if not isinstance(kind, str):
+        raise ApiError("invalid device control command")
+    mode_fields = {
+        "quick_connect_mode": "mode",
+        "quick_connect_conditional_off": "only_if_current",
+    }
+    if field := mode_fields.get(kind):
+        value = command.get(field)
+        if (
+            set(command) == {"kind", field}
+            and isinstance(value, str)
+            and value in QUICKCONNECT_MODES
         ):
             return dict(command)
-    if kind == "quick_connect_timer_duration" and set(command) == {"kind", "minutes"}:
-        duration = command["minutes"]
-        minimum, maximum, step = QUICKCONNECT_NUMBER_RANGES["timer_duration"]
-        if _integer_in_range(duration, minimum, maximum) and duration % step == 0:
-            return dict(command)
+    for commands, ranges in (
+        (LEGACY_NUMBER_COMMANDS, LEGACY_NUMBER_RANGES),
+        (QUICKCONNECT_NUMBER_COMMANDS, QUICKCONNECT_NUMBER_RANGES),
+    ):
+        for key, (capability, field) in commands.items():
+            if kind != capability or set(command) != {"kind", field}:
+                continue
+            minimum, maximum, step = ranges[key]
+            value = command[field]
+            if (
+                _integer_in_range(value, minimum, maximum)
+                and (value - minimum) % step == 0
+            ):
+                return dict(command)
+    if (
+        kind == "quick_connect_targets"
+        and set(command)
+        == {
+            "kind",
+            "temperature_f",
+            "humidity_percent",
+        }
+        and all(
+            _integer_in_range(command[field], *QUICKCONNECT_NUMBER_RANGES[key][:2])
+            for key, field in (
+                ("automatic_temperature", "temperature_f"),
+                ("automatic_humidity", "humidity_percent"),
+            )
+        )
+    ):
+        return dict(command)
     raise ApiError("invalid device control command")
 
 
-def _integer_in_range(value: Any, minimum: int, maximum: int) -> bool:
+def _integer_in_range(value: object, minimum: int, maximum: int) -> bool:
     return type(value) is int and minimum <= value <= maximum
 
 
-def _control_error(payload: Any, status: int) -> str:
+def _control_error(payload: object, status: int) -> str:
     if isinstance(payload, Mapping):
         message = payload.get("message")
         if isinstance(message, str):
@@ -374,13 +441,13 @@ def _control_error(payload: Any, status: int) -> str:
     return f"proxy returned HTTP {status} for control"
 
 
-def timer_control_preset(state: Mapping[str, Any]) -> str | None:
+def timer_control_preset(state: Mapping[str, JsonValue]) -> str | None:
     return {(0, 0): "timer_clear", (1, 1): "timer_one_minute"}.get(
         (state.get("timer_remaining_minutes"), state.get("timer_original_minutes"))
     )
 
 
-def _valid_proxy_id(value: Any) -> bool:
+def _valid_proxy_id(value: object) -> bool:
     if not isinstance(value, str):
         return False
     try:
@@ -391,45 +458,62 @@ def _valid_proxy_id(value: Any) -> bool:
 
 
 def _valid_identifier(value: str) -> bool:
-    return bool(value) and len(value) <= 64 and all(
-        character.isascii() and (character.isalnum() or character in "_-")
-        for character in value
+    return (
+        bool(value)
+        and len(value) <= 64
+        and all(
+            character.isascii() and (character.isalnum() or character in "_-")
+            for character in value
+        )
     )
 
 
-def _valid_state(state: Mapping[str, Any], backend: str) -> bool:
+def _valid_state(state: Mapping[str, object], backend: str) -> bool:
     settings = state.get("settings")
-    diagnostics = state.get("diagnostics")
     provenance = state.get("provenance")
-    if not isinstance(settings, Mapping) or not isinstance(provenance, Mapping):
-        return False
-    if settings.get("backend") != backend or provenance.get("backend") != backend:
-        return False
-    if diagnostics is not None and not isinstance(diagnostics, Mapping):
-        return False
-    if diagnostics is not None and (
-        any(diagnostics.get(key) is not None and not isinstance(diagnostics[key], str)
-            for key in ("firmware_version", "signal_strength_raw", "verified_raw"))
-        or diagnostics.get("ota_in_progress") is not None and type(diagnostics["ota_in_progress"]) is not bool
-    ):
-        return False
-    if state.get("estimated_running") is not None and not isinstance(
-        state.get("estimated_running"), bool
-    ):
-        return False
-    if not all(
-        _optional_finite_number(state.get(key))
-        for key in ("temperature_f", "humidity_percent")
-    ):
-        return False
-    if any(
-        not _valid_timestamp(provenance.get(key))
-        for key in ("fetched_at_unix_ms", "observed_at_unix_ms")
-    ):
+    return (
+        isinstance(settings, Mapping)
+        and _valid_settings(settings, backend)
+        and isinstance(provenance, Mapping)
+        and provenance.get("backend") == backend
+        and all(
+            _valid_timestamp(provenance.get(key))
+            for key in ("fetched_at_unix_ms", "observed_at_unix_ms")
+        )
+        and _valid_diagnostics(state.get("diagnostics"))
+        and (
+            state.get("estimated_running") is None
+            or isinstance(state["estimated_running"], bool)
+        )
+        and all(
+            _optional_finite_number(state.get(key))
+            for key in ("temperature_f", "humidity_percent")
+        )
+    )
+
+
+def _valid_diagnostics(diagnostics: object) -> bool:
+    if diagnostics is None:
+        return True
+    return (
+        isinstance(diagnostics, Mapping)
+        and all(
+            diagnostics.get(key) is None or isinstance(diagnostics[key], str)
+            for key in ("firmware_version", "signal_strength_raw", "verified_raw")
+        )
+        and (
+            diagnostics.get("ota_in_progress") is None
+            or isinstance(diagnostics["ota_in_progress"], bool)
+        )
+    )
+
+
+def _valid_settings(settings: Mapping[str, object], backend: str) -> bool:
+    if settings.get("backend") != backend:
         return False
     mode = settings.get("mode")
     valid_modes = (
-        {None, "automatic", "timer", "ota"}
+        {"automatic", "timer", "ota"}
         if backend == "legacy_ble"
         else {"off", "automatic", "timer", "manual", "unknown", "conflicting"}
     )
@@ -438,48 +522,34 @@ def _valid_state(state: Mapping[str, Any], backend: str) -> bool:
             return False
     elif not isinstance(mode, str) or mode not in valid_modes:
         return False
-    fan_on = settings.get("controller_fan_on")
     if backend == "quick_connect":
-        return all(
-            _optional_integer(settings.get(key), 65535)
-            for key in (
-                "automatic_temperature_f",
-                "automatic_humidity_percent",
-                "timer_duration_minutes",
-            )
-        ) and (
-            settings.get("humidity_monitor") is None
-            or isinstance(settings.get("humidity_monitor"), bool)
-        ) and (
-            diagnostics is None
-            or diagnostics.get("firmware_version") is None
-            or isinstance(diagnostics.get("firmware_version"), str)
+        keys = (
+            "automatic_temperature_f",
+            "automatic_humidity_percent",
+            "timer_duration_minutes",
         )
-    if fan_on is not None and not isinstance(fan_on, bool):
-        return False
-    return all(
-        _optional_integer(settings.get(key), 65535)
-        for key in (
+        flag = settings.get("humidity_monitor")
+    else:
+        keys = (
             "automatic_temperature_tenths_f",
             "automatic_humidity_tenths_percent",
             "timer_remaining_minutes",
             "timer_original_minutes",
         )
-    ) and (
-        diagnostics is None
-        or diagnostics.get("firmware_version") is None
-        or isinstance(diagnostics.get("firmware_version"), str)
+        flag = settings.get("controller_fan_on")
+    return (flag is None or isinstance(flag, bool)) and all(
+        _optional_integer(settings.get(key), 65535) for key in keys
     )
 
 
-def _home_assistant_values(state: Mapping[str, Any], backend: str) -> dict[str, Any]:
-    values: dict[str, Any] = {
+def _home_assistant_values(state: Mapping[str, JsonValue], backend: str) -> JsonObject:
+    diagnostics = state.get("diagnostics") or {}
+    values: JsonObject = {
         "temperature_f": state.get("temperature_f"),
         "humidity_percent": state.get("humidity_percent"),
     }
     settings = state["settings"]
     if backend == "legacy_ble":
-        diagnostics = state.get("diagnostics") or {}
         fan_on = settings.get("controller_fan_on")
         values.update(
             firmware_version=diagnostics.get("firmware_version"),
@@ -495,7 +565,6 @@ def _home_assistant_values(state: Mapping[str, Any], backend: str) -> dict[str, 
             timer_original_minutes=settings.get("timer_original_minutes"),
         )
     else:
-        diagnostics = state.get("diagnostics") or {}
         values.update(
             mode=settings["mode"],
             automatic_temperature_f=settings.get("automatic_temperature_f"),
@@ -521,19 +590,17 @@ def _mode_flag(mode: str, expected: str) -> bool | None:
     return mode == expected if mode in QUICKCONNECT_MODES else None
 
 
-def _optional_finite_number(value: Any) -> bool:
+def _optional_finite_number(value: object) -> bool:
     return value is None or _is_finite_number(value)
 
 
-def _optional_integer(value: Any, maximum: int) -> bool:
+def _optional_integer(value: object, maximum: int) -> bool:
     return value is None or (
-        isinstance(value, int)
-        and not isinstance(value, bool)
-        and 0 <= value <= maximum
+        isinstance(value, int) and not isinstance(value, bool) and 0 <= value <= maximum
     )
 
 
-def _valid_timestamp(value: Any) -> bool:
+def _valid_timestamp(value: object) -> bool:
     return _optional_integer(value, 2**64 - 1)
 
 
@@ -541,7 +608,7 @@ def _tenths(value: int | None) -> float | None:
     return value / 10 if value is not None else None
 
 
-def _is_finite_number(value: Any) -> bool:
+def _is_finite_number(value: object) -> bool:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return False
     try:
@@ -550,7 +617,7 @@ def _is_finite_number(value: Any) -> bool:
         return False
 
 
-def _state_response(payload: Any, device_id: str) -> dict[str, Any]:
+def _state_response(payload: object, device_id: str) -> DeviceState:
     if not isinstance(payload, Mapping):
         raise ApiError("proxy returned invalid device state")
     available = payload.get("available")
@@ -587,8 +654,10 @@ def _state_response(payload: Any, device_id: str) -> dict[str, Any]:
             raise ApiError("proxy returned invalid device values")
         observed_at = state["provenance"].get("observed_at_unix_ms")
         values = _home_assistant_values(state, backend)
-    freshness = "fresh" if available else (
-        "unknown" if inventory_status == "unknown" else "stale"
+    freshness = (
+        "fresh"
+        if available
+        else ("unknown" if inventory_status == "unknown" else "stale")
     )
     return {
         "device_id": device_id,

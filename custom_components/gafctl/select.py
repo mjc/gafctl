@@ -1,17 +1,14 @@
 """Selectors for GAF threshold and timer presets and QuickConnect modes."""
 
 from homeassistant.components.select import SelectEntity
-from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import EntityCategory
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
-from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
-from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
-from . import GafctlCoordinator
 from .client import ApiError, entity_keys, timer_control_preset
-from .const import DOMAIN
+from .coordinator import GafctlConfigEntry, GafctlCoordinator
+from .entity import GafctlEntity
 
 THRESHOLD_PRESETS = {
     "105.0°F / 30.0%": "automatic105_f30_percent",
@@ -22,10 +19,10 @@ TIMER_PRESETS = {"Clear timer": "timer_clear", "1 minute": "timer_one_minute"}
 
 async def async_setup_entry(
     hass: HomeAssistant,
-    entry: ConfigEntry,
+    entry: GafctlConfigEntry,
     async_add_entities: AddEntitiesCallback,
 ) -> None:
-    coordinator: GafctlCoordinator = hass.data[DOMAIN][entry.entry_id]
+    coordinator: GafctlCoordinator = entry.runtime_data
     control_keys = entity_keys(coordinator.device).get("select", set())
     entities = []
     if "automatic_thresholds" in control_keys:
@@ -50,39 +47,39 @@ async def async_setup_entry(
                 entry,
                 "mode",
                 "Mode",
-                {"Off": "off", "Automatic": "automatic", "Timer": "timer", "Manual": "manual"},
+                {
+                    "Off": "off",
+                    "Automatic": "automatic",
+                    "Timer": "timer",
+                    "Manual": "manual",
+                },
             )
         )
     async_add_entities(entities)
 
 
-class GafctlControlSelect(CoordinatorEntity[GafctlCoordinator], SelectEntity):
+class GafctlControlSelect(GafctlEntity, SelectEntity):
     """A preset selector that checks BLE acknowledgement and readback."""
 
     _attr_entity_category = EntityCategory.CONFIG
-    _attr_has_entity_name = True
 
     def __init__(
         self,
         coordinator: GafctlCoordinator,
-        entry: ConfigEntry,
+        entry: GafctlConfigEntry,
         key: str,
         name: str,
         presets: dict[str, str],
     ) -> None:
-        super().__init__(coordinator)
-        self._entry = entry
+        super().__init__(coordinator, entry, key)
         self._key = key
         self._presets = presets
         self._attr_name = name
-        self._attr_unique_id = f"{entry.unique_id}_{key}"
         self._attr_options = list(presets)
 
     @property
     def available(self) -> bool:
-        command_kind = (
-            "quick_connect_mode" if self._key == "mode" else "legacy_preset"
-        )
+        command_kind = "quick_connect_mode" if self._key == "mode" else "legacy_preset"
         return bool(
             super().available
             and self.coordinator.http_command_owned
@@ -94,7 +91,7 @@ class GafctlControlSelect(CoordinatorEntity[GafctlCoordinator], SelectEntity):
 
     @property
     def current_option(self) -> str | None:
-        state = self.coordinator.data.get("state") if self.coordinator.data else None
+        state = self.state_values
         if not state:
             return None
         if self._key == "mode":
@@ -144,7 +141,9 @@ class GafctlControlSelect(CoordinatorEntity[GafctlCoordinator], SelectEntity):
     async def _async_set_preset(self, value: str) -> None:
         async with self.coordinator.command_lock:
             if not self.available:
-                raise HomeAssistantError("The selected device cannot accept this control")
+                raise HomeAssistantError(
+                    "The selected device cannot accept this control"
+                )
             control_error = None
             try:
                 await self.coordinator.client.set_control(
@@ -179,19 +178,6 @@ class GafctlControlSelect(CoordinatorEntity[GafctlCoordinator], SelectEntity):
                 )
             if control_error is not None:
                 raise HomeAssistantError(str(control_error)) from control_error
-
-    @property
-    def device_info(self) -> dr.DeviceInfo:
-        return dr.DeviceInfo(
-            identifiers={(DOMAIN, self._entry.unique_id)},
-            name=self.coordinator.device.get("name", "GAF Vent"),
-            manufacturer="GAF",
-            model=(
-                "GAF QuickConnect Vent"
-                if self.coordinator.device["backend"] == "quick_connect"
-                else "GAF Wi-Fi Vent"
-            ),
-        )
 
 
 def _thresholds_for(preset: str) -> tuple[float, float] | None:

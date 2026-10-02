@@ -35,7 +35,8 @@ devenv tasks run check:all
 
 This runs formatting, Clippy with warnings denied for all features, CLI-only
 and HTTP-only configurations, workspace tests with all features, CLI-only and
-HTTP-only tests, Rust doctests, and the Python Home Assistant client tests.
+HTTP-only tests, Rust doctests, Ruff formatting and lint checks, and the Python
+Home Assistant client tests.
 
 On native Linux, `check:all` also runs `check:ha-registry`. That task uses Home
 Assistant and MQTT dependencies pinned by `devenv.lock`, generates discovery
@@ -63,6 +64,11 @@ Replace `TEST_NAME` with a test name or substring. For the Python tests:
 ```sh
 python3 -m unittest discover -s tests -p test_gafctl_client.py
 ```
+
+The HA integration uses Python 3.14, typed config-entry runtime data, and shared
+entity descriptions. Format and lint Python changes with
+`ruff format custom_components tests/*.py` and
+`ruff check custom_components tests/*.py`.
 
 Tests use fake Bluetooth transports, local HTTP servers, and synthetic cloud
 fixtures. They check parsing, request validation, timeouts, state handling,

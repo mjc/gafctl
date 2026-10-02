@@ -22,6 +22,7 @@ in {
       cargo-machete
       bacon
       python3
+      ruff
       pkg-config
       mosquitto
     ]
@@ -35,6 +36,8 @@ in {
   tasks."check:cli-bin".exec = "cargo nextest run --package gafctl --no-default-features --features cli --bin gafctl --locked --status-level fail --final-status-level fail";
   tasks."check:http".exec = "cargo nextest run --package gafctl --all-targets --no-default-features --features http --locked --status-level fail --final-status-level fail";
   tasks."check:doc".exec = "cargo test --workspace --doc --locked";
+  tasks."check:python-format".exec = "ruff format --check custom_components tests/*.py";
+  tasks."check:python-lint".exec = "ruff check custom_components tests/*.py";
   tasks."check:ha".exec = "python3 -m unittest discover -s tests -p test_gafctl_client.py";
   tasks."check:ha-registry" = lib.mkIf linux {
     exec = ''
@@ -62,6 +65,8 @@ in {
       "check:http"
       "check:doc"
       "check:ha"
+      "check:python-format"
+      "check:python-lint"
     ]
     ++ lib.optionals linux ["check:ha-registry"];
 }

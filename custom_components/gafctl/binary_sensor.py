@@ -1,19 +1,18 @@
 """Reported controller flags and the cloud running estimate."""
 
 from dataclasses import dataclass
-from typing import Any
 
-from homeassistant.components.binary_sensor import BinarySensorEntity, BinarySensorEntityDescription
-from homeassistant.config_entries import ConfigEntry
+from homeassistant.components.binary_sensor import (
+    BinarySensorEntity,
+    BinarySensorEntityDescription,
+)
 from homeassistant.const import EntityCategory
 from homeassistant.core import HomeAssistant
-from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
-from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
-from . import GafctlCoordinator
-from .client import entity_keys
-from .const import DOMAIN
+from .client import JsonObject, entity_keys
+from .coordinator import GafctlConfigEntry, GafctlCoordinator
+from .entity import GafctlEntity
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -22,8 +21,12 @@ class GafctlBinaryDescription(BinarySensorEntityDescription):
 
 
 DESCRIPTIONS = (
-    GafctlBinaryDescription(key="controller_fan_flag", name="Controller fan flag", provenance="controller"),
-    GafctlBinaryDescription(key="running_estimate", name="Running estimate", provenance="inferred"),
+    GafctlBinaryDescription(
+        key="controller_fan_flag", name="Controller fan flag", provenance="controller"
+    ),
+    GafctlBinaryDescription(
+        key="running_estimate", name="Running estimate", provenance="inferred"
+    ),
     GafctlBinaryDescription(key="ota_in_progress", name="OTA in progress"),
     GafctlBinaryDescription(key="automatic_mode", name="Automatic mode"),
     GafctlBinaryDescription(key="timer_mode", name="Timer mode"),
@@ -33,32 +36,37 @@ DESCRIPTIONS = (
 
 
 async def async_setup_entry(
-    hass: HomeAssistant, entry: ConfigEntry, async_add_entities: AddEntitiesCallback,
+    hass: HomeAssistant,
+    entry: GafctlConfigEntry,
+    async_add_entities: AddEntitiesCallback,
 ) -> None:
-    coordinator: GafctlCoordinator = hass.data[DOMAIN][entry.entry_id]
+    coordinator: GafctlCoordinator = entry.runtime_data
     keys = entity_keys(coordinator.device).get("binary_sensor", set())
     async_add_entities(
         GafctlBinarySensor(coordinator, entry, description)
-        for description in DESCRIPTIONS if description.key in keys
+        for description in DESCRIPTIONS
+        if description.key in keys
     )
 
 
-class GafctlBinarySensor(CoordinatorEntity[GafctlCoordinator], BinarySensorEntity):
+class GafctlBinarySensor(GafctlEntity, BinarySensorEntity):
     """A reported boolean; unknown values stay unknown."""
 
     _attr_entity_category = EntityCategory.DIAGNOSTIC
-    _attr_has_entity_name = True
     entity_description: GafctlBinaryDescription
 
-    def __init__(self, coordinator: GafctlCoordinator, entry: ConfigEntry, description: GafctlBinaryDescription) -> None:
-        super().__init__(coordinator)
-        self._entry = entry
+    def __init__(
+        self,
+        coordinator: GafctlCoordinator,
+        entry: GafctlConfigEntry,
+        description: GafctlBinaryDescription,
+    ) -> None:
+        super().__init__(coordinator, entry, description.key)
         self.entity_description = description
-        self._attr_unique_id = f"{entry.unique_id}_{description.key}"
 
     @property
     def is_on(self) -> bool | None:
-        state = (self.coordinator.data or {}).get("state") or {}
+        state = self.state_values
         value = state.get(self.entity_description.key)
         return value if type(value) is bool else None
 
@@ -66,25 +74,15 @@ class GafctlBinarySensor(CoordinatorEntity[GafctlCoordinator], BinarySensorEntit
     def available(self) -> bool:
         data = self.coordinator.data or {}
         return bool(
-            super().available and self.coordinator.http_state_owned
-            and data.get("available") is True and data.get("freshness") == "fresh"
+            super().available
+            and self.coordinator.http_state_owned
+            and data.get("available") is True
+            and data.get("freshness") == "fresh"
             and data.get("state") is not None
         )
 
     @property
-    def extra_state_attributes(self) -> dict[str, Any]:
-        data = self.coordinator.data or {}
+    def extra_state_attributes(self) -> JsonObject:
         return {
-            "provenance": self.entity_description.provenance,
-            "freshness": data.get("freshness"),
-            "observed_at_unix_ms": data.get("observed_at_unix_ms"),
-            "last_error": data.get("last_error"),
-        }
-
-    @property
-    def device_info(self) -> dr.DeviceInfo:
-        return dr.DeviceInfo(
-            identifiers={(DOMAIN, self._entry.unique_id)},
-            name=self.coordinator.device.get("name", "GAF Vent"), manufacturer="GAF",
-            model="GAF Wi-Fi Vent" if self.coordinator.device["backend"] == "legacy_ble" else "GAF QuickConnect Vent",
-        )
+            "provenance": self.entity_description.provenance
+        } | self.reading_attributes

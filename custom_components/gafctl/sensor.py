@@ -1,7 +1,6 @@
 """Read-only GAF state and diagnostic sensors."""
 
 from dataclasses import dataclass
-from typing import Any
 
 from homeassistant.components.sensor import (
     SensorDeviceClass,
@@ -9,16 +8,18 @@ from homeassistant.components.sensor import (
     SensorEntityDescription,
     SensorStateClass,
 )
-from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import EntityCategory, PERCENTAGE, UnitOfTemperature, UnitOfTime
+from homeassistant.const import (
+    PERCENTAGE,
+    EntityCategory,
+    UnitOfTemperature,
+    UnitOfTime,
+)
 from homeassistant.core import HomeAssistant
-from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
-from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
-from . import GafctlCoordinator
-from .client import entity_keys
-from .const import DOMAIN
+from .client import JsonObject, JsonValue, entity_keys
+from .coordinator import GafctlConfigEntry, GafctlCoordinator
+from .entity import GafctlEntity
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -98,12 +99,13 @@ SENSORS = (
     ),
 )
 
+
 async def async_setup_entry(
     hass: HomeAssistant,
-    entry: ConfigEntry,
+    entry: GafctlConfigEntry,
     async_add_entities: AddEntitiesCallback,
 ) -> None:
-    coordinator: GafctlCoordinator = hass.data[DOMAIN][entry.entry_id]
+    coordinator: GafctlCoordinator = entry.runtime_data
     keys = entity_keys(coordinator.device).get("sensor", set())
     async_add_entities(
         GafctlSensor(coordinator, entry, description)
@@ -112,24 +114,21 @@ async def async_setup_entry(
     )
 
 
-class GafctlSensor(CoordinatorEntity[GafctlCoordinator], SensorEntity):
+class GafctlSensor(GafctlEntity, SensorEntity):
     entity_description: GafctlSensorDescription
-    _attr_has_entity_name = True
 
     def __init__(
         self,
         coordinator: GafctlCoordinator,
-        entry: ConfigEntry,
+        entry: GafctlConfigEntry,
         description: GafctlSensorDescription,
     ) -> None:
-        super().__init__(coordinator)
+        super().__init__(coordinator, entry, description.key)
         self.entity_description = description
-        self._entry = entry
-        self._attr_unique_id = f"{entry.unique_id}_{description.key}"
 
     @property
-    def native_value(self) -> Any:
-        state = self.coordinator.data.get("state") if self.coordinator.data else None
+    def native_value(self) -> JsonValue:
+        state = self.state_values
         return state.get(self.entity_description.value_key) if state else None
 
     @property
@@ -143,25 +142,5 @@ class GafctlSensor(CoordinatorEntity[GafctlCoordinator], SensorEntity):
         )
 
     @property
-    def extra_state_attributes(self) -> dict[str, Any]:
-        data = self.coordinator.data or {}
-        return {
-            "freshness": data.get("freshness"),
-            "observed_at_unix_ms": data.get("observed_at_unix_ms"),
-            "last_error": data.get("last_error"),
-        }
-
-    @property
-    def device_info(self) -> dr.DeviceInfo:
-        state = self.coordinator.data.get("state") if self.coordinator.data else None
-        return dr.DeviceInfo(
-            identifiers={(DOMAIN, self._entry.unique_id)},
-            name=self.coordinator.device.get("name", "GAF Vent"),
-            manufacturer="GAF",
-            model=(
-                "GAF QuickConnect Vent"
-                if self.coordinator.device["backend"] == "quick_connect"
-                else "GAF Wi-Fi Vent"
-            ),
-            sw_version=state.get("firmware_version") if state else None,
-        )
+    def extra_state_attributes(self) -> JsonObject:
+        return self.reading_attributes
