@@ -5,6 +5,7 @@ from __future__ import annotations
 import time
 from collections.abc import Mapping
 from contextlib import AbstractAsyncContextManager
+from dataclasses import replace
 from typing import Literal, Protocol
 from urllib.parse import urljoin, urlparse
 from uuid import RFC_4122, UUID, uuid4
@@ -21,6 +22,7 @@ from .models import (
     ControlOutcomeUnknown,
     Device,
     DeviceState,
+    EntitySource,
     JsonObject,
     JsonValue,
     Readings,
@@ -73,9 +75,10 @@ class ApiClient:
         devices = payload.get("devices") if isinstance(payload, Mapping) else None
         if not isinstance(devices, list):
             raise ApiError("proxy returned no devices")
-        if not all(_valid_device(device) for device in devices):
-            raise ApiError("proxy returned invalid device data")
-        selected = [_device_values(_mapping(device)) for device in devices]
+        try:
+            selected = [_decode_device(device) for device in devices]
+        except ApiError as error:
+            raise ApiError("proxy returned invalid device data") from error
         identifiers = [device.id for device in selected]
         if len({device.proxy_id for device in selected}) > 1:
             raise ApiError("proxy returned inconsistent proxy identities")
@@ -166,34 +169,6 @@ class ApiClient:
             raise ApiError("cannot connect to the local proxy") from error
 
 
-def _valid_device(device: object) -> bool:
-    if not isinstance(device, Mapping):
-        return False
-    capabilities = device.get("capabilities")
-    if not isinstance(capabilities, Mapping):
-        return False
-    commands = capabilities.get("commands")
-    return (
-        _valid_proxy_id(device.get("proxy_id"))
-        and isinstance(device.get("id"), str)
-        and _valid_identifier(device["id"])
-        and isinstance(device.get("name"), str)
-        and isinstance(device.get("backend"), str)
-        and device["backend"] in {"legacy_ble", "quick_connect"}
-        and isinstance(capabilities.get("read_state"), bool)
-        and isinstance(commands, list)
-        and all(
-            isinstance(command, Mapping) and isinstance(command.get("kind"), str)
-            for command in commands
-        )
-        and all(
-            isinstance(device.get(source), str) and device[source] in {"http", "mqtt"}
-            for source in ("state_source", "command_source")
-        )
-        and device["state_source"] == device["command_source"]
-    )
-
-
 def _mapping(value: object) -> Mapping[str, object]:
     if not isinstance(value, Mapping) or not all(isinstance(key, str) for key in value):
         raise ApiError("proxy returned invalid object data")
@@ -220,15 +195,15 @@ def _optional_boolean(value: object) -> bool | None:
     return None if value is None else _boolean(value)
 
 
-def _integer(value: object) -> int | None:
+def _optional_uint(value: object, maximum: int = 65535) -> int | None:
     if value is None:
         return None
-    if not isinstance(value, int) or isinstance(value, bool):
-        raise ApiError("proxy returned invalid integer")
+    if type(value) is not int or not 0 <= value <= maximum:
+        raise ApiError("proxy returned invalid unsigned integer")
     return value
 
 
-def _number(value: object) -> float | int | None:
+def _optional_number(value: object) -> float | int | None:
     if value is None:
         return None
     if not _is_finite_number(value):
@@ -244,20 +219,37 @@ def _backend(value: object) -> Backend:
     raise ApiError("proxy returned invalid backend")
 
 
-def _device_values(device: Mapping[str, object]) -> Device:
-    capabilities = _mapping(device["capabilities"])
-    commands = capabilities["commands"]
+def _decode_device(value: object) -> Device:
+    device = _mapping(value)
+    capabilities = _mapping(device.get("capabilities"))
+    commands = capabilities.get("commands")
     if not isinstance(commands, list):
         raise ApiError("proxy returned invalid commands")
+    device_id = _string(device.get("id"))
+    if not _valid_identifier(device_id):
+        raise ApiError("proxy returned invalid device identifier")
+    owner = _owner(device.get("state_source"))
+    if _owner(device.get("command_source")) != owner:
+        raise ApiError("proxy returned mixed device ownership")
     return Device(
-        proxy_id=_string(device["proxy_id"]),
-        id=_string(device["id"]),
-        name=_string(device["name"]),
-        read_state=_boolean(capabilities["read_state"]),
-        backend=_backend(device["backend"]),
-        commands=frozenset(_string(_mapping(command)["kind"]) for command in commands),
-        owner="http" if device["state_source"] == "http" else "mqtt",
+        proxy_id=_proxy_id(device.get("proxy_id")),
+        id=device_id,
+        name=_string(device.get("name")),
+        read_state=_boolean(capabilities.get("read_state")),
+        backend=_backend(device.get("backend")),
+        commands=frozenset(
+            _string(_mapping(command).get("kind")) for command in commands
+        ),
+        owner=owner,
     )
+
+
+def _owner(value: object) -> EntitySource:
+    if value == "http":
+        return "http"
+    if value == "mqtt":
+        return "mqtt"
+    raise ApiError("proxy returned invalid device ownership")
 
 
 def _control_error(payload: object, status: int) -> str:
@@ -271,14 +263,15 @@ def _control_error(payload: object, status: int) -> str:
     return f"proxy returned HTTP {status} for control"
 
 
-def _valid_proxy_id(value: object) -> bool:
-    if not isinstance(value, str):
-        return False
+def _proxy_id(value: object) -> str:
+    identifier = _string(value)
     try:
-        parsed = UUID(value)
-    except ValueError:
-        return False
-    return parsed.version == 4 and parsed.variant == RFC_4122 and str(parsed) == value
+        parsed = UUID(identifier)
+    except ValueError as error:
+        raise ApiError("proxy returned invalid proxy identity") from error
+    if parsed.version != 4 or parsed.variant != RFC_4122 or str(parsed) != identifier:
+        raise ApiError("proxy returned invalid proxy identity")
+    return identifier
 
 
 def _valid_identifier(value: str) -> bool:
@@ -292,142 +285,81 @@ def _valid_identifier(value: str) -> bool:
     )
 
 
-def _valid_state(state: Mapping[str, object], backend: str) -> bool:
-    settings = state.get("settings")
-    provenance = state.get("provenance")
-    return (
-        isinstance(settings, Mapping)
-        and _valid_settings(settings, backend)
-        and isinstance(provenance, Mapping)
-        and provenance.get("backend") == backend
-        and all(
-            _valid_timestamp(provenance.get(key))
-            for key in ("fetched_at_unix_ms", "observed_at_unix_ms")
-        )
-        and _valid_diagnostics(state.get("diagnostics"))
-        and (
-            state.get("estimated_running") is None
-            or isinstance(state["estimated_running"], bool)
-        )
-        and all(
-            _optional_finite_number(state.get(key))
-            for key in ("temperature_f", "humidity_percent")
-        )
-    )
-
-
-def _valid_diagnostics(diagnostics: object) -> bool:
-    if diagnostics is None:
-        return True
-    return (
-        isinstance(diagnostics, Mapping)
-        and all(
-            diagnostics.get(key) is None or isinstance(diagnostics[key], str)
-            for key in ("firmware_version", "signal_strength_raw", "verified_raw")
-        )
-        and (
-            diagnostics.get("ota_in_progress") is None
-            or isinstance(diagnostics["ota_in_progress"], bool)
-        )
-    )
-
-
-def _valid_settings(settings: Mapping[str, object], backend: str) -> bool:
+def _decode_readings(state: Mapping[str, object], backend: Backend) -> Readings:
+    settings = _mapping(state.get("settings"))
     if settings.get("backend") != backend:
-        return False
-    mode = settings.get("mode")
-    valid_modes = (
-        {"automatic", "timer", "ota"}
-        if backend == "legacy_ble"
-        else {"off", "automatic", "timer", "manual", "unknown", "conflicting"}
+        raise ApiError("proxy returned settings for a different backend")
+    mode = _mode(settings.get("mode"), backend)
+    raw_diagnostics = state.get("diagnostics")
+    diagnostics = {} if raw_diagnostics is None else _mapping(raw_diagnostics)
+    common = Readings(
+        temperature_f=_optional_number(state.get("temperature_f")),
+        humidity_percent=_optional_number(state.get("humidity_percent")),
+        firmware_version=_optional_string(diagnostics.get("firmware_version")),
+        mode=mode,
     )
-    if mode is None:
-        if backend == "quick_connect":
-            return False
-    elif not isinstance(mode, str) or mode not in valid_modes:
-        return False
-    keys: tuple[str, ...]
-    if backend == "quick_connect":
-        keys = (
-            "automatic_temperature_f",
-            "automatic_humidity_percent",
-            "timer_duration_minutes",
-        )
-        flag = settings.get("humidity_monitor")
-    else:
-        keys = (
-            "automatic_temperature_tenths_f",
-            "automatic_humidity_tenths_percent",
-            "timer_remaining_minutes",
-            "timer_original_minutes",
-        )
-        flag = settings.get("controller_fan_on")
-    return (flag is None or isinstance(flag, bool)) and all(
-        _optional_integer(settings.get(key), 65535) for key in keys
-    )
-
-
-def _home_assistant_values(state: Mapping[str, object], backend: str) -> Readings:
-    diagnostics = _mapping(state.get("diagnostics") or {})
-    settings = _mapping(state["settings"])
-    common = {
-        "temperature_f": _number(state.get("temperature_f")),
-        "humidity_percent": _number(state.get("humidity_percent")),
-    }
+    signal_strength = _optional_string(diagnostics.get("signal_strength_raw"))
+    verified = _optional_string(diagnostics.get("verified_raw"))
+    ota = _optional_boolean(diagnostics.get("ota_in_progress"))
+    running = _optional_boolean(state.get("estimated_running"))
     if backend == "legacy_ble":
-        return Readings(
-            temperature_f=common["temperature_f"],
-            humidity_percent=common["humidity_percent"],
-            firmware_version=_optional_string(diagnostics.get("firmware_version")),
-            mode=_optional_string(settings.get("mode")),
+        return replace(
+            common,
             controller_fan_flag=_optional_boolean(settings.get("controller_fan_on")),
             automatic_temperature_threshold_f=_tenths(
-                _integer(settings.get("automatic_temperature_tenths_f"))
+                _optional_uint(settings.get("automatic_temperature_tenths_f"))
             ),
             automatic_humidity_threshold_percent=_tenths(
-                _integer(settings.get("automatic_humidity_tenths_percent"))
+                _optional_uint(settings.get("automatic_humidity_tenths_percent"))
             ),
-            timer_remaining_minutes=_integer(settings.get("timer_remaining_minutes")),
-            timer_original_minutes=_integer(settings.get("timer_original_minutes")),
+            timer_remaining_minutes=_optional_uint(
+                settings.get("timer_remaining_minutes")
+            ),
+            timer_original_minutes=_optional_uint(
+                settings.get("timer_original_minutes")
+            ),
         )
-    mode = _string(settings["mode"])
-    running = _optional_boolean(state.get("estimated_running"))
-    return Readings(
-        temperature_f=common["temperature_f"],
-        humidity_percent=common["humidity_percent"],
-        mode=mode,
-        automatic_temperature_f=_integer(settings.get("automatic_temperature_f")),
-        automatic_humidity_percent=_integer(settings.get("automatic_humidity_percent")),
-        timer_duration_minutes=_integer(settings.get("timer_duration_minutes")),
+    return replace(
+        common,
+        automatic_temperature_f=_optional_uint(settings.get("automatic_temperature_f")),
+        automatic_humidity_percent=_optional_uint(
+            settings.get("automatic_humidity_percent")
+        ),
+        timer_duration_minutes=_optional_uint(settings.get("timer_duration_minutes")),
         humidity_monitor=_optional_boolean(settings.get("humidity_monitor")),
         automatic_mode=_mode_flag(mode, "automatic"),
         timer_mode=_mode_flag(mode, "timer"),
         manual_mode=_mode_flag(mode, "manual"),
         running_estimate=running,
         running_estimate_provenance="inferred" if running is not None else None,
-        firmware_version=_optional_string(diagnostics.get("firmware_version")),
-        signal_strength_raw=_optional_string(diagnostics.get("signal_strength_raw")),
-        verified_raw=_optional_string(diagnostics.get("verified_raw")),
-        ota_in_progress=_optional_boolean(diagnostics.get("ota_in_progress")),
+        signal_strength_raw=signal_strength,
+        verified_raw=verified,
+        ota_in_progress=ota,
     )
 
 
-def _mode_flag(mode: str, expected: str) -> bool | None:
+def _mode(value: object, backend: Backend) -> str | None:
+    mode = _optional_string(value)
+    allowed = (
+        {None, "automatic", "timer", "ota"}
+        if backend == "legacy_ble"
+        else QUICKCONNECT_MODES | {"unknown", "conflicting"}
+    )
+    if mode not in allowed:
+        raise ApiError("proxy returned invalid device mode")
+    return mode
+
+
+def _observed_at(value: object, backend: Backend) -> int | None:
+    provenance = _mapping(value)
+    if provenance.get("backend") != backend:
+        raise ApiError("proxy returned provenance for a different backend")
+    _optional_uint(provenance.get("fetched_at_unix_ms"), 2**64 - 1)
+    return _optional_uint(provenance.get("observed_at_unix_ms"), 2**64 - 1)
+
+
+def _mode_flag(mode: str | None, expected: str) -> bool | None:
     return mode == expected if mode in QUICKCONNECT_MODES else None
-
-
-def _optional_finite_number(value: object) -> bool:
-    return value is None or _is_finite_number(value)
-
-
-def _optional_integer(value: object, maximum: int) -> bool:
-    return value is None or (
-        isinstance(value, int) and not isinstance(value, bool) and 0 <= value <= maximum
-    )
-
-
-def _valid_timestamp(value: object) -> bool:
-    return _optional_integer(value, 2**64 - 1)
 
 
 def _tenths(value: int | None) -> float | None:
@@ -435,19 +367,9 @@ def _tenths(value: int | None) -> float | None:
 
 
 def _state_response(payload: object, device_id: str) -> DeviceState:
-    if not isinstance(payload, Mapping):
-        raise ApiError("proxy returned invalid device state")
     payload = _mapping(payload)
-    available = payload.get("available")
-    state = payload.get("state")
-    last_error = payload.get("last_error")
-    backend = payload.get("backend")
+    backend = _backend(payload.get("backend"))
     inventory_status = payload.get("inventory_status")
-    if not isinstance(backend, str) or backend not in {
-        "legacy_ble",
-        "quick_connect",
-    }:
-        raise ApiError("proxy returned invalid device state")
     if not isinstance(inventory_status, str) or inventory_status not in {
         "unknown",
         "present",
@@ -455,12 +377,9 @@ def _state_response(payload: object, device_id: str) -> DeviceState:
         "unavailable",
     }:
         raise ApiError("proxy returned invalid device state")
-    if not isinstance(available, bool):
-        raise ApiError("proxy returned invalid device state")
-    if state is not None and not isinstance(state, Mapping):
-        raise ApiError("proxy returned invalid device state")
-    if last_error is not None and not isinstance(last_error, str):
-        raise ApiError("proxy returned invalid device state")
+    available = _boolean(payload.get("available"))
+    last_error = _optional_string(payload.get("last_error"))
+    state = payload.get("state")
     if payload.get("id") != device_id:
         raise ApiError("proxy returned mismatched device state")
     if available != (state is not None):
@@ -469,18 +388,21 @@ def _state_response(payload: object, device_id: str) -> DeviceState:
     values = None
     if state is not None:
         state = _mapping(state)
-        if not _valid_state(state, backend):
-            raise ApiError("proxy returned invalid device values")
-        observed_at = _integer(_mapping(state["provenance"]).get("observed_at_unix_ms"))
-        values = _home_assistant_values(state, backend)
+        try:
+            observed_at = _observed_at(state.get("provenance"), backend)
+            values = _decode_readings(state, backend)
+        except ApiError as error:
+            raise ApiError("proxy returned invalid device values") from error
     freshness: Literal["fresh", "unknown", "stale"] = (
         "fresh"
         if available
-        else ("unknown" if inventory_status == "unknown" else "stale")
+        else "unknown"
+        if inventory_status == "unknown"
+        else "stale"
     )
     return DeviceState(
         device_id=device_id,
-        backend=_backend(backend),
+        backend=backend,
         available=available,
         freshness=freshness,
         observed_at_unix_ms=observed_at,

@@ -68,7 +68,8 @@ python3 -m unittest discover -s tests -p test_gafctl_client.py
 
 The HA integration uses Python 3.14, typed config-entry runtime data, and shared
 entity descriptions. `models.py` holds immutable device and reading records;
-`client.py` validates HTTP payloads; `controls.py` defines number controls once
+`client.py` validates and decodes HTTP fields once into those records;
+`controls.py` defines number controls once
 for entity setup, command validation and readback checks. The coordinator serializes writes, checks current ownership and
 capabilities, sends once, and refreshes state after the response. Entities expose
 readings and translate API errors for HA.

@@ -230,7 +230,7 @@ class ApiClientTests(unittest.IsolatedAsyncioTestCase):
         self.assertIs(result.timer_mode, False)
         self.assertIs(result.manual_mode, False)
         raw["settings"]["mode"] = "conflicting"
-        result = CLIENT._home_assistant_values(raw, "quick_connect")
+        result = CLIENT._decode_readings(raw, "quick_connect")
         self.assertIsNone(result.automatic_mode)
         self.assertIsNone(result.timer_mode)
         self.assertIsNone(result.manual_mode)
