@@ -27,6 +27,7 @@ from custom_components.updraft import number as updraft_number
 from custom_components.updraft import binary_sensor as updraft_binary
 from custom_components.updraft import sensor as updraft_sensor, switch as updraft_switch, button as updraft_button
 from custom_components.updraft.client import ApiError
+from custom_components.updraft.config_flow import UpdraftConfigFlow
 from homeassistant.exceptions import HomeAssistantError
 
 
@@ -47,6 +48,100 @@ def device(proxy_id=PROXY_ID, owner="http"):
 
 
 class RegistryTests(unittest.IsolatedAsyncioTestCase):
+    async def test_onboarding_bulk_selects_only_http_owned_unconfigured_devices(self):
+        await self.entry()
+        eligible = [device() | {"id": key, "capabilities": {"read_state": True, "commands": []}} for key in ("one", "two")]
+        flow = UpdraftConfigFlow()
+        flow.hass = self.hass
+        flow.handler = "updraft"
+        flow.context = {"source": "user"}
+        client = AsyncMock()
+        client.fetch_devices.return_value = [device(), device(owner="mqtt") | {"id": "mqtt"}, *eligible]
+        with patch("custom_components.updraft.config_flow.async_get_clientsession", return_value=object()), patch("custom_components.updraft.config_flow.ApiClient", return_value=client):
+            result = await flow.async_step_user({"api_url": "http://proxy:8787"})
+            self.assertEqual(result["step_id"], "device")
+            self.assertEqual(set(flow._devices), {"one", "two"})
+            with patch.object(type(self.hass.config_entries.flow), "async_init", AsyncMock(return_value={"type": "create_entry"})) as imported:
+                result = await flow.async_step_device({"device_ids": ["one", "two"]})
+            self.assertEqual(result["type"], "create_entry")
+            self.assertEqual(result["data"]["device_id"], "one")
+            imported.assert_awaited_once()
+            self.assertEqual(imported.await_args.kwargs["data"]["device_id"], "two")
+
+    async def test_real_flow_manager_creates_separate_entries_for_bulk_selection(self):
+        import shutil
+        component = Path(__file__).resolve().parents[1] / "custom_components/updraft"
+        shutil.copytree(component, Path(self.hass.config.path("custom_components/updraft")))
+        from homeassistant import loader
+        loader.async_setup(self.hass)
+        selected = [device() | {"id": key, "capabilities": {"read_state": True, "commands": []}} for key in ("one", "two")]
+        client = AsyncMock()
+        client.fetch_devices.return_value = selected
+        with patch("custom_components.updraft.config_flow.async_get_clientsession", return_value=object()), patch("custom_components.updraft.config_flow.ApiClient", return_value=client), patch.object(ConfigEntries, "async_setup", AsyncMock(return_value=True)):
+            result = await self.hass.config_entries.flow.async_init("updraft", context={"source": "user"})
+            result = await self.hass.config_entries.flow.async_configure(result["flow_id"], {"api_url": "http://proxy:8787"})
+            result = await self.hass.config_entries.flow.async_configure(result["flow_id"], {"device_ids": ["one", "two"]})
+            await self.hass.async_block_till_done()
+        self.assertEqual(result["type"], "create_entry")
+        entries = self.hass.config_entries.async_entries("updraft")
+        self.assertEqual({entry.data["device_id"] for entry in entries}, {"one", "two"})
+        self.assertEqual({entry.unique_id for entry in entries}, {f"updraft_{PROXY_ID}_one", f"updraft_{PROXY_ID}_two"})
+
+    async def test_onboarding_rejects_empty_or_changed_selection_before_import(self):
+        flow = UpdraftConfigFlow()
+        flow.hass = self.hass
+        flow.handler = "updraft"
+        flow.context = {"source": "user"}
+        selected = device() | {"capabilities": {"read_state": True, "commands": []}}
+        flow._api_url = "http://proxy:8787"
+        flow._devices = {selected["id"]: selected}
+        for changed in (device(owner="mqtt"), device("650e8400-e29b-41d4-a716-446655440000")):
+            with patch.object(flow, "_fetch_devices", AsyncMock(return_value=[changed])):
+                result = await flow.async_step_device({"device_ids": ["configured"]})
+            self.assertEqual(result["type"], "form")
+            self.assertEqual(result["errors"]["base"], "device_unavailable")
+        result = await flow.async_step_device({"device_ids": []})
+        self.assertEqual(result["errors"]["base"], "device_unavailable")
+
+    async def test_import_checks_identity_and_existing_entry_without_duplicates(self):
+        await self.entry()
+        for proxy_id in (PROXY_ID, "650e8400-e29b-41d4-a716-446655440000"):
+            flow = UpdraftConfigFlow()
+            flow.hass = self.hass
+            flow.handler = "updraft"
+            flow.context = {"source": "import"}
+            selected = device(proxy_id) | {"capabilities": {"read_state": True, "commands": []}}
+            with patch.object(flow, "_fetch_devices", AsyncMock(return_value=[selected])):
+                if proxy_id == PROXY_ID:
+                    from homeassistant.data_entry_flow import AbortFlow
+                    with self.assertRaises(AbortFlow) as raised:
+                        await flow.async_step_import({"api_url": "http://proxy:8787", "device_id": "configured", "proxy_id": PROXY_ID, "backend": "legacy_ble"})
+                    self.assertEqual(raised.exception.reason, "already_configured")
+                else:
+                    result = await flow.async_step_import({"api_url": "http://proxy:8787", "device_id": "configured", "proxy_id": PROXY_ID, "backend": "legacy_ble"})
+                    self.assertEqual(result["reason"], "device_unavailable")
+
+    async def test_reconfigure_preserves_identity_and_rejects_another_proxy(self):
+        entry = await self.entry()
+        registered, registered_device = self.registered_sensor(entry)
+        for proxy_id, expected in (("650e8400-e29b-41d4-a716-446655440000", "wrong_device"), (PROXY_ID, None)):
+            flow = UpdraftConfigFlow()
+            flow.hass = self.hass
+            flow.handler = "updraft"
+            flow.context = {"source": "reconfigure", "entry_id": entry.entry_id}
+            client = AsyncMock()
+            client.fetch_devices.return_value = [device(proxy_id)]
+            with patch("custom_components.updraft.config_flow.async_get_clientsession", return_value=object()), patch("custom_components.updraft.config_flow.ApiClient", return_value=client), patch.object(ConfigEntries, "async_reload", AsyncMock(return_value=True)):
+                result = await flow.async_step_reconfigure({"api_url": "http://new-proxy:8787"})
+            if expected:
+                self.assertEqual(result["errors"]["base"], expected)
+                self.assertEqual(entry.data["api_url"], "http://127.0.0.1:8787")
+            else:
+                self.assertEqual(result["type"], "abort")
+                self.assertEqual(entry.data["api_url"], "http://new-proxy:8787")
+                self.assertEqual(entry.unique_id, f"updraft_{PROXY_ID}_configured")
+                self.assertEqual(self.entities.async_get(registered.entity_id).device_id, registered_device.id)
+
     async def test_reported_sensors_keep_raw_diagnostics_and_original_timer(self):
         entry = await self.entry()
         for backend, values, expected in (

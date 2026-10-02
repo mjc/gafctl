@@ -105,23 +105,19 @@ For automatic startup and logs, follow the [service setup guide](docs/deployment
    **Updraft GAF Vent**.
 4. Enter `http://UPDRAFT_HOST:8787`, replacing the host with your service's address.
    Use the base address without `/api/v2`. Replace any prefilled address.
-5. Select your fan.
+5. Select the fans to add. Each selected fan gets its own integration entry.
 
-Home Assistant gets temperature and humidity sensors, diagnostic sensors, and
-two setting selectors: **Automatic thresholds** and **Fan timer**. The supported
-Bluetooth controls are:
+Home Assistant exposes measurements, diagnostics, selectors, adjustable target
+numbers, timer duration and refresh for the original controller. Numbers use
+90–120 °F, 30–80%, and 0–360 timer minutes in whole-unit steps. The service reads
+and preserves the unchanged target before writing. The existing verified
+threshold and one-minute/clear presets remain available. A separate on/off
+switch is not exposed for the original controller. The controller fan flag
+reports controller state, without measuring airflow.
 
-| Setting | Choices |
-| --- | --- |
-| Automatic thresholds | 105.0 °F / 30.0% or 105.1 °F / 30.1% |
-| Fan timer | Clear timer or run a one-minute timer |
-
-These are the settings tested with the original controller. Arbitrary thresholds,
-longer timers, and a separate on/off switch are not exposed by the normal controls.
-Selecting automatic thresholds also switches the controller to automatic mode.
-Clearing the timer leaves it in timer mode; select an automatic preset to resume
-automatic operation. The controller's fan flag reports its setting, not measured
-airflow.
+To change the API address, open the entry's menu and choose **Reconfigure**.
+The new address must report the same persistent proxy UUID, device ID and
+backend. Existing HA entity and device IDs are preserved.
 
 MQTT discovery is an alternative to the HTTP integration. Use the
 [Home Assistant and MQTT guide](docs/home-assistant-entities.md) if you prefer it.
