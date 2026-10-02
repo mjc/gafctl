@@ -123,7 +123,7 @@ struct BleOptions {
     #[arg(long, default_value_t = 6)]
     scan_seconds: u64,
 
-    /// Seconds allowed for each BLE operation and each command response.
+    /// Seconds for GATT setup, command writes, and responses; platform calls allow at least 40s.
     #[arg(long, default_value_t = 3)]
     response_timeout_seconds: u64,
 

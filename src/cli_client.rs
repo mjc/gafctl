@@ -379,7 +379,7 @@ pub(crate) struct BleCommand {
 pub(crate) struct BleSettings {
     #[arg(long, global = true, default_value = "6")]
     pub(crate) scan_seconds: DeadlineSeconds,
-    /// Timeout for each BLE operation; setup/recovery retains transport-specific limits.
+    /// Seconds for GATT setup, command writes, and responses; platform calls allow at least 40s.
     #[arg(long, global = true, default_value = "3")]
     pub(crate) timeout_seconds: DeadlineSeconds,
     #[arg(long, global = true, value_enum, default_value = "text")]

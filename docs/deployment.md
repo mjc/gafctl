@@ -33,10 +33,10 @@ manually. On NixOS, manage the package, user, Bluetooth, firewall, and systemd
 unit declaratively. This repository does not yet export a NixOS package or
 service module; the current build workflow is devenv.
 
-Install the executable from the repository root:
+Install both executables from the repository root after the release build:
 
 ```sh
-sudo install -m 0755 target/release/gafctl-server /usr/local/bin/gafctl-server
+sudo install -m 0755 target/release/gafctl target/release/gafctl-server /usr/local/bin/
 sudo useradd --system --home-dir /var/lib/gafctl --shell /usr/sbin/nologin gafctl
 sudo install -d -m 0750 -o root -g gafctl /etc/gafctl
 sudo install -m 0640 -o root -g gafctl /dev/null /etc/gafctl/gafctl.env
@@ -157,7 +157,7 @@ Cloud controls are disabled by default. To opt into experimental mode, target,
 and timer-duration writes, set `GAFCTL_QUICKCONNECT_WRITES_ENABLED=true` and
 restart. This advertises controls to Home Assistant and the CLI; enabling it
 does not establish that your model's cloud writes work. The CLI guide lists the
-[commands and limits](cli.md#quickconnect-controls).
+[commands and limits](cli.md#controls).
 
 Cloud polling runs separately from Bluetooth polling. A login or Internet failure
 leaves the service running and cloud devices unavailable; it retries on the next
@@ -182,7 +182,30 @@ integration does not need a broker.
 | QuickConnect shows no controls | Writes are disabled by default. Read-only devices expose sensors. |
 | Control times out | Read the device state before retrying. The service may still be completing the command. |
 
-For upgrades, stop the service, replace the executable, and restart. Keep the
+For upgrades, stop the service, replace both executables, and restart. Keep the
 identity store and local configuration. To roll back, restore the previous
-executable and restart. Home Assistant's integration configuration does not need
-to be recreated for a normal upgrade.
+executables and restart. Home Assistant's integration configuration does not need
+to be recreated for an upgrade that retains its integration domain and identity.
+
+## Migration from Updraft
+
+The rename changes executable names, the HA integration domain, MQTT namespaces,
+environment variables, and shared Nix service, user, credential, and state paths.
+It requires a coordinated deployment; there is no automatic compatibility layer.
+
+1. Stop the old service before starting `gafctl-server`.
+2. Preserve the existing identity-store contents, including the proxy UUID and
+   device mappings. Move the file to the new private state path and set ownership
+   for the new service user. Provision credentials at the new configured paths
+   and use `GAFCTL_` variables.
+3. Back up the HA configuration. Plan the domain/registry migration before
+   replacing `custom_components/updraft` with `custom_components/gafctl`; copying
+   the directory does not migrate existing entries. Preserve entity IDs used by
+   dashboards and automations, and verify proxy/device identity after migration.
+4. Remove the old retained MQTT discovery configurations before enabling the new
+   publisher. Update broker permissions for `gafctl/` and the discovery node
+   `homeassistant/+/gafctl/+/config` described in the MQTT guide.
+5. Verify state freshness, entity ownership, and control readback, then remove
+   the old component and service configuration. Keep the migration backup for
+   rollback; restoring only an executable does not undo a domain or state-path
+   change.

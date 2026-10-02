@@ -6,8 +6,8 @@ bundled firmware, and captures from one controller reporting firmware `030000`
 (3.0.0). See [protocol findings](protocol-findings.md) for recorded replies.
 
 The filename retains the original revision-1 name. That revision covered reads
-and automatic thresholds; the current implementation also exposes the tested
-zero- and one-minute timer presets described below. Protocol revision numbers
+and automatic thresholds; the current implementation also exposes timer presets
+and adjustable targets through HTTP and Home Assistant. Protocol revision numbers
 are documentation versions and are not negotiated with the fan.
 
 ## Bluetooth and framing
@@ -44,22 +44,32 @@ from it. The fan flag is controller state rather than airflow feedback.
 | Automatic thresholds | `#ams` + two four-digit uppercase hex fields + LF | `#amr0\n` | Both thresholds match; mode is automatic. |
 | Timer | `#tms` + four-digit uppercase hex minutes + LF | `#tmr0\n` | Timer values match; mode is timer. A zero clear also requires the fan flag off. |
 
-The normal CLI, HTTP API, and Home Assistant controls expose only the settings
-captured on the controller:
+The direct Bluetooth CLI exposes four presets captured on the controller.
+HTTP and Home Assistant also retain these presets:
 
 - Automatic: 105.0 °F / 30.0% (`041A012C`).
 - Automatic: 105.1 °F / 30.1% (`041B012D`).
 - Timer clear: zero minutes (`0000`).
 - Timer start: one minute (`0001`).
 
+HTTP and Home Assistant additionally expose adjustable temperature (90–120 °F),
+humidity (30–80%), and timer duration (0–360 minutes), in whole-unit steps. These
+bounds come from the manufacturer app; zero clears the timer. Changing one
+threshold first reads and preserves the other raw threshold under the same
+device transaction. Missing preservation readback prevents the write.
+
+Owned-device acceptance confirmed 110 °F, 40%, a two-minute timer, and clear,
+then restored automatic mode at 105 °F / 30%. The range endpoints have not all
+been tested on hardware. See [control evidence](protocol-findings.md#adjustable-control-acceptance).
+
 A reply alone is not confirmation. A mismatched, missing, or undecodable readback
 leaves the write unconfirmed. A timer that appears to have expired before readback
 is also unconfirmed. Clearing the timer leaves timer mode active; an automatic
 write is needed to return to automatic mode.
 
-The diagnostic probe accepts other raw `u16` values. The accepted hardware range,
-especially the upper timer bound, has not been established. Those diagnostic
-arguments do not extend the normal control presets.
+The diagnostic probe accepts other raw `u16` values. The complete hardware range,
+especially the upper timer bound, has not been established. Diagnostic arguments
+do not extend the bounded service controls.
 
 ## Unsupported operations
 

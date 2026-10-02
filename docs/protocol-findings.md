@@ -24,7 +24,8 @@ App: GAF Wi-Fi Vent 2.1 (`com.gaf.wifivent`). Firmware: `GAFVent_030000.bin`. BL
 - Setter encoding: uppercase, zero-padded hexadecimal (`%04X`).
 - Reply encoding: lowercase hexadecimal (`%04x`) or decimal digits (`%1d`).
 - `amr` and `tmr` payload `0`: acknowledgement.
-- Both setters acknowledged and read back. Accepted ranges are unknown.
+- Both setters acknowledged and read back. The complete hardware ranges have not
+  been established; adjustable service bounds and sampled acceptance are below.
 
 | Request | Response | Meaning |
 | --- | --- | --- |
@@ -61,9 +62,22 @@ On 2026-09-29, Gafctl scanned for service `00FF`, connected to characteristic `F
 | `#tms0000\n` | `#tmr0\n` | timer 0/0 | timer/off |
 | `#ams041A012C\n` | `#amr0\n` | thresholds 105.0°F / 30.0%; timer 0/0 | automatic/off; 99.7°F / 15.8% |
 
-## Remaining work
+## Adjustable control acceptance
+
+On 2026-10-01, owned-device acceptance confirmed 110°F, 40% humidity, a two-minute
+timer, and timer clear, then restored automatic mode at 105°F / 30%. These checks
+verified acknowledgement and readback, without measuring airflow. The
+manufacturer Android app establishes whole-unit bounds of 90–120°F, 30–80%, and
+1–360 timer minutes; zero clear is independently verified. HTTP and HA expose
+these bounded settings and preserve the untouched threshold during a change.
+The range endpoints have not all been physically tested. The direct Bluetooth
+CLI retains the four fixed presets in the earlier capture.
+
+## Evidence limits
 
 - Check additional controllers and firmware revisions. The captured device reports
   3.0.0; its identity reply does not establish the roof/gable model.
-- Capture the Wi-Fi TLS exchange if implementing Wi-Fi support. Keep certificate and private-key contents out of the repository.
-- Test other controls after identifying their command ranges. Measure airflow separately from controller state.
+- Wi-Fi/TLS implementation and investigation remain paused. No home-LAN
+  provisioning or Wi-Fi control acceptance is recorded.
+- Adjustable bounds are app evidence plus the sampled acceptance above. Motor
+  operation and airflow require separate measurements from controller state.

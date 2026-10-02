@@ -143,10 +143,12 @@ candidates, supply the platform peripheral ID returned by the scan. Direct
 listed above. It uses the existing transport, identity validation, and readback
 confirmation logic.
 
-BLE discovery defaults to six seconds (`--scan-seconds`). Each BLE operation and
-command response defaults to three seconds (`--timeout-seconds`). Both options
-require positive integers; connection setup and recovery retain the existing
-transport-specific limits. These flags and `--format` work within the BLE
+BLE discovery defaults to six seconds (`--scan-seconds`). GATT setup, each command
+write, and each response wait default to three seconds (`--timeout-seconds`).
+Platform adapter setup, scanning, connection, and cleanup allow at least 40
+seconds for operating-system calls. Both options require positive integers;
+the [recovery limits](protocol-contract-v1.md#timeouts-and-recovery) also apply.
+These flags and `--format` work within the BLE
 command tree, including after `preset`.
 
 Partial snapshots retain successfully decoded fields, nullable values, field
@@ -255,5 +257,5 @@ confirmation checks. Libraries do not depend on clap, MQTT, the BLE runtime,
 or service handlers.
 
 Automated tests use local HTTP servers and the existing fake BLE transports.
-They establish software behavior; this change adds no physical device acceptance
-claim.
+They establish software behavior. Physical device evidence is recorded separately
+in the [protocol findings](protocol-findings.md).

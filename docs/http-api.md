@@ -158,7 +158,7 @@ Example body, with an illustrative timestamp that must be replaced before sendin
 
 Original-controller presets are `automatic105_f30_percent`,
 `automatic105_1_f30_1_percent`, `timer_clear`, and `timer_one_minute`. Their effects
-are listed in the [CLI reference](cli.md#original-fan-controls).
+are listed in the [CLI reference](cli.md#controls).
 
 Original-controller adjustable commands:
 
