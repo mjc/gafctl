@@ -612,6 +612,105 @@ dependencies = [
 ]
 
 [[package]]
+name = "gafctl"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "assert_cmd",
+ "axum",
+ "bytes",
+ "clap",
+ "clap_complete",
+ "futures-util",
+ "gafctl-api",
+ "gafctl-bluetooth",
+ "gafctl-client",
+ "gafctl-protocol",
+ "gafctl-quickconnect",
+ "http-body-util",
+ "reqwest",
+ "rumqttc",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
+ "tower",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+]
+
+[[package]]
+name = "gafctl-api"
+version = "0.1.0"
+dependencies = [
+ "gafctl-protocol",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "uuid",
+]
+
+[[package]]
+name = "gafctl-bluetooth"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "bluez-async",
+ "btleplug",
+ "bytes",
+ "dbus",
+ "futures-util",
+ "gafctl-protocol",
+ "rand 0.9.5",
+ "serde_json",
+ "thiserror",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "gafctl-client"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "bytes",
+ "futures-util",
+ "gafctl-api",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
+]
+
+[[package]]
+name = "gafctl-protocol"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "proptest",
+ "thiserror",
+]
+
+[[package]]
+name = "gafctl-quickconnect"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "base64",
+ "bytes",
+ "futures-util",
+ "httpdate",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
+]
+
+[[package]]
 name = "getrandom"
 version = "0.2.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2064,105 +2163,6 @@ name = "untrusted"
 version = "0.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8ecb6da28b8a351d773b68d5825ac39017e680750f980f3a1a85cd8dd28a47c1"
-
-[[package]]
-name = "updraft"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "assert_cmd",
- "axum",
- "bytes",
- "clap",
- "clap_complete",
- "futures-util",
- "http-body-util",
- "reqwest",
- "rumqttc",
- "serde",
- "serde_json",
- "thiserror",
- "tokio",
- "tower",
- "tracing",
- "tracing-subscriber",
- "updraft-api",
- "updraft-bluetooth",
- "updraft-client",
- "updraft-protocol",
- "updraft-quickconnect",
- "uuid",
-]
-
-[[package]]
-name = "updraft-api"
-version = "0.1.0"
-dependencies = [
- "serde",
- "serde_json",
- "thiserror",
- "updraft-protocol",
- "uuid",
-]
-
-[[package]]
-name = "updraft-bluetooth"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "bluez-async",
- "btleplug",
- "bytes",
- "dbus",
- "futures-util",
- "rand 0.9.5",
- "serde_json",
- "thiserror",
- "tokio",
- "tracing",
- "updraft-protocol",
- "uuid",
-]
-
-[[package]]
-name = "updraft-client"
-version = "0.1.0"
-dependencies = [
- "axum",
- "bytes",
- "futures-util",
- "reqwest",
- "serde",
- "serde_json",
- "thiserror",
- "tokio",
- "updraft-api",
-]
-
-[[package]]
-name = "updraft-protocol"
-version = "0.1.0"
-dependencies = [
- "bytes",
- "proptest",
- "thiserror",
-]
-
-[[package]]
-name = "updraft-quickconnect"
-version = "0.1.0"
-dependencies = [
- "axum",
- "base64",
- "bytes",
- "futures-util",
- "httpdate",
- "reqwest",
- "serde",
- "serde_json",
- "thiserror",
- "tokio",
-]
 
 [[package]]
 name = "url"

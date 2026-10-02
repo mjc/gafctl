@@ -15,9 +15,91 @@ use axum::{
 };
 use serde_json::{Value, json};
 
+struct ServerProcess(std::process::Child);
+
+#[test]
+fn server_help_and_invalid_arguments_are_forwarded_to_the_server_executable() {
+    for args in [vec!["--help"], vec!["--bind", "invalid"]] {
+        let direct = cargo_bin_cmd!("gafctl-server")
+            .args(&args)
+            .output()
+            .unwrap();
+        let delegated = cargo_bin_cmd!("gafctl")
+            .arg("server")
+            .args(&args)
+            .output()
+            .unwrap();
+        assert_eq!(delegated.status.code(), direct.status.code());
+        assert_eq!(delegated.stdout, direct.stdout);
+        assert_eq!(delegated.stderr, direct.stderr);
+    }
+}
+
+impl Drop for ServerProcess {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+#[tokio::test]
+async fn both_server_entrypoints_serve_health_and_inventory_without_device_access() {
+    for (binary, prefix) in [("gafctl", Some("server")), ("gafctl-server", None)] {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        drop(listener);
+        let mut command = std::process::Command::new(assert_cmd::cargo::cargo_bin(binary));
+        command.args(prefix).args(["--bind", &address.to_string()]);
+        for name in [
+            "GAFCTL_DEVICE_ID",
+            "GAFCTL_IDENTITY_STORE",
+            "GAFCTL_MQTT_HOST",
+            "GAFCTL_MQTT_USERNAME",
+            "GAFCTL_MQTT_PASSWORD",
+            "GAFCTL_QUICKCONNECT_USERNAME",
+            "GAFCTL_QUICKCONNECT_PASSWORD",
+            "GAFCTL_QUICKCONNECT_PASSWORD_FILE",
+            "GAFCTL_QUICKCONNECT_WRITES_ENABLED",
+        ] {
+            command.env_remove(name);
+        }
+        let mut server =
+            ServerProcess(command.stdout(std::process::Stdio::null()).spawn().unwrap());
+        let client = reqwest::Client::new();
+        let health = format!("http://{address}/health");
+        let mut ready = false;
+        for _ in 0..100 {
+            assert!(
+                server.0.try_wait().unwrap().is_none(),
+                "{binary} exited before listening"
+            );
+            if client
+                .get(&health)
+                .send()
+                .await
+                .is_ok_and(|response| response.status().is_success())
+            {
+                ready = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(ready, "{binary} did not serve health");
+        let inventory: Value = client
+            .get(format!("http://{address}/api/v2/devices"))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(inventory, json!({"devices": []}));
+    }
+}
+
 #[test]
 fn help_and_completions_work_without_any_transport_configuration() {
-    let service_help = cargo_bin_cmd!("updraft")
+    let service_help = cargo_bin_cmd!("gafctl-server")
         .arg("--help")
         .assert()
         .success()
@@ -25,12 +107,15 @@ fn help_and_completions_work_without_any_transport_configuration() {
         .stdout
         .clone();
     let service_help = String::from_utf8(service_help).unwrap();
-    for command in ["completions", "probe", "serve"] {
+    for command in ["completions", "probe", "--bind"] {
         assert!(service_help.contains(command), "missing {command}");
     }
-    cargo_bin_cmd!("updraft").arg("devices").assert().code(2);
+    cargo_bin_cmd!("gafctl-server")
+        .arg("devices")
+        .assert()
+        .code(2);
 
-    let output = cargo_bin_cmd!("updraftctl")
+    let output = cargo_bin_cmd!("gafctl")
         .arg("--help")
         .assert()
         .success()
@@ -38,17 +123,24 @@ fn help_and_completions_work_without_any_transport_configuration() {
         .stdout
         .clone();
     let help = String::from_utf8(output).unwrap();
-    for command in ["devices", "state", "control", "ble", "completions"] {
+    for command in [
+        "devices",
+        "state",
+        "control",
+        "ble",
+        "server",
+        "completions",
+    ] {
         assert!(help.contains(command), "missing {command}");
     }
-    cargo_bin_cmd!("updraftctl")
+    cargo_bin_cmd!("gafctl")
         .args(["ble", "--format", "json", "scan", "--help"])
         .assert()
         .success();
-    cargo_bin_cmd!("updraftctl")
+    cargo_bin_cmd!("gafctl")
         .args(["completions", "zsh"])
-        .env("UPDRAFT_SERVER_URL", "invalid")
-        .env("UPDRAFT_QUICKCONNECT_USERNAME", "incomplete")
+        .env("GAFCTL_SERVER_URL", "invalid")
+        .env("GAFCTL_QUICKCONNECT_USERNAME", "incomplete")
         .assert()
         .success();
 }
@@ -88,7 +180,7 @@ fn invalid_input_and_missing_control_targets_exit_before_transport_access() {
             "bad/id",
         ],
     ] {
-        cargo_bin_cmd!("updraftctl")
+        cargo_bin_cmd!("gafctl")
             .args(args)
             .timeout(Duration::from_secs(5))
             .assert()
@@ -169,11 +261,11 @@ async fn service_reads_emit_one_json_result_and_explicit_url_overrides_environme
     for args in [vec!["devices"], vec!["state", "configured"]] {
         let url = server.url.clone();
         let output = tokio::task::spawn_blocking(move || {
-            cargo_bin_cmd!("updraftctl")
+            cargo_bin_cmd!("gafctl")
                 .args(args)
                 .args(["--server", &url, "--format", "json"])
-                .env("UPDRAFT_SERVER_URL", "http://127.0.0.1:1")
-                .env("RUST_LOG", "updraft=debug")
+                .env("GAFCTL_SERVER_URL", "http://127.0.0.1:1")
+                .env("RUST_LOG", "gafctl=debug")
                 .timeout(Duration::from_secs(5))
                 .assert()
                 .success()
@@ -202,7 +294,7 @@ async fn service_controls_preserve_backend_results_and_exit_only_when_confirmed(
         let server = start(service.clone()).await;
         let url = server.url.clone();
         let output = tokio::task::spawn_blocking(move || {
-            cargo_bin_cmd!("updraftctl")
+            cargo_bin_cmd!("gafctl")
                 .args([
                     "control",
                     "configured",
@@ -233,7 +325,7 @@ async fn service_controls_preserve_backend_results_and_exit_only_when_confirmed(
 
 #[test]
 fn transport_failure_emits_a_json_error_with_a_nonzero_exit() {
-    let output = cargo_bin_cmd!("updraftctl")
+    let output = cargo_bin_cmd!("gafctl")
         .args([
             "devices",
             "--server",
@@ -253,7 +345,7 @@ fn transport_failure_emits_a_json_error_with_a_nonzero_exit() {
 
 #[test]
 fn closed_stdout_pipe_is_a_successful_completion_exit() {
-    let mut child = std::process::Command::new(assert_cmd::cargo::cargo_bin!("updraftctl"))
+    let mut child = std::process::Command::new(assert_cmd::cargo::cargo_bin!("gafctl"))
         .args(["completions", "bash"])
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
@@ -288,7 +380,7 @@ async fn unavailable_state_retains_backend_error_in_text_and_json_without_failin
     for format in ["text", "json"] {
         let url = server.url.clone();
         let output = tokio::task::spawn_blocking(move || {
-            cargo_bin_cmd!("updraftctl")
+            cargo_bin_cmd!("gafctl")
                 .args(["state", "configured", "--server", &url, "--format", format])
                 .timeout(Duration::from_secs(5))
                 .assert()
@@ -328,10 +420,10 @@ async fn json_errors_keep_http_status_and_service_logs_use_stderr() {
         axum::serve(listener, app).await.unwrap();
     });
     let output = tokio::task::spawn_blocking(move || {
-        cargo_bin_cmd!("updraftctl")
+        cargo_bin_cmd!("gafctl")
             .args(["devices", "--format", "json"])
-            .env("UPDRAFT_SERVER_URL", url)
-            .env("RUST_LOG", "updraft=debug")
+            .env("GAFCTL_SERVER_URL", url)
+            .env("RUST_LOG", "gafctl=debug")
             .timeout(Duration::from_secs(5))
             .assert()
             .code(1)
@@ -358,10 +450,10 @@ async fn empty_inventory_from_environment_is_successful_and_contains_one_newline
         axum::serve(listener, app).await.unwrap();
     });
     let output = tokio::task::spawn_blocking(move || {
-        cargo_bin_cmd!("updraftctl")
+        cargo_bin_cmd!("gafctl")
             .args(["devices", "--format", "json"])
-            .env("UPDRAFT_SERVER_URL", url)
-            .env("UPDRAFT_QUICKCONNECT_USERNAME", "incomplete-account")
+            .env("GAFCTL_SERVER_URL", url)
+            .env("GAFCTL_QUICKCONNECT_USERNAME", "incomplete-account")
             .timeout(Duration::from_secs(5))
             .assert()
             .success()
@@ -412,7 +504,7 @@ async fn all_cloud_control_shapes_are_posted_through_the_service() {
             axum::serve(listener, app).await.unwrap();
         });
         let output = tokio::task::spawn_blocking(move || {
-            cargo_bin_cmd!("updraftctl")
+            cargo_bin_cmd!("gafctl")
                 .args(["control", "qc-local"])
                 .args(args)
                 .args(["--server", &url, "--format", "json"])
@@ -453,7 +545,7 @@ async fn timed_out_control_keeps_request_id_and_reports_unknown_outcome_without_
         axum::serve(listener, app).await.unwrap();
     });
     let output = tokio::task::spawn_blocking(move || {
-        cargo_bin_cmd!("updraftctl")
+        cargo_bin_cmd!("gafctl")
             .args([
                 "control",
                 "configured",

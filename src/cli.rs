@@ -3,22 +3,24 @@ use std::{net::SocketAddr, path::PathBuf};
 
 use anyhow::{Context, Result, bail};
 use clap::{Args, CommandFactory, Parser, Subcommand};
-use std::process::ExitCode;
-use updraft_bluetooth::{ProbeMode, ProbeOptions, probe};
-use updraft_protocol::{
+use gafctl_bluetooth::{ProbeMode, ProbeOptions, probe};
+use gafctl_protocol::{
     AutomaticThresholds, ControlCommand, HumidityTenthsPercent, Minutes, TemperatureTenthsF,
 };
-use updraft_quickconnect::{AccountRole, Credentials};
+use gafctl_quickconnect::{AccountRole, Credentials};
+use std::process::ExitCode;
 
 #[derive(Debug, Parser)]
 #[command(
-    name = "updraft",
+    name = "gafctl-server",
     version,
     about = "GAF attic fan proxy and controller"
 )]
 struct Cli {
+    #[command(flatten)]
+    options: ServeOptions,
     #[command(subcommand)]
-    command: Command,
+    command: Option<Command>,
 }
 
 #[derive(Debug, Subcommand)]
@@ -27,18 +29,16 @@ enum Command {
     Completions { shell: clap_complete::Shell },
     /// Inspect the GAF Wi-Fi Vent over a device transport.
     Probe(ProbeCommand),
-    /// Serve device state and the supported controls to Home Assistant.
-    Serve(ServeOptions),
 }
 
 #[derive(Debug, Args)]
 struct ServeOptions {
     /// Peripheral ID printed by a scan-only run. Never include it in logs or API responses.
-    #[arg(long, env = "UPDRAFT_DEVICE_ID")]
+    #[arg(long, env = "GAFCTL_DEVICE_ID")]
     device_id: Option<String>,
 
     /// Path to the private account/provider-to-local device identity map.
-    #[arg(long, env = "UPDRAFT_IDENTITY_STORE")]
+    #[arg(long, env = "GAFCTL_IDENTITY_STORE")]
     identity_store: Option<PathBuf>,
 
     /// Listener address. Non-loopback addresses require --allow-remote.
@@ -53,7 +53,7 @@ struct ServeOptions {
     #[cfg(feature = "mqtt")]
     #[arg(
         long,
-        env = "UPDRAFT_MQTT_HOST",
+        env = "GAFCTL_MQTT_HOST",
         requires = "mqtt_username",
         value_parser = clap::builder::NonEmptyStringValueParser::new()
     )]
@@ -61,14 +61,14 @@ struct ServeOptions {
 
     /// MQTT broker port.
     #[cfg(feature = "mqtt")]
-    #[arg(long, env = "UPDRAFT_MQTT_PORT", default_value_t = 1883)]
+    #[arg(long, env = "GAFCTL_MQTT_PORT", default_value_t = 1883)]
     mqtt_port: u16,
 
     /// MQTT username. Required with --mqtt-host.
     #[cfg(feature = "mqtt")]
     #[arg(
         long,
-        env = "UPDRAFT_MQTT_USERNAME",
+        env = "GAFCTL_MQTT_USERNAME",
         requires = "mqtt_host",
         value_parser = clap::builder::NonEmptyStringValueParser::new()
     )]
@@ -76,15 +76,15 @@ struct ServeOptions {
 
     /// Publish Home Assistant MQTT discovery. Choose this instead of the HTTP integration to avoid duplicate entities.
     #[cfg(feature = "mqtt")]
-    #[arg(long, env = "UPDRAFT_MQTT_DISCOVERY", requires = "mqtt_host")]
+    #[arg(long, env = "GAFCTL_MQTT_DISCOVERY", requires = "mqtt_host")]
     mqtt_discovery: bool,
 
     /// QuickConnect account role (`contractor` or `consumer`).
-    #[arg(long, env = "UPDRAFT_QUICKCONNECT_ROLE", default_value = "contractor")]
+    #[arg(long, env = "GAFCTL_QUICKCONNECT_ROLE", default_value = "contractor")]
     quickconnect_role: String,
 
     /// Explicitly enable QuickConnect settings writes. Disabled by default.
-    #[arg(long, env = "UPDRAFT_QUICKCONNECT_WRITES_ENABLED")]
+    #[arg(long, env = "GAFCTL_QUICKCONNECT_WRITES_ENABLED")]
     quickconnect_writes_enabled: bool,
 }
 
@@ -190,16 +190,21 @@ pub(crate) async fn run() -> Result<ExitCode> {
     let cli = Cli::parse();
     tracing::debug!("running CLI command");
     match cli.command {
-        Command::Completions { shell } => {
+        Some(Command::Completions { shell }) => {
             let mut completions = Vec::new();
-            clap_complete::generate(shell, &mut Cli::command(), "updraft", &mut completions);
+            clap_complete::generate(
+                shell,
+                &mut Cli::command(),
+                "gafctl-server",
+                &mut completions,
+            );
             crate::output::write_stdout(|output| output.write_all(&completions))?;
             Ok(ExitCode::SUCCESS)
         }
-        Command::Serve(options) => options.run().await.map(|()| ExitCode::SUCCESS),
-        Command::Probe(ProbeCommand {
+        None => cli.options.run().await.map(|()| ExitCode::SUCCESS),
+        Some(Command::Probe(ProbeCommand {
             transport: ProbeTransport::Ble(options),
-        }) => run_ble_probe(options).await.map(|()| ExitCode::SUCCESS),
+        })) => run_ble_probe(options).await.map(|()| ExitCode::SUCCESS),
     }
 }
 
@@ -236,9 +241,9 @@ fn read_quickconnect_config(
     role: &str,
     writes_enabled: bool,
 ) -> Result<Option<QuickConnectRuntimeConfig>> {
-    let username = environment_value("UPDRAFT_QUICKCONNECT_USERNAME")?;
-    let password = environment_value("UPDRAFT_QUICKCONNECT_PASSWORD")?;
-    let password_file = environment_value("UPDRAFT_QUICKCONNECT_PASSWORD_FILE")?.map(PathBuf::from);
+    let username = environment_value("GAFCTL_QUICKCONNECT_USERNAME")?;
+    let password = environment_value("GAFCTL_QUICKCONNECT_PASSWORD")?;
+    let password_file = environment_value("GAFCTL_QUICKCONNECT_PASSWORD_FILE")?.map(PathBuf::from);
     quickconnect_config_from(username, password, password_file, role, writes_enabled)
 }
 
@@ -257,7 +262,7 @@ fn ensure_quickconnect_identity_store(
 ) -> Result<()> {
     anyhow::ensure!(
         !quickconnect_enabled || identity_store.is_some(),
-        "QuickConnect requires --identity-store or UPDRAFT_IDENTITY_STORE"
+        "QuickConnect requires --identity-store or GAFCTL_IDENTITY_STORE"
     );
     Ok(())
 }
@@ -272,7 +277,7 @@ fn quickconnect_config_from(
     let role = match role {
         "contractor" => AccountRole::Contractor,
         "consumer" => AccountRole::Consumer,
-        _ => bail!("UPDRAFT_QUICKCONNECT_ROLE must be contractor or consumer"),
+        _ => bail!("GAFCTL_QUICKCONNECT_ROLE must be contractor or consumer"),
     };
     let configured = username.is_some() || password.is_some() || password_file.is_some();
     if !configured {
@@ -332,11 +337,11 @@ fn read_private_secret(path: &std::path::Path) -> Result<String> {
 
 #[cfg(feature = "mqtt")]
 fn read_mqtt_password() -> Result<Option<String>> {
-    match std::env::var("UPDRAFT_MQTT_PASSWORD") {
+    match std::env::var("GAFCTL_MQTT_PASSWORD") {
         Ok(password) => Ok(Some(password)),
         Err(std::env::VarError::NotPresent) => Ok(None),
         Err(std::env::VarError::NotUnicode(_)) => {
-            bail!("UPDRAFT_MQTT_PASSWORD must be valid UTF-8")
+            bail!("GAFCTL_MQTT_PASSWORD must be valid UTF-8")
         }
     }
 }
@@ -363,7 +368,7 @@ fn mqtt_config(
         }
         (None, None, None) if !discovery_enabled => Ok(None),
         (None, None, None) => bail!("MQTT discovery requires MQTT broker credentials"),
-        _ => bail!("MQTT host, username, and UPDRAFT_MQTT_PASSWORD must be configured together"),
+        _ => bail!("MQTT host, username, and GAFCTL_MQTT_PASSWORD must be configured together"),
     }
 }
 
@@ -383,23 +388,23 @@ async fn run_ble_probe(options: BleOptions) -> Result<()> {
 
 fn control_result_confirmed(
     control_requested: bool,
-    result: &updraft_bluetooth::ProbeResult,
+    result: &gafctl_bluetooth::ProbeResult,
 ) -> bool {
     let control = match result {
-        updraft_bluetooth::ProbeResult::Queried { result, .. } => result.control.as_ref(),
-        updraft_bluetooth::ProbeResult::NoDevices
-        | updraft_bluetooth::ProbeResult::Discovered { .. }
-        | updraft_bluetooth::ProbeResult::Ambiguous { .. }
-        | updraft_bluetooth::ProbeResult::DiscoveryIncomplete { .. } => None,
+        gafctl_bluetooth::ProbeResult::Queried { result, .. } => result.control.as_ref(),
+        gafctl_bluetooth::ProbeResult::NoDevices
+        | gafctl_bluetooth::ProbeResult::Discovered { .. }
+        | gafctl_bluetooth::ProbeResult::Ambiguous { .. }
+        | gafctl_bluetooth::ProbeResult::DiscoveryIncomplete { .. } => None,
     };
     control_status_successful(control_requested, control)
 }
 
 fn control_status_successful(
     control_requested: bool,
-    control: Option<&updraft_protocol::ControlOutcome>,
+    control: Option<&gafctl_protocol::ControlOutcome>,
 ) -> bool {
-    !control_requested || control.is_some_and(updraft_protocol::ControlOutcome::is_confirmed)
+    !control_requested || control.is_some_and(gafctl_protocol::ControlOutcome::is_confirmed)
 }
 
 #[cfg(test)]
@@ -409,7 +414,7 @@ mod tests {
     #[test]
     fn serve_can_start_without_a_ble_device_identifier() {
         assert!(
-            Cli::try_parse_from(["updraft", "serve"]).is_ok(),
+            Cli::try_parse_from(["gafctl-server"]).is_ok(),
             "serving without a BLE backend must be a valid startup mode"
         );
     }
@@ -417,11 +422,10 @@ mod tests {
     #[test]
     fn serve_accepts_ble_only_cloud_only_and_mixed_cli_modes() {
         [
-            &["updraft", "serve", "--device-id", "synthetic-ble-id"][..],
-            &["updraft", "serve"][..],
+            &["gafctl-server", "--device-id", "synthetic-ble-id"][..],
+            &["gafctl-server"][..],
             &[
-                "updraft",
-                "serve",
+                "gafctl",
                 "--device-id",
                 "synthetic-ble-id",
                 "--quickconnect-writes-enabled",
@@ -473,7 +477,7 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
 
         let password_path = std::env::temp_dir().join(format!(
-            "updraft-quickconnect-{}-{}",
+            "gafctl-quickconnect-{}-{}",
             std::process::id(),
             uuid::Uuid::new_v4()
         ));
@@ -501,7 +505,7 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
 
         let password_path = std::env::temp_dir().join(format!(
-            "updraft-quickconnect-open-{}-{}",
+            "gafctl-quickconnect-open-{}-{}",
             std::process::id(),
             uuid::Uuid::new_v4()
         ));
@@ -540,7 +544,7 @@ mod tests {
     fn scan_only_rejects_control_settings() {
         [
             &[
-                "updraft",
+                "gafctl",
                 "probe",
                 "ble",
                 "--scan-only",
@@ -548,7 +552,7 @@ mod tests {
                 "1",
             ][..],
             &[
-                "updraft",
+                "gafctl",
                 "probe",
                 "ble",
                 "--scan-only",
@@ -565,7 +569,7 @@ mod tests {
     fn repeated_threshold_arguments_are_rejected_without_panicking() {
         assert!(
             Cli::try_parse_from([
-                "updraft",
+                "gafctl",
                 "probe",
                 "ble",
                 "--set-auto-thresholds-tenths",
@@ -583,8 +587,7 @@ mod tests {
     #[cfg(feature = "mqtt")]
     fn serve_keeps_http_pull_and_allows_mqtt_push_together() {
         let cli = Cli::try_parse_from([
-            "updraft",
-            "serve",
+            "gafctl",
             "--device-id",
             "local-device-id",
             "--bind",
@@ -593,14 +596,12 @@ mod tests {
             "--mqtt-host",
             "192.168.1.5",
             "--mqtt-username",
-            "updraft",
+            "gafctl",
             "--mqtt-discovery",
         ])
         .unwrap();
 
-        let Command::Serve(options) = cli.command else {
-            unreachable!("serve arguments must parse as the serve command");
-        };
+        let options = cli.options;
         assert_eq!(options.bind, "0.0.0.0:8787".parse().unwrap());
         assert!(options.allow_remote);
         assert_eq!(options.mqtt_host.as_deref(), Some("192.168.1.5"));
@@ -616,10 +617,10 @@ mod tests {
                 "cli::tests::empty_mqtt_host_environment_child",
                 "--nocapture",
             ])
-            .env("UPDRAFT_TEST_EMPTY_MQTT_HOST", "1")
-            .env("UPDRAFT_MQTT_HOST", "")
-            .env("UPDRAFT_MQTT_USERNAME", "updraft")
-            .env("UPDRAFT_MQTT_PASSWORD", "test-secret")
+            .env("GAFCTL_TEST_EMPTY_MQTT_HOST", "1")
+            .env("GAFCTL_MQTT_HOST", "")
+            .env("GAFCTL_MQTT_USERNAME", "gafctl")
+            .env("GAFCTL_MQTT_PASSWORD", "test-secret")
             .output()
             .unwrap();
 
@@ -633,13 +634,11 @@ mod tests {
     #[test]
     #[cfg(feature = "mqtt")]
     fn empty_mqtt_host_environment_child() {
-        if std::env::var_os("UPDRAFT_TEST_EMPTY_MQTT_HOST").is_none() {
+        if std::env::var_os("GAFCTL_TEST_EMPTY_MQTT_HOST").is_none() {
             return;
         }
 
-        assert!(
-            Cli::try_parse_from(["updraft", "serve", "--device-id", "local-device-id"]).is_err()
-        );
+        assert!(Cli::try_parse_from(["gafctl-server", "--device-id", "local-device-id"]).is_err());
     }
 
     #[test]
@@ -651,10 +650,10 @@ mod tests {
                 "cli::tests::mqtt_password_debug_child",
                 "--nocapture",
             ])
-            .env("UPDRAFT_TEST_MQTT_PASSWORD_DEBUG", "1")
-            .env("UPDRAFT_MQTT_HOST", "127.0.0.1")
-            .env("UPDRAFT_MQTT_USERNAME", "updraft")
-            .env("UPDRAFT_MQTT_PASSWORD", "test-secret")
+            .env("GAFCTL_TEST_MQTT_PASSWORD_DEBUG", "1")
+            .env("GAFCTL_MQTT_HOST", "127.0.0.1")
+            .env("GAFCTL_MQTT_USERNAME", "gafctl")
+            .env("GAFCTL_MQTT_PASSWORD", "test-secret")
             .output()
             .unwrap();
 
@@ -668,12 +667,11 @@ mod tests {
     #[test]
     #[cfg(feature = "mqtt")]
     fn mqtt_password_debug_child() {
-        if std::env::var_os("UPDRAFT_TEST_MQTT_PASSWORD_DEBUG").is_none() {
+        if std::env::var_os("GAFCTL_TEST_MQTT_PASSWORD_DEBUG").is_none() {
             return;
         }
 
-        let cli =
-            Cli::try_parse_from(["updraft", "serve", "--device-id", "local-device-id"]).unwrap();
+        let cli = Cli::try_parse_from(["gafctl-server", "--device-id", "local-device-id"]).unwrap();
         assert!(!format!("{cli:?}").contains("test-secret"));
     }
 
@@ -684,7 +682,7 @@ mod tests {
             mqtt_config(
                 Some("192.168.1.5".into()),
                 1883,
-                Some("updraft".into()),
+                Some("gafctl".into()),
                 None,
                 false,
             )
@@ -709,7 +707,7 @@ mod tests {
         let config = mqtt_config(
             Some("192.168.1.5".into()),
             1883,
-            Some("updraft".into()),
+            Some("gafctl".into()),
             Some("secret".into()),
             true,
         )
@@ -722,14 +720,14 @@ mod tests {
     #[test]
     fn only_requested_controls_require_a_queried_device() {
         [
-            updraft_bluetooth::ProbeResult::NoDevices,
-            updraft_bluetooth::ProbeResult::Discovered {
+            gafctl_bluetooth::ProbeResult::NoDevices,
+            gafctl_bluetooth::ProbeResult::Discovered {
                 devices: Vec::new(),
             },
-            updraft_bluetooth::ProbeResult::Ambiguous {
+            gafctl_bluetooth::ProbeResult::Ambiguous {
                 devices: Vec::new(),
             },
-            updraft_bluetooth::ProbeResult::DiscoveryIncomplete {
+            gafctl_bluetooth::ProbeResult::DiscoveryIncomplete {
                 devices: Vec::new(),
                 failures: Vec::new(),
             },
@@ -768,9 +766,9 @@ mod tests {
     fn timer_control_outcome(
         acknowledgement: &'static [u8],
         timer: &'static [u8],
-    ) -> updraft_protocol::ControlOutcome {
+    ) -> gafctl_protocol::ControlOutcome {
         let snapshot = timer_snapshot(timer);
-        updraft_protocol::ControlOutcome::from_response(
+        gafctl_protocol::ControlOutcome::from_response(
             ControlCommand::SetTimer(Minutes::new(2)),
             protocol_frame(acknowledgement),
             Some(&snapshot),
@@ -778,7 +776,7 @@ mod tests {
         .unwrap()
     }
 
-    fn timer_snapshot(timer: &'static [u8]) -> updraft_protocol::DeviceSnapshot {
+    fn timer_snapshot(timer: &'static [u8]) -> gafctl_protocol::DeviceSnapshot {
         let [identity, mode, sensors, thresholds, timer] = [
             b"#idr030000\n".as_slice(),
             b"#dmrtn\n",
@@ -787,11 +785,11 @@ mod tests {
             timer,
         ]
         .map(protocol_frame);
-        updraft_protocol::DeviceSnapshot::from_frames(identity, mode, sensors, thresholds, timer)
+        gafctl_protocol::DeviceSnapshot::from_frames(identity, mode, sensors, thresholds, timer)
             .unwrap()
     }
 
-    fn protocol_frame(payload: &'static [u8]) -> updraft_protocol::Frame<'static> {
-        updraft_protocol::Frame::from_bytes(bytes::Bytes::from_static(payload)).unwrap()
+    fn protocol_frame(payload: &'static [u8]) -> gafctl_protocol::Frame<'static> {
+        gafctl_protocol::Frame::from_bytes(bytes::Bytes::from_static(payload)).unwrap()
     }
 }

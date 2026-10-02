@@ -1,0 +1,15 @@
+[package]
+name = "gafctl-protocol"
+version = "0.1.0"
+edition = "2024"
+description = "Protocol types and codecs for GAF Master Flow attic fans"
+
+[lints]
+workspace = true
+
+[dependencies]
+bytes.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true

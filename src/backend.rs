@@ -18,7 +18,7 @@ use crate::device::{
     DeviceId, DeviceSettings, DeviceState, EntitySource, ProxyId, QuickConnectModeStatus,
     StateProvenance,
 };
-use updraft_quickconnect::QuickConnectCommand;
+use gafctl_quickconnect::QuickConnectCommand;
 
 const DEVICE_STATE_FRESHNESS_LIMIT_MS: u64 = 90_000;
 const CONTROL_QUEUE_CAPACITY: usize = 8;
@@ -34,7 +34,7 @@ pub struct QuickConnectReadTarget {
 }
 
 impl QuickConnectReadTarget {
-    pub async fn read(&self, client: &updraft_quickconnect::QuickConnectClient) {
+    pub async fn read(&self, client: &gafctl_quickconnect::QuickConnectClient) {
         if tokio::time::timeout(QUICKCONNECT_DETAIL_TIMEOUT, self.read_locked(client))
             .await
             .is_err()
@@ -45,7 +45,7 @@ impl QuickConnectReadTarget {
         }
     }
 
-    async fn read_locked(&self, client: &updraft_quickconnect::QuickConnectClient) {
+    async fn read_locked(&self, client: &gafctl_quickconnect::QuickConnectClient) {
         let _transaction = self.runtime.acquire_transaction().await;
         if self.runtime.state_generation.load(Ordering::Acquire) != self.generation {
             return;
@@ -135,7 +135,7 @@ pub enum DeviceRegistryError {
 #[derive(Debug, Error)]
 pub enum QuickConnectPollingError {
     #[error(transparent)]
-    Client(#[from] updraft_quickconnect::ClientError),
+    Client(#[from] gafctl_quickconnect::ClientError),
     #[error(transparent)]
     Registry(#[from] DeviceRegistryError),
 }
@@ -163,18 +163,17 @@ pub struct DeviceRuntime {
     refresh: Mutex<Option<RefreshReceiver>>,
 }
 
-pub(crate) type RefreshReceiver =
-    watch::Receiver<Option<Arc<updraft_api::DeviceRefreshV2Response>>>;
+pub(crate) type RefreshReceiver = watch::Receiver<Option<Arc<gafctl_api::DeviceRefreshV2Response>>>;
 
 pub(crate) enum RefreshReservation {
     Join(RefreshReceiver),
     Execute {
         receiver: RefreshReceiver,
-        completion: watch::Sender<Option<Arc<updraft_api::DeviceRefreshV2Response>>>,
+        completion: watch::Sender<Option<Arc<gafctl_api::DeviceRefreshV2Response>>>,
     },
 }
 
-pub use updraft_api::DeviceInventoryStatus;
+pub use gafctl_api::DeviceInventoryStatus;
 
 #[derive(Clone, Debug, Default)]
 pub struct DeviceRuntimeSnapshot {
@@ -549,7 +548,7 @@ impl DeviceRegistry {
     pub async fn poll_quickconnect(
         &mut self,
         account_id: &str,
-        client: &updraft_quickconnect::QuickConnectClient,
+        client: &gafctl_quickconnect::QuickConnectClient,
     ) -> Result<Vec<DeviceId>, QuickConnectPollingError> {
         let generations = self.begin_quickconnect_poll(account_id);
         let inventory = match client.read_inventory().await {
@@ -587,7 +586,7 @@ impl DeviceRegistry {
     pub async fn reconcile_quickconnect_inventory(
         &mut self,
         account_id: &str,
-        inventory: Vec<updraft_quickconnect::InventoryDevice>,
+        inventory: Vec<gafctl_quickconnect::InventoryDevice>,
         generations: &BTreeMap<DeviceId, u64>,
     ) -> Result<Vec<QuickConnectReadTarget>, QuickConnectPollingError> {
         let inputs = inventory
@@ -771,8 +770,8 @@ impl DeviceRegistry {
     }
 }
 
-pub(crate) fn common_state(state: updraft_quickconnect::QuickConnectDeviceState) -> DeviceState {
-    use updraft_quickconnect::DeviceModeStatus;
+pub(crate) fn common_state(state: gafctl_quickconnect::QuickConnectDeviceState) -> DeviceState {
+    use gafctl_quickconnect::DeviceModeStatus;
 
     DeviceState {
         temperature_f: state.temperature_f,
@@ -1218,7 +1217,7 @@ mod tests {
 
     fn registry_path() -> PathBuf {
         std::env::temp_dir()
-            .join(format!("updraft-identities-{}", uuid::Uuid::new_v4()))
+            .join(format!("gafctl-identities-{}", uuid::Uuid::new_v4()))
             .join("identities.json")
     }
 
@@ -1227,7 +1226,7 @@ mod tests {
     }
 
     async fn mock_quickconnect_client() -> (
-        updraft_quickconnect::QuickConnectClient,
+        gafctl_quickconnect::QuickConnectClient,
         tokio::task::JoinHandle<()>,
     ) {
         let app = Router::new()
@@ -1238,7 +1237,7 @@ mod tests {
     }
 
     async fn mock_duplicate_inventory_client() -> (
-        updraft_quickconnect::QuickConnectClient,
+        gafctl_quickconnect::QuickConnectClient,
         tokio::task::JoinHandle<()>,
     ) {
         let app = Router::new()
@@ -1251,20 +1250,20 @@ mod tests {
     async fn mock_client(
         app: Router,
     ) -> (
-        updraft_quickconnect::QuickConnectClient,
+        gafctl_quickconnect::QuickConnectClient,
         tokio::task::JoinHandle<()>,
     ) {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
         let base = reqwest::Url::parse(&format!("http://{address}/")).unwrap();
-        let client = updraft_quickconnect::QuickConnectClient::new(
-            updraft_quickconnect::Credentials::new(
+        let client = gafctl_quickconnect::QuickConnectClient::new(
+            gafctl_quickconnect::Credentials::new(
                 "synthetic-user",
                 "synthetic-password",
-                updraft_quickconnect::AccountRole::Contractor,
+                gafctl_quickconnect::AccountRole::Contractor,
             ),
-            updraft_quickconnect::QuickConnectConfig::new(
+            gafctl_quickconnect::QuickConnectConfig::new(
                 base.join("cognito/").unwrap(),
                 base.join("gaf/").unwrap(),
             ),

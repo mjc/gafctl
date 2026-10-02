@@ -1,7 +1,7 @@
 use tracing_subscriber::EnvFilter;
 
 fn default_filter() -> EnvFilter {
-    EnvFilter::new("updraft=info")
+    EnvFilter::new("gafctl=info")
 }
 
 fn filter() -> EnvFilter {
@@ -21,7 +21,7 @@ mod tests {
     use super::default_filter;
 
     #[test]
-    fn default_filter_includes_updraft_info_events() {
-        assert_eq!(default_filter().to_string(), "updraft=info");
+    fn default_filter_includes_gafctl_info_events() {
+        assert_eq!(default_filter().to_string(), "gafctl=info");
     }
 }

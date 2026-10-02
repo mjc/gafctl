@@ -22,7 +22,7 @@ physical QuickConnect fan test in this repository.
 
 The reference uses `https://gaf-coreservices.aurai.io/cognito/` for authentication
 and `https://gaf.keenhome.io/gaf/` for device requests, with a 20-second timeout.
-Updraft uses those roots too; their live compatibility is unverified.
+Gafctl uses those roots too; their live compatibility is unverified.
 
 | Operation | Request | Reference behavior |
 | --- | --- | --- |
@@ -30,14 +30,14 @@ Updraft uses those roots too; their live compatibility is unverified.
 | Inventory | GET `device/deviceList` | Accepts `responseData` as a list or an object containing a `devices` list. |
 | Detail | GET `device?deviceId=<id>` | Reads `responseData`; merges detail over the inventory record. |
 | Settings | POST `deviceMode/<id>` | Uses the write field names listed below. |
-| Firmware information | GET `fw/fwInfo?deviceId=<id>` | Reads firmware diagnostics. Updraft does not expose firmware updates. |
+| Firmware information | GET `fw/fwInfo?deviceId=<id>` | Reads firmware diagnostics. Gafctl does not expose firmware updates. |
 
 The login pool is `us-east-2_F6aHzg32w`; roles are `contractor` (default) and
 `consumer`. The ID token is sent literally in `Authorization`, without a
 `Bearer ` prefix. The reference logs in again and retries once after a 401/403.
 It does not establish a refresh-token grant or proactive renewal flow.
 
-Unlike the reference's fallback to an empty inventory, Updraft reports malformed
+Unlike the reference's fallback to an empty inventory, Gafctl reports malformed
 inventory as an error. Read requests can retry transient failures and refresh
 authentication. Settings writes are submitted once and are not automatically
 retried after a timeout or authentication error.
@@ -56,7 +56,7 @@ retried after a timeout or authentication error.
 | `deviceSettings.timerValue` | Configured duration in minutes, not remaining time |
 | `deviceSettings.humidityMonitor` | Readable setting; the reference says writes reject it |
 
-The reference chooses a displayed mode by prioritizing truthy flags. Updraft
+The reference chooses a displayed mode by prioritizing truthy flags. Gafctl
 keeps missing and conflicting mode flags explicit. Its Running value is inferred
 from mode and measurements and remains unknown when required data is missing.
 It is not direct motor feedback.
@@ -78,11 +78,11 @@ active; it does not activate it.
 
 The call sites send JSON integers. Although an API docstring mentions floats,
 the number platform says the service rejects floats with HTTP 417 and service
-status 4444. Updraft accepts integer temperature targets from 90–120 °F, humidity
+status 4444. Gafctl accepts integer temperature targets from 90–120 °F, humidity
 from 30–80%, and timer durations from 30–360 minutes in 30-minute steps. These
 bounds come from the reference UI, not tests of each physical model.
 
-Updraft reads settings before preparing a write and checks them again afterward.
+Gafctl reads settings before preparing a write and checks them again afterward.
 A submitted request with an ambiguous response is unconfirmed. A successful
 response needs matching readback before the service reports `confirmed`.
 

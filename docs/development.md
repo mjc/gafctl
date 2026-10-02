@@ -11,11 +11,11 @@ devenv shell
 Inside that shell, select the control CLI explicitly:
 
 ```sh
-cargo run --no-default-features --features cli --bin updraftctl -- ble scan
-cargo run --no-default-features --features cli --bin updraftctl -- devices --format json
+cargo run --no-default-features --features cli --bin gafctl -- ble scan
+cargo run --no-default-features --features cli --bin gafctl -- devices --format json
 ```
 
-The service binary is `updraft`; start it with `cargo run -- serve` and the
+Start the server with `cargo run -- server` or `gafctl-server`, using the
 configuration described in the deployment guide.
 
 If `DEVENV_ROOT` points to this repository, run Cargo commands directly. If it
@@ -56,7 +56,7 @@ cargo nextest run --workspace --all-targets --locked -E 'test(TEST_NAME)'
 Replace `TEST_NAME` with a test name or substring. For the Python tests:
 
 ```sh
-python3 -m unittest discover -s tests -p test_updraft_client.py
+python3 -m unittest discover -s tests -p test_gafctl_client.py
 ```
 
 Tests use fake Bluetooth transports, local HTTP servers, and synthetic cloud
@@ -70,12 +70,12 @@ live cloud compatibility.
 | Path | Purpose |
 | --- | --- |
 | `src/` | Executable, HTTP service, CLI, state polling, and MQTT |
-| `crates/updraft-api/` | Shared device, state, capability, and command types |
-| `crates/updraft-client/` | HTTP client library for a running service |
-| `crates/updraft-protocol/` | Original controller's frames, commands, and values |
-| `crates/updraft-bluetooth/` | Bluetooth discovery and communication |
-| `crates/updraft-quickconnect/` | Cloud authentication, requests, and decoding |
-| `custom_components/updraft/` | Home Assistant integration |
+| `crates/gafctl-api/` | Shared device, state, capability, and command types |
+| `crates/gafctl-client/` | HTTP client library for a running service |
+| `crates/gafctl-protocol/` | Original controller's frames, commands, and values |
+| `crates/gafctl-bluetooth/` | Bluetooth discovery and communication |
+| `crates/gafctl-quickconnect/` | Cloud authentication, requests, and decoding |
+| `custom_components/gafctl/` | Home Assistant integration |
 | `fixtures/quickconnect/` | Synthetic cloud request and response examples |
 
 The protocol crate has no Bluetooth or application dependency. The HTTP client

@@ -36,11 +36,11 @@ App: GAF Wi-Fi Vent 2.1 (`com.gaf.wifivent`). Firmware: `GAFVent_030000.bin`. BL
 | `#ams%04X%04X\n` | `#amr%1d\n` | Set automatic mode. Temperature tenths Fahrenheit, then humidity tenths percent. |
 | `#tms%04X\n` | `#tmr%1d\n` | Set timer duration in minutes. The app rounds input seconds to minutes. |
 
-The app also contains OTA and reboot commands: `ois`, `oms`, `ome`, and `rbs`; replies are `oir`, `osr`, `oer`, and `rbr`. Updraft does not expose these commands. The firmware contains an additional token, `#pptP`; its purpose is unknown.
+The app also contains OTA and reboot commands: `ois`, `oms`, `ome`, and `rbs`; replies are `oir`, `osr`, `oer`, and `rbr`. Gafctl does not expose these commands. The firmware contains an additional token, `#pptP`; its purpose is unknown.
 
 ## BLE state capture
 
-On 2026-09-29, Updraft scanned for service `00FF`, connected to characteristic `FF01`, read five state fields, and disconnected. The device identifier and identity suffix are omitted.
+On 2026-09-29, Gafctl scanned for service `00FF`, connected to characteristic `FF01`, read five state fields, and disconnected. The device identifier and identity suffix are omitted.
 
 | Request | Response | Payload | Decoded result |
 | --- | --- | --- | --- |

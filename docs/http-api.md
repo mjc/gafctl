@@ -70,7 +70,7 @@ and the three adjustable controls below:
 }
 ```
 
-`proxy_id` identifies this Updraft service and is persisted in its identity
+`proxy_id` identifies this Gafctl service and is persisted in its identity
 store. `id` identifies a device within that service. The original ERV5SMT/EGV5SMT
 controller is `configured`; QuickConnect devices have generated `qc-` IDs.
 `legacy_ble` and `quick_connect` identify the two backends. Provider/account IDs

@@ -1,18 +1,18 @@
-# Updraft
+# gafctl
 
-Updraft connects **GAF Master Flow Wi-Fi Attic Vent** fans to Home Assistant:
+Gafctl connects **GAF Master Flow Wi-Fi Attic Vent** fans to Home Assistant:
 
 - **ERV5SMT** — roof mount.
 - **EGV5SMT** — gable mount.
 
-These are the original models that use the **GAF Wi-Fi Vent** app. Updraft talks
+These are the original models that use the **GAF Wi-Fi Vent** app. Gafctl talks
 to their controller over Bluetooth, then provides temperature, humidity, fan
 settings, and controls through a service on your network. You can also use the
 command line without Home Assistant. No GAF account or Internet connection is
 needed for these models.
 
 The newer **Master Flow QuickConnect** models use a different app and cloud
-service. Updraft includes an experimental backend for those; see
+service. Gafctl includes an experimental backend for those; see
 [fan models and compatibility](docs/hardware.md) before choosing a setup.
 
 ## What you need
@@ -24,7 +24,7 @@ service. Updraft includes an experimental backend for those; see
   use a Linux computer with BlueZ. macOS can run the Bluetooth command line too.
 - Home Assistant, if you want its dashboard and automations.
 
-Updraft connects directly over Bluetooth. You do not need to join the fan's
+Gafctl connects directly over Bluetooth. You do not need to join the fan's
 `GAFVent_XXXX` Wi-Fi network. It does not install or update fan firmware.
 
 ## Install
@@ -34,27 +34,27 @@ Build on the computer that will connect to the fan. Install
 then run:
 
 ```sh
-git clone https://github.com/mjc/updraft.git
-cd updraft
+git clone https://github.com/mjc/gafctl.git
+cd gafctl
 devenv allow
-devenv shell -- cargo build --release --features cli --locked
+devenv shell -- cargo build --release --locked
 ```
 
-This builds the `updraft` service and the separate `updraftctl` control CLI. The
-examples below use `target/release/updraft` and `target/release/updraftctl` from
-the repository root. A service-only build can omit `--features cli`. On Linux, install and start BlueZ using your
+This builds `gafctl` and `gafctl-server`. `gafctl server` launches `gafctl-server` and forwards its arguments. The
+examples below use `target/release/gafctl` and `target/release/gafctl-server` from
+the repository root. A service-only build uses `--no-default-features --features http,mqtt --bin gafctl-server`. On Linux, install and start BlueZ using your
 distribution's package manager. On macOS, allow Bluetooth access if prompted.
 
 ## Find your fan
 
 ```sh
-./target/release/updraftctl ble scan
+./target/release/gafctl ble scan
 ```
 
 Copy the fan's peripheral ID from the output, then read its state:
 
 ```sh
-./target/release/updraftctl ble state --device-id 'PERIPHERAL_ID'
+./target/release/gafctl ble state --device-id 'PERIPHERAL_ID'
 ```
 
 Replace `PERIPHERAL_ID` with the ID from the scan. It is a platform-specific
@@ -64,12 +64,12 @@ check Bluetooth, move the computer closer, and close the GAF app before retrying
 
 ## Start the service
 
-To let Home Assistant on another computer reach Updraft:
+To let Home Assistant on another computer reach Gafctl:
 
 ```sh
-./target/release/updraft serve \
+./target/release/gafctl server \
   --device-id 'PERIPHERAL_ID' \
-  --identity-store /absolute/path/to/updraft-identities.json \
+  --identity-store /absolute/path/to/gafctl-identities.json \
   --bind 0.0.0.0:8787 \
   --allow-remote
 ```
@@ -85,11 +85,11 @@ authenticated reverse proxy or a private network connection.
 From the Home Assistant computer or another computer on the same network, check:
 
 ```sh
-curl http://UPDRAFT_HOST:8787/api/v2/devices
-curl http://UPDRAFT_HOST:8787/api/v2/devices/configured/state
+curl http://GAFCTL_HOST:8787/api/v2/devices
+curl http://GAFCTL_HOST:8787/api/v2/devices/configured/state
 ```
 
-Replace `UPDRAFT_HOST` with the address of the computer running Updraft. The
+Replace `GAFCTL_HOST` with the address of the computer running Gafctl. The
 Bluetooth fan has the service device ID `configured`. Look for `available: true`
 and current readings in the state response. The service polls every 30 seconds.
 
@@ -97,13 +97,13 @@ For automatic startup and logs, follow the [service setup guide](docs/deployment
 
 ## Add it to Home Assistant
 
-1. Copy this repository's `custom_components/updraft` directory into
-   Home Assistant's configuration directory as `custom_components/updraft`.
-   The resulting path should include `custom_components/updraft/manifest.json`.
+1. Copy this repository's `custom_components/gafctl` directory into
+   Home Assistant's configuration directory as `custom_components/gafctl`.
+   The resulting path should include `custom_components/gafctl/manifest.json`.
 2. Restart Home Assistant.
 3. Open **Settings → Devices & services → Add integration** and search for
-   **Updraft GAF Vent**.
-4. Enter `http://UPDRAFT_HOST:8787`, replacing the host with your service's address.
+   **Gafctl GAF Vent**.
+4. Enter `http://GAFCTL_HOST:8787`, replacing the host with your service's address.
    Use the base address without `/api/v2`. Replace any prefilled address.
 5. Select the fans to add. Each selected fan gets its own integration entry.
 
@@ -127,15 +127,15 @@ MQTT discovery is an alternative to the HTTP integration. Use the
 With the service running:
 
 ```sh
-./target/release/updraftctl devices
-./target/release/updraftctl state configured
-./target/release/updraftctl control configured preset automatic-105-f-30-percent
+./target/release/gafctl devices
+./target/release/gafctl state configured
+./target/release/gafctl control configured preset automatic-105-f-30-percent
 ```
 
-For a remote service, add `--server http://UPDRAFT_HOST:8787`. The separate `updraftctl` binary can also control the fan directly over Bluetooth:
+For a remote service, add `--server http://GAFCTL_HOST:8787`. The separate `gafctl` binary can also control the fan directly over Bluetooth:
 
 ```sh
-./target/release/updraftctl ble control --device-id 'PERIPHERAL_ID' preset timer-one-minute
+./target/release/gafctl ble control --device-id 'PERIPHERAL_ID' preset timer-one-minute
 ```
 
 Add `--format json` for scripts. See the [command line guide](docs/cli.md) for

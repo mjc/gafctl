@@ -1,5 +1,5 @@
-use updraft_api::DeviceCommand;
-use updraft_protocol::{
+use gafctl_api::DeviceCommand;
+use gafctl_protocol::{
     AutomaticThresholds, ControlCommand, HumidityTenthsPercent, Minutes, TemperatureTenthsF,
 };
 
@@ -60,7 +60,7 @@ pub(crate) const fn needs_threshold_read(command: DeviceCommand) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use updraft_protocol::{HumidityTenthsPercent, TemperatureTenthsF};
+    use gafctl_protocol::{HumidityTenthsPercent, TemperatureTenthsF};
 
     fn thresholds(temperature: u16, humidity: u16) -> AutomaticThresholds {
         AutomaticThresholds {
@@ -114,7 +114,7 @@ mod tests {
             let prepared = prepare_control(command, None).unwrap();
             assert_eq!(
                 prepared,
-                ControlCommand::SetTimer(updraft_protocol::Minutes::new(minutes))
+                ControlCommand::SetTimer(gafctl_protocol::Minutes::new(minutes))
             );
             assert_eq!(
                 prepared.frame().as_bytes(),

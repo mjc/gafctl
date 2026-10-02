@@ -1,18 +1,18 @@
 use std::{fmt, process::ExitCode, time::SystemTime};
 
 use anyhow::Result;
-use serde::Serialize;
-use updraft_api::{
+use gafctl_api::{
     DeviceBackend, DeviceDiagnostics, DeviceSettings, DeviceState, LegacyMode, StateProvenance,
     unix_millis,
 };
-use updraft_bluetooth::{
+use gafctl_bluetooth::{
     DisconnectOutcome, DiscoveredDevice, ProbeOptions, ProbeResult, QueryResult, probe,
 };
-use updraft_protocol::{
+use gafctl_protocol::{
     Acknowledgement, ControlOutcome, ControlReadback, FanState, ModeReadback, OperatingMode,
     ReadbackMatch,
 };
+use serde::Serialize;
 
 use crate::cli_client::BleSettings;
 
@@ -205,7 +205,7 @@ fn project_control(control: &ControlOutcome) -> ControlReport {
     }
 }
 
-fn discovery_errors(failures: &[updraft_bluetooth::DiscoveryFailure]) -> Vec<DiscoveryError> {
+fn discovery_errors(failures: &[gafctl_bluetooth::DiscoveryFailure]) -> Vec<DiscoveryError> {
     failures
         .iter()
         .map(|failure| DiscoveryError {
@@ -397,9 +397,9 @@ pub(crate) async fn run(
 #[cfg(test)]
 mod tests {
     use bytes::Bytes;
-    use updraft_api::ControlPreset;
-    use updraft_bluetooth::{DisconnectOutcome, QueryResult};
-    use updraft_protocol::{ControlOutcome, DeviceSnapshot, Frame};
+    use gafctl_api::ControlPreset;
+    use gafctl_bluetooth::{DisconnectOutcome, QueryResult};
+    use gafctl_protocol::{ControlOutcome, DeviceSnapshot, Frame};
 
     use super::project_query;
 
@@ -455,8 +455,8 @@ mod tests {
     #[test]
     fn unsafe_discovery_outcomes_fail_and_explain_selection_in_both_formats() {
         use super::{BleIntent, project_result};
+        use gafctl_bluetooth::ProbeResult;
         use std::process::ExitCode;
-        use updraft_bluetooth::ProbeResult;
 
         for (result, status, explanation) in [
             (
@@ -513,8 +513,8 @@ mod tests {
     #[test]
     fn incomplete_discovery_preserves_peripheral_and_property_error() {
         use super::{BleIntent, project_result};
+        use gafctl_bluetooth::{DiscoveryFailure, ProbeResult};
         use std::process::ExitCode;
-        use updraft_bluetooth::{DiscoveryFailure, ProbeResult};
 
         let peripheral_id = uuid::Uuid::from_u128(42);
         let result = ProbeResult::DiscoveryIncomplete {
@@ -564,8 +564,8 @@ mod tests {
     #[test]
     fn direct_outcomes_distinguish_empty_discovery_from_missing_read_and_confirmed_control() {
         use super::{BleIntent, project_result, query_succeeded};
+        use gafctl_bluetooth::ProbeResult;
         use std::process::ExitCode;
-        use updraft_bluetooth::ProbeResult;
         let (_, code) = project_result(&ProbeResult::NoDevices, BleIntent::Scan, false);
         assert_eq!(code, ExitCode::SUCCESS);
         for intent in [BleIntent::Read, BleIntent::Control] {

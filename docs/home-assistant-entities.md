@@ -1,7 +1,7 @@
 # Home Assistant and MQTT
 
 For the HTTP integration, follow the
-[README installation steps](../README.md#add-it-to-home-assistant). Updraft runs
+[README installation steps](../README.md#add-it-to-home-assistant). Gafctl runs
 on the computer that communicates with the fan; Home Assistant connects to its
 HTTP API. Home Assistant itself does not need Bluetooth for this setup.
 
@@ -101,21 +101,21 @@ support **MQTT 5**.
 Set these variables in the service environment, using your own broker and account:
 
 ```ini
-UPDRAFT_MQTT_HOST=BROKER_HOST
-UPDRAFT_MQTT_PORT=1883
-UPDRAFT_MQTT_USERNAME=UPDRAFT_BROKER_USER
-UPDRAFT_MQTT_PASSWORD=YOUR_BROKER_PASSWORD
-UPDRAFT_MQTT_DISCOVERY=true
+GAFCTL_MQTT_HOST=BROKER_HOST
+GAFCTL_MQTT_PORT=1883
+GAFCTL_MQTT_USERNAME=GAFCTL_BROKER_USER
+GAFCTL_MQTT_PASSWORD=YOUR_BROKER_PASSWORD
+GAFCTL_MQTT_DISCOVERY=true
 ```
 
-Restart Updraft, then select MQTT ownership through the
+Restart Gafctl, then select MQTT ownership through the
 [entity-source endpoint](http-api.md#home-assistant-entity-source). Enabling
 discovery alone leaves HTTP ownership unchanged. Each fan has one HA owner for
 both readings and controls. Both administrative transports remain available.
 Keep the environment file private. The password is required when MQTT is enabled;
 there is currently no MQTT password-file option.
 
-Updraft's MQTT connection currently uses plain TCP. Setting port 8883 alone does
+Gafctl's MQTT connection currently uses plain TCP. Setting port 8883 alone does
 not enable TLS. Use a trusted network or a local TLS tunnel if your broker
 requires encrypted connections.
 
@@ -132,38 +132,38 @@ briefly expose both owners. HA gives integrations separate device records;
 changing the owner can change HA device and entity IDs. Update automations that
 refer to the old owner.
 
-Leave `UPDRAFT_MQTT_DISCOVERY` unset or false to publish MQTT state without
+Leave `GAFCTL_MQTT_DISCOVERY` unset or false to publish MQTT state without
 Home Assistant discovery.
 
 ## Topics and broker access
 
-Use separate broker accounts for Updraft and Home Assistant. Give each account
+Use separate broker accounts for Gafctl and Home Assistant. Give each account
 only these permissions:
 
 | Account | Operation | Topics |
 | --- | --- | --- |
-| Updraft | Publish | `updraft/+/availability`, `updraft/+/+/state`, `updraft/+/+/availability`, `updraft/+/+/control/result`, `updraft/+/+/refresh/result` |
-| Updraft | Publish discovery | `homeassistant/+/+/+/config` |
-| Updraft | Subscribe | `updraft/+/+/control/set`, `updraft/+/+/refresh/set` |
-| Home Assistant | Publish | `updraft/+/+/control/set`, `updraft/+/+/refresh/set` |
-| Home Assistant | Subscribe | `updraft/+/availability`, `updraft/+/+/state`, `updraft/+/+/availability`, `updraft/+/+/control/result`, `updraft/+/+/refresh/result`, `homeassistant/+/+/+/config` |
+| Gafctl | Publish | `gafctl/+/availability`, `gafctl/+/+/state`, `gafctl/+/+/availability`, `gafctl/+/+/control/result`, `gafctl/+/+/refresh/result` |
+| Gafctl | Publish discovery | `homeassistant/+/+/+/config` |
+| Gafctl | Subscribe | `gafctl/+/+/control/set`, `gafctl/+/+/refresh/set` |
+| Home Assistant | Publish | `gafctl/+/+/control/set`, `gafctl/+/+/refresh/set` |
+| Home Assistant | Subscribe | `gafctl/+/availability`, `gafctl/+/+/state`, `gafctl/+/+/availability`, `gafctl/+/+/control/result`, `gafctl/+/+/refresh/result`, `homeassistant/+/+/+/config` |
 
-Avoid a publish grant on all of `updraft/#`; that would let a command client
+Avoid a publish grant on all of `gafctl/#`; that would let a command client
 publish service state too. Every proxy has its own namespace. There are no unscoped aliases.
 
 Read `proxy_id` and device `id` from `/api/v2/devices`. Device topics use
-`updraft/{proxy_id}/{id}/...`; discovery identifiers also include both IDs. MQTT
+`gafctl/{proxy_id}/{id}/...`; discovery identifiers also include both IDs. MQTT
 client IDs include the proxy UUID so separate services can share a broker.
 
 Device state and availability messages are retained. Process availability has
-its own last-will topic, `updraft/{proxy_id}/availability`. It does not replace each fan's
-availability. After reconnecting, Updraft republishes current state and enabled
+its own last-will topic, `gafctl/{proxy_id}/availability`. It does not replace each fan's
+availability. After reconnecting, Gafctl republishes current state and enabled
 discovery messages.
 
 ## Controls
 
 The Home Assistant integration and discovered MQTT controls create requests for
-you. Custom MQTT clients publish JSON to `updraft/{proxy_id}/{id}/control/set` with QoS 1
+you. Custom MQTT clients publish JSON to `gafctl/{proxy_id}/{id}/control/set` with QoS 1
 and **retain disabled**:
 
 ```json
@@ -180,7 +180,7 @@ use a new request ID for each new command. The
 MQTT uses the same commands. Requests more than 30 seconds old, more than five
 seconds ahead, retained, malformed, or unsupported are rejected before fan access.
 
-Results arrive at `updraft/{proxy_id}/{id}/control/result`, include the request ID, and are
+Results arrive at `gafctl/{proxy_id}/{id}/control/result`, include the request ID, and are
 not retained. A successful control requires acknowledgement and matching state
 readback. Home Assistant does not display a requested setting as if it had
 already succeeded.
@@ -193,14 +193,14 @@ worker closes, if the broker is available. Result publication has a separate
 30-second bound so stalled brokers cannot hold result slots indefinitely.
 
 If no result arrives, read current state before sending another command: the
-write might have completed. Updraft caches 64 completed requests per device. Repeating a cached
+write might have completed. Gafctl caches 64 completed requests per device. Repeating a cached
 ID with the same command returns its result; a different command with that ID is
 rejected. The cache is in memory and is lost on restart. It cannot guarantee that
 a retry after a restart will avoid another write.
 
 ### Refresh over MQTT
 
-Publish a non-retained QoS 1 request to `updraft/{proxy_id}/{id}/refresh/set`:
+Publish a non-retained QoS 1 request to `gafctl/{proxy_id}/{id}/refresh/set`:
 
 ```json
 {"request_id":"attic-refresh-1","issued_at_unix_ms":1790892000000}
@@ -211,7 +211,7 @@ control-shaped or malformed payloads are discarded. Retained and stale requests
 return correlated rejections without reading the fan. Accepted reads use the same
 per-device refresh worker as HTTP, including coalescing, serialization, and the
 270-second backend deadline. A `fresh`, `failed`, or `superseded` result arrives
-on `updraft/{proxy_id}/{id}/refresh/result` without retention. Current state is
+on `gafctl/{proxy_id}/{id}/refresh/result` without retention. Current state is
 published on the usual state topic. MQTT waits up to 300 seconds for a result;
 a missing result does not establish whether the backend read completed.
 

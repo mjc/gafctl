@@ -1,6 +1,6 @@
 use std::fmt;
 
-use updraft_protocol::{ControlReadback, FanState, ModeReadback, OperatingMode, ReadbackMatch};
+use gafctl_protocol::{ControlReadback, FanState, ModeReadback, OperatingMode, ReadbackMatch};
 
 pub(crate) struct ControlReadbackDisplay<'a>(pub(crate) &'a ControlReadback);
 

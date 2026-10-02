@@ -24,6 +24,19 @@ use axum::{
 #[cfg(feature = "mqtt")]
 use futures_util::TryStreamExt;
 use futures_util::{Stream, StreamExt, stream};
+use gafctl_api::{
+    ControlStatus as V2ControlStatus, DeviceListV2Response, DeviceRefreshStatus,
+    DeviceRefreshV2Response, DeviceStateV2Response,
+};
+pub(crate) use gafctl_api::{DeviceControlV2Request, DeviceControlV2Response};
+use gafctl_bluetooth::{
+    DisconnectOutcome, ProbeClient, ProbeError, ProbeErrorKind, ProbeMode, ProbeOptions,
+    ProbeResult, QueryResult,
+};
+use gafctl_protocol::{DeviceSnapshot, StateReconciler};
+use gafctl_quickconnect::{
+    QuickConnectClient, QuickConnectCommand, QuickConnectCommandMode, QuickConnectConfig,
+};
 use serde::Serialize;
 #[cfg(feature = "mqtt")]
 use tokio::sync::{mpsc, watch};
@@ -31,19 +44,6 @@ use tokio::{
     net::TcpListener,
     sync::RwLock,
     time::{Interval, MissedTickBehavior, interval},
-};
-use updraft_api::{
-    ControlStatus as V2ControlStatus, DeviceListV2Response, DeviceRefreshStatus,
-    DeviceRefreshV2Response, DeviceStateV2Response,
-};
-pub(crate) use updraft_api::{DeviceControlV2Request, DeviceControlV2Response};
-use updraft_bluetooth::{
-    DisconnectOutcome, ProbeClient, ProbeError, ProbeErrorKind, ProbeMode, ProbeOptions,
-    ProbeResult, QueryResult,
-};
-use updraft_protocol::{DeviceSnapshot, StateReconciler};
-use updraft_quickconnect::{
-    QuickConnectClient, QuickConnectCommand, QuickConnectCommandMode, QuickConnectConfig,
 };
 
 use crate::quickconnect_control::{
@@ -474,7 +474,7 @@ impl LegacyBleRuntime {
         &self,
         state: &ApiState,
         command: DeviceCommand,
-    ) -> Result<updraft_protocol::ControlCommand, ControlAdmissionError> {
+    ) -> Result<gafctl_protocol::ControlCommand, ControlAdmissionError> {
         let thresholds = if crate::legacy_control::needs_threshold_read(command) {
             let poll_id = self.reconciler.write().await.begin_poll();
             let result = self.probe(None).await;
@@ -498,7 +498,7 @@ impl LegacyBleRuntime {
     async fn execute_control_locked(
         &self,
         state: &ApiState,
-        command: updraft_protocol::ControlCommand,
+        command: gafctl_protocol::ControlCommand,
     ) -> bool {
         let poll_id = self.reconciler.write().await.begin_poll();
         let outcome = control_outcome(self.probe(Some(command)).await);
@@ -512,12 +512,12 @@ impl LegacyBleRuntime {
 
     async fn probe(
         &self,
-        command: Option<updraft_protocol::ControlCommand>,
+        command: Option<gafctl_protocol::ControlCommand>,
     ) -> Result<ProbeResult, ProbeError> {
         self.ble_client.probe(self.probe_options(command)).await
     }
 
-    fn probe_options(&self, command: Option<updraft_protocol::ControlCommand>) -> ProbeOptions {
+    fn probe_options(&self, command: Option<gafctl_protocol::ControlCommand>) -> ProbeOptions {
         ProbeOptions {
             scan_duration: Duration::from_secs(6),
             response_timeout: Duration::from_secs(3),
@@ -580,11 +580,11 @@ enum ControlStatus {
 
 impl ControlStatus {
     fn from_readback(
-        control: Option<&updraft_protocol::ControlOutcome>,
+        control: Option<&gafctl_protocol::ControlOutcome>,
         state_error: Option<String>,
     ) -> Self {
         match (
-            control.is_some_and(updraft_protocol::ControlOutcome::is_confirmed),
+            control.is_some_and(gafctl_protocol::ControlOutcome::is_confirmed),
             state_error,
         ) {
             (true, _) => Self::Confirmed,
@@ -726,7 +726,7 @@ pub(crate) async fn serve(
         tokio::spawn(poll_quickconnect_device(state, DEFAULT_POLL_INTERVAL));
     }
 
-    tracing::info!(%address, "Updraft API listening");
+    tracing::info!(%address, "Gafctl API listening");
     axum::serve(listener, app)
         .await
         .context("HTTP server failed")
@@ -1358,11 +1358,11 @@ fn project_legacy_snapshot(snapshot: &DeviceSnapshot) -> Option<DeviceState> {
         humidity_percent: Some(tenths_to_decimal(sensors.humidity.value())),
         settings: DeviceSettings::LegacyBle {
             mode: Some(match mode.mode {
-                updraft_protocol::OperatingMode::Automatic => LegacyMode::Automatic,
-                updraft_protocol::OperatingMode::Timer => LegacyMode::Timer,
-                updraft_protocol::OperatingMode::Ota => LegacyMode::Ota,
+                gafctl_protocol::OperatingMode::Automatic => LegacyMode::Automatic,
+                gafctl_protocol::OperatingMode::Timer => LegacyMode::Timer,
+                gafctl_protocol::OperatingMode::Ota => LegacyMode::Ota,
             }),
-            controller_fan_on: Some(mode.fan == updraft_protocol::FanState::On),
+            controller_fan_on: Some(mode.fan == gafctl_protocol::FanState::On),
             automatic_temperature_tenths_f: Some(thresholds.temperature.value()),
             automatic_humidity_tenths_percent: Some(thresholds.humidity.value()),
             timer_remaining_minutes: Some(timer.remaining.value()),
@@ -1409,7 +1409,7 @@ async fn wait_for_poll_tick(mut ticker: Interval) -> Option<((), Interval)> {
 
 fn probe_thresholds(
     result: &Result<ProbeResult, ProbeError>,
-) -> Option<updraft_protocol::AutomaticThresholds> {
+) -> Option<gafctl_protocol::AutomaticThresholds> {
     let Ok(ProbeResult::Queried { result, .. }) = result else {
         return None;
     };
@@ -1584,10 +1584,10 @@ mod tests {
         state.quickconnect_runtime = Some(QuickConnectRuntime {
             account_id: "synthetic-account".to_owned(),
             client: QuickConnectClient::new(
-                updraft_quickconnect::Credentials::new(
+                gafctl_quickconnect::Credentials::new(
                     "user",
                     "password",
-                    updraft_quickconnect::AccountRole::Contractor,
+                    gafctl_quickconnect::AccountRole::Contractor,
                 ),
                 QuickConnectConfig::new(
                     format!("{base}cognito/").parse().unwrap(),
@@ -1908,10 +1908,10 @@ mod tests {
         let base = format!("http://{}/", listener.local_addr().unwrap());
         let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
         let client = QuickConnectClient::new(
-            updraft_quickconnect::Credentials::new(
+            gafctl_quickconnect::Credentials::new(
                 "synthetic-user",
                 "synthetic-password",
-                updraft_quickconnect::AccountRole::Contractor,
+                gafctl_quickconnect::AccountRole::Contractor,
             ),
             QuickConnectConfig::new(
                 format!("{base}cognito/").parse().unwrap(),
@@ -2486,7 +2486,7 @@ mod tests {
         assert_eq!(result.status(), StatusCode::TOO_MANY_REQUESTS);
         let body = result.into_body().collect().await.unwrap().to_bytes();
         let response: DeviceControlV2Response = serde_json::from_slice(&body).unwrap();
-        assert_eq!(response.status, updraft_api::ControlStatus::Busy);
+        assert_eq!(response.status, gafctl_api::ControlStatus::Busy);
         assert_eq!(response.request_id, request.request_id.as_str());
         drop(permits);
         assert!(runtime.device.try_reserve_control().is_some());
@@ -2608,16 +2608,16 @@ mod tests {
 
     fn snapshot_at(started_at: Instant, observed_at: SystemTime) -> DeviceSnapshot {
         DeviceSnapshot::from_frames_at(
-            updraft_protocol::Frame::from_bytes(bytes::Bytes::from_static(
+            gafctl_protocol::Frame::from_bytes(bytes::Bytes::from_static(
                 b"#idr030000private-suffix\n",
             ))
             .unwrap(),
-            updraft_protocol::Frame::from_bytes(bytes::Bytes::from_static(b"#dmraf\n")).unwrap(),
-            updraft_protocol::Frame::from_bytes(bytes::Bytes::from_static(b"#sdr03ca00aa\n"))
+            gafctl_protocol::Frame::from_bytes(bytes::Bytes::from_static(b"#dmraf\n")).unwrap(),
+            gafctl_protocol::Frame::from_bytes(bytes::Bytes::from_static(b"#sdr03ca00aa\n"))
                 .unwrap(),
-            updraft_protocol::Frame::from_bytes(bytes::Bytes::from_static(b"#atr041a012c\n"))
+            gafctl_protocol::Frame::from_bytes(bytes::Bytes::from_static(b"#atr041a012c\n"))
                 .unwrap(),
-            updraft_protocol::Frame::from_bytes(bytes::Bytes::from_static(b"#ttr00000000\n"))
+            gafctl_protocol::Frame::from_bytes(bytes::Bytes::from_static(b"#ttr00000000\n"))
                 .unwrap(),
             observed_at,
             started_at,
@@ -2628,7 +2628,7 @@ mod tests {
     fn identity_store_path() -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("target/operations")
-            .join(format!("updraft-api-identities-{}", uuid::Uuid::new_v4()))
+            .join(format!("gafctl-api-identities-{}", uuid::Uuid::new_v4()))
             .join("identities.json")
     }
 
@@ -3154,9 +3154,9 @@ mod tests {
         let task = tokio::spawn(async move {
             axum::serve(listener, app).await.unwrap();
         });
-        let client = updraft_client::Client::new(
+        let client = gafctl_client::Client::new(
             url.parse().unwrap(),
-            updraft_client::ClientOptions::default(),
+            gafctl_client::ClientOptions::default(),
         )
         .unwrap();
         let inventory = client.devices().await.unwrap();
@@ -3202,16 +3202,16 @@ mod tests {
     #[test]
     fn snapshot_projection_does_not_expose_identity_suffix_or_claim_airflow() {
         let snapshot = DeviceSnapshot::from_frames(
-            updraft_protocol::Frame::from_bytes(bytes::Bytes::from_static(
+            gafctl_protocol::Frame::from_bytes(bytes::Bytes::from_static(
                 b"#idr030000private-suffix\n",
             ))
             .unwrap(),
-            updraft_protocol::Frame::from_bytes(bytes::Bytes::from_static(b"#dmraf\n")).unwrap(),
-            updraft_protocol::Frame::from_bytes(bytes::Bytes::from_static(b"#sdr03ca00aa\n"))
+            gafctl_protocol::Frame::from_bytes(bytes::Bytes::from_static(b"#dmraf\n")).unwrap(),
+            gafctl_protocol::Frame::from_bytes(bytes::Bytes::from_static(b"#sdr03ca00aa\n"))
                 .unwrap(),
-            updraft_protocol::Frame::from_bytes(bytes::Bytes::from_static(b"#atr041a012c\n"))
+            gafctl_protocol::Frame::from_bytes(bytes::Bytes::from_static(b"#atr041a012c\n"))
                 .unwrap(),
-            updraft_protocol::Frame::from_bytes(bytes::Bytes::from_static(b"#ttr00000000\n"))
+            gafctl_protocol::Frame::from_bytes(bytes::Bytes::from_static(b"#ttr00000000\n"))
                 .unwrap(),
         )
         .unwrap();

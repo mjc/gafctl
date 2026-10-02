@@ -2,9 +2,9 @@ use std::{fmt::Display, num::NonZeroU64, process::ExitCode, str::FromStr, time::
 
 use anyhow::Result;
 use clap::{Args, Subcommand, ValueEnum};
+use gafctl_api::{CommandId, ControlPreset, DeviceCommand, DeviceId, QuickConnectMode};
+use gafctl_client::{Client, ClientError, ClientOptions, ServerUrl};
 use serde::Serialize;
-use updraft_api::{CommandId, ControlPreset, DeviceCommand, DeviceId, QuickConnectMode};
-use updraft_client::{Client, ClientError, ClientOptions, ServerUrl};
 
 #[derive(Clone, Copy, Debug, Default, ValueEnum)]
 pub(crate) enum OutputFormat {
@@ -98,7 +98,7 @@ pub(crate) struct ServiceOptions {
     #[arg(
         long,
         global = true,
-        env = "UPDRAFT_SERVER_URL",
+        env = "GAFCTL_SERVER_URL",
         default_value = "http://127.0.0.1:8787"
     )]
     server: ServerUrl,
@@ -341,7 +341,7 @@ impl ControlOptions {
                 #[derive(Serialize)]
                 struct ControlOutput<'a> {
                     #[serde(flatten)]
-                    response: &'a updraft_api::DeviceControlV2Response,
+                    response: &'a gafctl_api::DeviceControlV2Response,
                     http_status: u16,
                 }
                 self.service.format.write(
@@ -434,10 +434,10 @@ impl BleCommand {
     ) -> (
         crate::cli_ble::BleIntent,
         BleSettings,
-        updraft_bluetooth::ProbeOptions,
+        gafctl_bluetooth::ProbeOptions,
     ) {
         use crate::cli_ble::BleIntent;
-        use updraft_bluetooth::{ProbeMode, ProbeOptions};
+        use gafctl_bluetooth::{ProbeMode, ProbeOptions};
         let settings = self.settings;
         let (intent, mode) = match self.command {
             BleOperation::Scan => (BleIntent::Scan, ProbeMode::Scan),
@@ -499,7 +499,7 @@ mod tests {
     fn unrepresentable_deadlines_are_rejected_before_transport_access() {
         assert!(
             BleParser::try_parse_from([
-                "updraft",
+                "gafctl",
                 "state",
                 "--timeout-seconds",
                 "18446744073709551615"
@@ -507,7 +507,7 @@ mod tests {
             .is_err()
         );
         assert!(
-            ServiceParser::try_parse_from(["updraft", "--timeout-seconds", "18446744073709551615"])
+            ServiceParser::try_parse_from(["gafctl", "--timeout-seconds", "18446744073709551615"])
                 .is_err()
         );
     }
@@ -563,7 +563,7 @@ mod tests {
             ),
         ] {
             let parsed = ControlParser::try_parse_from(
-                ["updraft", "local", "--format", "json"]
+                ["gafctl", "local", "--format", "json"]
                     .into_iter()
                     .chain(args)
                     .chain(["--request-id", "chosen", "--timeout-seconds", "8"]),
@@ -582,7 +582,7 @@ mod tests {
     fn ble_shared_flags_work_before_and_after_operation_subcommands() {
         assert!(
             BleParser::try_parse_from([
-                "updraft",
+                "gafctl",
                 "--format",
                 "json",
                 "--scan-seconds",
@@ -593,7 +593,7 @@ mod tests {
         );
         assert!(
             BleParser::try_parse_from([
-                "updraft",
+                "gafctl",
                 "--timeout-seconds",
                 "4",
                 "control",
@@ -610,7 +610,7 @@ mod tests {
 
     #[test]
     fn ble_preset_mapping_preserves_target_and_transport_deadlines() {
-        use updraft_protocol::{
+        use gafctl_protocol::{
             AutomaticThresholds, ControlCommand, HumidityTenthsPercent, Minutes, TemperatureTenthsF,
         };
         for (name, command) in [
@@ -635,7 +635,7 @@ mod tests {
             ),
         ] {
             let parsed = BleParser::try_parse_from([
-                "updraft",
+                "gafctl",
                 "control",
                 "--device-id",
                 "platform/id",
@@ -655,14 +655,14 @@ mod tests {
             assert_eq!(options.scan_duration, Duration::from_secs(7));
             assert_eq!(options.response_timeout, Duration::from_secs(4));
             match options.mode {
-                updraft_bluetooth::ProbeMode::Query {
+                gafctl_bluetooth::ProbeMode::Query {
                     device_id,
                     control_command,
                 } => {
                     assert_eq!(device_id.as_deref(), Some("platform/id"));
                     assert_eq!(control_command, Some(command));
                 }
-                updraft_bluetooth::ProbeMode::Scan => unreachable!("control mapped to scan"),
+                gafctl_bluetooth::ProbeMode::Scan => unreachable!("control mapped to scan"),
             }
         }
     }
@@ -677,7 +677,7 @@ mod tests {
         ] {
             assert!(
                 BleParser::try_parse_from([
-                    "updraft",
+                    "gafctl",
                     "control",
                     "--device-id",
                     "platform/id",
@@ -695,16 +695,16 @@ mod tests {
             vec!["scan", "--device-id", "id"],
             vec!["state", "--timeout-seconds", "0"],
         ] {
-            assert!(BleParser::try_parse_from(["updraft"].into_iter().chain(args)).is_err());
+            assert!(BleParser::try_parse_from(["gafctl"].into_iter().chain(args)).is_err());
         }
-        assert!(BleParser::try_parse_from(["updraft", "state"]).is_ok());
+        assert!(BleParser::try_parse_from(["gafctl", "state"]).is_ok());
         assert!("platform/id".parse::<PeripheralId>().is_ok());
         assert!("platform/id".parse::<DeviceId>().is_err());
     }
 
     #[test]
     fn service_defaults_and_numeric_boundaries_are_explicit() {
-        let defaults = ServiceParser::try_parse_from(["updraft"]).unwrap();
+        let defaults = ServiceParser::try_parse_from(["gafctl"]).unwrap();
         assert_eq!(
             defaults.options.server.as_url().as_str(),
             "http://127.0.0.1:8787/"

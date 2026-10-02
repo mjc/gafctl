@@ -8,6 +8,7 @@ use crate::{
     device::{DeviceBackend, DeviceDescriptor, DeviceId, ProxyId},
 };
 use futures_util::{Stream, StreamExt, future, stream};
+use gafctl_api::CommandId;
 use rumqttc::v5::{
     AsyncClient, ConnectionError, Event, EventLoop, MqttOptions,
     mqttbytes::{
@@ -21,7 +22,6 @@ use tokio::{
     time::{sleep, timeout},
 };
 use topics::Topics;
-use updraft_api::CommandId;
 
 pub(crate) const CONTROL_QUEUE_CAPACITY: usize = 8;
 const MAX_PENDING_CONTROL_RESULTS: usize = 32;
@@ -95,7 +95,7 @@ pub(crate) enum MqttReply {
     Control(DeviceControlV2Response),
     Refresh {
         request_id: String,
-        status: updraft_api::DeviceRefreshStatus,
+        status: gafctl_api::DeviceRefreshStatus,
     },
     Rejected {
         request_id: String,
@@ -647,7 +647,7 @@ mod tests {
     fn test_mqtt_options(client_id: &str, port: u16) -> MqttOptions {
         let mut options = MqttOptions::new(client_id, "127.0.0.1", port);
         options.set_keep_alive(Duration::from_secs(5));
-        options.set_credentials("updraft-test", "updraft-test");
+        options.set_credentials("gafctl-test", "gafctl-test");
         options
     }
 
@@ -860,7 +860,7 @@ mod tests {
                 .unwrap()
                 .contains("if reading is number else none")
         );
-        if let Some(path) = std::env::var_os("UPDRAFT_DISCOVERY_FIXTURE") {
+        if let Some(path) = std::env::var_os("GAFCTL_DISCOVERY_FIXTURE") {
             std::fs::write(path, serde_json::to_vec_pretty(&configs).unwrap()).unwrap();
         }
     }
@@ -897,9 +897,9 @@ mod tests {
             ),
             None
         );
-        assert_eq!(topics.request_device("updraft/gaf_vent/control/set"), None);
+        assert_eq!(topics.request_device("gafctl/gaf_vent/control/set"), None);
         assert_eq!(
-            topics.request_device(&format!("updraft/{}/a/b/control/set", topics.0)),
+            topics.request_device(&format!("gafctl/{}/a/b/control/set", topics.0)),
             None
         );
         assert_eq!(
@@ -1298,7 +1298,7 @@ mod tests {
         work.reply
             .send(MqttReply::Refresh {
                 request_id: work.request.request_id().as_str().to_owned(),
-                status: updraft_api::DeviceRefreshStatus::Fresh,
+                status: gafctl_api::DeviceRefreshStatus::Fresh,
             })
             .ok()
             .unwrap();

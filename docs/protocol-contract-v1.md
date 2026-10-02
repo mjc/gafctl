@@ -20,7 +20,7 @@ are documentation versions and are not negotiated with the fan.
   captured read replies use lowercase hexadecimal.
 - A notification may contain a fragment or several frames. Join fragments through
   LF and split complete frames before decoding.
-- Updraft rejects frames over 1024 bytes. This is an implementation bound, not a
+- Gafctl rejects frames over 1024 bytes. This is an implementation bound, not a
   measured controller limit.
 
 ## Reads
@@ -63,7 +63,7 @@ arguments do not extend the normal control presets.
 
 ## Unsupported operations
 
-Updraft does not expose a separate original-controller on/off command, manual
+Gafctl does not expose a separate original-controller on/off command, manual
 mode, firmware update, reboot, or reset. OTA/reboot tokens found in the app and
 firmware are recorded in the findings for research only. Direct Wi-Fi/TLS control
 has not been implemented; its listener port and authentication are unresolved.
@@ -96,5 +96,5 @@ state read cannot interleave with a control/readback transaction.
 
 QuickConnect has a separate backend and
 [separate cloud protocol](quickconnect-contract.md). Its account/device IDs are
-mapped to persistent local IDs in `UPDRAFT_IDENTITY_STORE`. They are never treated
+mapped to persistent local IDs in `GAFCTL_IDENTITY_STORE`. They are never treated
 as a substitute for `configured`.

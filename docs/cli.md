@@ -1,32 +1,44 @@
 # Command line interface
 
-The standalone `updraftctl` executable can access a fan directly over Bluetooth
-or act as an HTTP client of a running Updraft service. Run `updraftctl --help`
-and any command's `--help` for the full argument reference. The `updraft`
-executable runs the service and its diagnostic `probe` interface.
+The standalone `gafctl` executable can access a fan directly over Bluetooth
+or act as an HTTP client of a running Gafctl service. Run `gafctl --help`
+and any command's `--help` for the full argument reference. The `gafctl`
+command `server` launches the adjacent `gafctl-server` executable, or finds it on `PATH`.
+Arguments after `server` are passed to that executable unchanged, including `--help`.
+On Unix, the server replaces the CLI process and receives signals directly.
 
 For development, use the repository's pinned environment:
 
 ```sh
 devenv allow
-devenv shell -- cargo run --no-default-features --features cli --bin updraftctl -- devices --format json
+devenv shell -- cargo run --no-default-features --features cli --bin gafctl -- devices --format json
 ```
 
-Cargo features default to `http` and `mqtt`; the control CLI is opt-in. `mqtt` also enables `http`.
+Cargo features default to `http`, `mqtt`, and `cli`, building both executables. `mqtt` also enables `http`.
 Build the service without MQTT with `--no-default-features --features http`, or
 build only the control CLI with `--no-default-features --features cli`.
+
+## Start the server
+
+```sh
+gafctl server --bind 127.0.0.1:8787
+gafctl-server --bind 127.0.0.1:8787
+```
+
+Both commands start the same server. Install `gafctl-server` alongside the CLI or on `PATH`.
+A CLI-only build can launch a separately installed server.
 
 ## Running service
 
 ```sh
-updraftctl devices
-updraftctl devices --server https://fan.example/updraft --format json
-updraftctl state configured --format json
-updraftctl control configured preset timer-clear
-updraftctl control configured preset timer-one-minute --request-id attic-timer-1
-updraftctl control qc-local mode automatic
-updraftctl control qc-local targets --temperature-f 105 --humidity-percent 40
-updraftctl control qc-local timer-duration 60
+gafctl devices
+gafctl devices --server https://fan.example/gafctl --format json
+gafctl state configured --format json
+gafctl control configured preset timer-clear
+gafctl control configured preset timer-one-minute --request-id attic-timer-1
+gafctl control qc-local mode automatic
+gafctl control qc-local targets --temperature-f 105 --humidity-percent 40
+gafctl control qc-local timer-duration 60
 ```
 
 Use the local device ID returned by `devices`. A local ID contains 1–64 ASCII
@@ -39,11 +51,11 @@ write gates, serialization, and replay handling.
 The URL is chosen in this order:
 
 1. `--server URL`
-2. `UPDRAFT_SERVER_URL`
+2. `GAFCTL_SERVER_URL`
 3. `http://127.0.0.1:8787`
 
 HTTP and HTTPS are supported, including reverse-proxy prefixes such as
-`https://fan.example/updraft`. Credentials, query strings, and fragments in the
+`https://fan.example/gafctl`. Credentials, query strings, and fragments in the
 base URL are rejected. TLS certificates are verified. The client disables
 redirects, proxies, and automatic retries. It never falls back to BLE when a
 service request fails. Client commands require no QuickConnect account secrets
@@ -97,8 +109,8 @@ is generated immediately before the POST, after capability discovery. Global
 options within a command tree work before or after its subcommand, for example:
 
 ```sh
-updraftctl control configured --format json preset timer-clear --request-id attic-1
-updraftctl control configured preset timer-clear --format json --request-id attic-1
+gafctl control configured --format json preset timer-clear --request-id attic-1
+gafctl control configured preset timer-clear --format json --request-id attic-1
 ```
 
 Success requires a matching request ID, a successful HTTP status, and the
@@ -116,11 +128,11 @@ whether to retry.
 ## Direct Bluetooth
 
 ```sh
-updraftctl ble scan --format json
-updraftctl ble state
-updraftctl ble state --device-id <peripheral-id> --format json
-updraftctl ble control --device-id <peripheral-id> preset timer-clear --format json
-updraftctl ble control --device-id <peripheral-id> preset automatic-105-1-f-30-1-percent
+gafctl ble scan --format json
+gafctl ble state
+gafctl ble state --device-id <peripheral-id> --format json
+gafctl ble control --device-id <peripheral-id> preset timer-clear --format json
+gafctl ble control --device-id <peripheral-id> preset automatic-105-1-f-30-1-percent
 ```
 
 `scan` discovers advertisements without connecting or sending protocol requests.
@@ -149,18 +161,17 @@ Raw identity payload bytes are omitted from both text and JSON. Supply
 device identifier. Peripheral IDs needed for selection are shown by direct BLE
 commands. Service output uses service-local IDs.
 
-The original diagnostic interface remains compatible:
+The server executable also exposes Bluetooth diagnostics:
 
 ```sh
-updraft probe ble --scan-only
-updraft probe ble --device-id <peripheral-id> --set-auto-thresholds-tenths 1050 300
-updraft probe ble --device-id <peripheral-id> --set-timer-minutes 1
+gafctl-server probe ble --scan-only
+gafctl-server probe ble --device-id <peripheral-id> --set-auto-thresholds-tenths 1050 300
+gafctl-server probe ble --device-id <peripheral-id> --set-timer-minutes 1
 ```
 
 Diagnostic controls accept the existing raw `u16` values. That interface does
 not establish verified hardware limits for arbitrary settings; use the normal
-verified presets for routine BLE control. `serve` retains its existing flags
-and environment variables.
+verified presets for routine BLE control. Server options use the `GAFCTL_` environment variables documented in the service guide.
 
 ## Output and exit codes
 
@@ -227,16 +238,16 @@ Discovery failures contain `peripheral_id` and `message`. A `query` contains:
 ## Completions and reusable Rust client
 
 ```sh
-updraftctl completions bash > updraftctl.bash
-updraftctl completions zsh > _updraftctl
-updraftctl completions fish > updraftctl.fish
+gafctl completions bash > gafctl.bash
+gafctl completions zsh > _gafctl
+gafctl completions fish > gafctl.fish
 ```
 
 Completions are generated from the same clap command definition without network
 or Bluetooth initialization. Elvish and PowerShell are also supported.
 
-Rust callers can use `updraft-client::Client` with `ServerUrl` and
-`ClientOptions`. `devices` and `state` return shared `updraft-api` models.
+Rust callers can use `gafctl-client::Client` with `ServerUrl` and
+`ClientOptions`. `devices` and `state` return shared `gafctl-api` models.
 `prepare_control` resolves capabilities and returns a `PreparedControl` intent;
 consuming `submit` sends it once. A `ControlResult::Confirmed` contains a private
 `ConfirmedControl` value constructed only after HTTP, correlation, and backend

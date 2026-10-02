@@ -21,13 +21,13 @@ from homeassistant.components.mqtt import (
     binary_sensor as mqtt_binary, button as mqtt_button, switch as mqtt_switch,
 )
 
-from custom_components.updraft import UpdraftCoordinator
-from custom_components.updraft.button import UpdraftRefreshButton
-from custom_components.updraft import number as updraft_number
-from custom_components.updraft import binary_sensor as updraft_binary
-from custom_components.updraft import sensor as updraft_sensor, switch as updraft_switch, button as updraft_button
-from custom_components.updraft.client import ApiError
-from custom_components.updraft.config_flow import UpdraftConfigFlow
+from custom_components.gafctl import GafctlCoordinator
+from custom_components.gafctl.button import GafctlRefreshButton
+from custom_components.gafctl import number as gafctl_number
+from custom_components.gafctl import binary_sensor as gafctl_binary
+from custom_components.gafctl import sensor as gafctl_sensor, switch as gafctl_switch, button as gafctl_button
+from custom_components.gafctl.client import ApiError
+from custom_components.gafctl.config_flow import GafctlConfigFlow
 from homeassistant.exceptions import HomeAssistantError
 
 
@@ -51,13 +51,13 @@ class RegistryTests(unittest.IsolatedAsyncioTestCase):
     async def test_onboarding_bulk_selects_only_http_owned_unconfigured_devices(self):
         await self.entry()
         eligible = [device() | {"id": key, "capabilities": {"read_state": True, "commands": []}} for key in ("one", "two")]
-        flow = UpdraftConfigFlow()
+        flow = GafctlConfigFlow()
         flow.hass = self.hass
-        flow.handler = "updraft"
+        flow.handler = "gafctl"
         flow.context = {"source": "user"}
         client = AsyncMock()
         client.fetch_devices.return_value = [device(), device(owner="mqtt") | {"id": "mqtt"}, *eligible]
-        with patch("custom_components.updraft.config_flow.async_get_clientsession", return_value=object()), patch("custom_components.updraft.config_flow.ApiClient", return_value=client):
+        with patch("custom_components.gafctl.config_flow.async_get_clientsession", return_value=object()), patch("custom_components.gafctl.config_flow.ApiClient", return_value=client):
             result = await flow.async_step_user({"api_url": "http://proxy:8787"})
             self.assertEqual(result["step_id"], "device")
             self.assertEqual(set(flow._devices), {"one", "two"})
@@ -70,27 +70,27 @@ class RegistryTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_real_flow_manager_creates_separate_entries_for_bulk_selection(self):
         import shutil
-        component = Path(__file__).resolve().parents[1] / "custom_components/updraft"
-        shutil.copytree(component, Path(self.hass.config.path("custom_components/updraft")))
+        component = Path(__file__).resolve().parents[1] / "custom_components/gafctl"
+        shutil.copytree(component, Path(self.hass.config.path("custom_components/gafctl")))
         from homeassistant import loader
         loader.async_setup(self.hass)
         selected = [device() | {"id": key, "capabilities": {"read_state": True, "commands": []}} for key in ("one", "two")]
         client = AsyncMock()
         client.fetch_devices.return_value = selected
-        with patch("custom_components.updraft.config_flow.async_get_clientsession", return_value=object()), patch("custom_components.updraft.config_flow.ApiClient", return_value=client), patch.object(ConfigEntries, "async_setup", AsyncMock(return_value=True)):
-            result = await self.hass.config_entries.flow.async_init("updraft", context={"source": "user"})
+        with patch("custom_components.gafctl.config_flow.async_get_clientsession", return_value=object()), patch("custom_components.gafctl.config_flow.ApiClient", return_value=client), patch.object(ConfigEntries, "async_setup", AsyncMock(return_value=True)):
+            result = await self.hass.config_entries.flow.async_init("gafctl", context={"source": "user"})
             result = await self.hass.config_entries.flow.async_configure(result["flow_id"], {"api_url": "http://proxy:8787"})
             result = await self.hass.config_entries.flow.async_configure(result["flow_id"], {"device_ids": ["one", "two"]})
             await self.hass.async_block_till_done()
         self.assertEqual(result["type"], "create_entry")
-        entries = self.hass.config_entries.async_entries("updraft")
+        entries = self.hass.config_entries.async_entries("gafctl")
         self.assertEqual({entry.data["device_id"] for entry in entries}, {"one", "two"})
-        self.assertEqual({entry.unique_id for entry in entries}, {f"updraft_{PROXY_ID}_one", f"updraft_{PROXY_ID}_two"})
+        self.assertEqual({entry.unique_id for entry in entries}, {f"gafctl_{PROXY_ID}_one", f"gafctl_{PROXY_ID}_two"})
 
     async def test_onboarding_rejects_empty_or_changed_selection_before_import(self):
-        flow = UpdraftConfigFlow()
+        flow = GafctlConfigFlow()
         flow.hass = self.hass
-        flow.handler = "updraft"
+        flow.handler = "gafctl"
         flow.context = {"source": "user"}
         selected = device() | {"capabilities": {"read_state": True, "commands": []}}
         flow._api_url = "http://proxy:8787"
@@ -106,9 +106,9 @@ class RegistryTests(unittest.IsolatedAsyncioTestCase):
     async def test_import_checks_identity_and_existing_entry_without_duplicates(self):
         await self.entry()
         for proxy_id in (PROXY_ID, "650e8400-e29b-41d4-a716-446655440000"):
-            flow = UpdraftConfigFlow()
+            flow = GafctlConfigFlow()
             flow.hass = self.hass
-            flow.handler = "updraft"
+            flow.handler = "gafctl"
             flow.context = {"source": "import"}
             selected = device(proxy_id) | {"capabilities": {"read_state": True, "commands": []}}
             with patch.object(flow, "_fetch_devices", AsyncMock(return_value=[selected])):
@@ -125,13 +125,13 @@ class RegistryTests(unittest.IsolatedAsyncioTestCase):
         entry = await self.entry()
         registered, registered_device = self.registered_sensor(entry)
         for proxy_id, expected in (("650e8400-e29b-41d4-a716-446655440000", "wrong_device"), (PROXY_ID, None)):
-            flow = UpdraftConfigFlow()
+            flow = GafctlConfigFlow()
             flow.hass = self.hass
-            flow.handler = "updraft"
+            flow.handler = "gafctl"
             flow.context = {"source": "reconfigure", "entry_id": entry.entry_id}
             client = AsyncMock()
             client.fetch_devices.return_value = [device(proxy_id)]
-            with patch("custom_components.updraft.config_flow.async_get_clientsession", return_value=object()), patch("custom_components.updraft.config_flow.ApiClient", return_value=client), patch.object(ConfigEntries, "async_reload", AsyncMock(return_value=True)):
+            with patch("custom_components.gafctl.config_flow.async_get_clientsession", return_value=object()), patch("custom_components.gafctl.config_flow.ApiClient", return_value=client), patch.object(ConfigEntries, "async_reload", AsyncMock(return_value=True)):
                 result = await flow.async_step_reconfigure({"api_url": "http://new-proxy:8787"})
             if expected:
                 self.assertEqual(result["errors"]["base"], expected)
@@ -139,7 +139,7 @@ class RegistryTests(unittest.IsolatedAsyncioTestCase):
             else:
                 self.assertEqual(result["type"], "abort")
                 self.assertEqual(entry.data["api_url"], "http://new-proxy:8787")
-                self.assertEqual(entry.unique_id, f"updraft_{PROXY_ID}_configured")
+                self.assertEqual(entry.unique_id, f"gafctl_{PROXY_ID}_configured")
                 self.assertEqual(self.entities.async_get(registered.entity_id).device_id, registered_device.id)
 
     async def test_reported_sensors_keep_raw_diagnostics_and_original_timer(self):
@@ -149,11 +149,11 @@ class RegistryTests(unittest.IsolatedAsyncioTestCase):
             ("quick_connect", {"signal_strength_raw": "unknown-units", "verified_raw": "unknown-semantics"},
                 {"signal_strength_raw": "unknown-units", "verified_raw": "unknown-semantics"}),
         ):
-            coordinator = UpdraftCoordinator(self.hass, AsyncMock(), device() | {"backend": backend}, entry)
+            coordinator = GafctlCoordinator(self.hass, AsyncMock(), device() | {"backend": backend}, entry)
             coordinator.async_set_updated_data({"available": True, "freshness": "fresh", "state": values})
-            self.hass.data["updraft"] = {entry.entry_id: coordinator}
+            self.hass.data["gafctl"] = {entry.entry_id: coordinator}
             entities = []
-            await updraft_sensor.async_setup_entry(self.hass, entry, entities.extend)
+            await gafctl_sensor.async_setup_entry(self.hass, entry, entities.extend)
             selected = {entity.entity_description.key: entity for entity in entities}
             for key, value in expected.items():
                 self.assertEqual(selected[key].native_value, value)
@@ -164,13 +164,13 @@ class RegistryTests(unittest.IsolatedAsyncioTestCase):
     async def test_switches_and_all_off_button_delegate_only_advertised_mode_control(self):
         entry = await self.entry()
         selected = device() | {"backend": "quick_connect", "commands": [{"kind": "quick_connect_mode"}]}
-        coordinator = UpdraftCoordinator(self.hass, AsyncMock(), selected, entry)
+        coordinator = GafctlCoordinator(self.hass, AsyncMock(), selected, entry)
         coordinator.async_set_updated_data({"available": True, "freshness": "fresh", "state": {"mode": "automatic"}})
-        self.hass.data["updraft"] = {entry.entry_id: coordinator}
+        self.hass.data["gafctl"] = {entry.entry_id: coordinator}
         coordinator.async_set_mode = AsyncMock()
         switches, buttons = [], []
-        await updraft_switch.async_setup_entry(self.hass, entry, switches.extend)
-        await updraft_button.async_setup_entry(self.hass, entry, buttons.extend)
+        await gafctl_switch.async_setup_entry(self.hass, entry, switches.extend)
+        await gafctl_button.async_setup_entry(self.hass, entry, buttons.extend)
         self.assertEqual([switch.is_on for switch in switches], [True, False, False])
         self.assertTrue(all(switch.available for switch in switches))
         await switches[2].async_turn_on()
@@ -184,7 +184,7 @@ class RegistryTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(all_off.available)
         self.assertTrue(all(not switch.available for switch in switches))
         empty = []
-        await updraft_switch.async_setup_entry(self.hass, entry, empty.extend)
+        await gafctl_switch.async_setup_entry(self.hass, entry, empty.extend)
         self.assertEqual(empty, [])
 
     async def test_mode_control_rejects_mismatched_readback_and_unknown_conditional_off(self):
@@ -195,7 +195,7 @@ class RegistryTests(unittest.IsolatedAsyncioTestCase):
         client.fetch_devices.return_value = [selected]
         old = {"available": True, "freshness": "fresh", "state": {"mode": "automatic"}}
         client.fetch_state.return_value = old
-        coordinator = UpdraftCoordinator(self.hass, client, selected, entry)
+        coordinator = GafctlCoordinator(self.hass, client, selected, entry)
         with self.assertRaises(ApiError):
             await coordinator.async_set_mode("manual")
         client.set_control.assert_awaited_once()
@@ -215,11 +215,11 @@ class RegistryTests(unittest.IsolatedAsyncioTestCase):
                 "timer_mode": None, "manual_mode": None, "humidity_monitor": None}),
         ):
             selected = device() | {"backend": backend}
-            coordinator = UpdraftCoordinator(self.hass, AsyncMock(), selected, entry)
+            coordinator = GafctlCoordinator(self.hass, AsyncMock(), selected, entry)
             coordinator.async_set_updated_data({"available": True, "freshness": "fresh", "state": values})
-            self.hass.data["updraft"] = {entry.entry_id: coordinator}
+            self.hass.data["gafctl"] = {entry.entry_id: coordinator}
             entities = []
-            await updraft_binary.async_setup_entry(self.hass, entry, entities.extend)
+            await gafctl_binary.async_setup_entry(self.hass, entry, entities.extend)
             result = {entity.unique_id.removeprefix(entry.unique_id+"_"): entity.is_on for entity in entities}
             self.assertEqual(result, expected)
             self.assertTrue(all(entity.available for entity in entities))
@@ -234,7 +234,7 @@ class RegistryTests(unittest.IsolatedAsyncioTestCase):
         old = {"available": True, "freshness": "fresh", "state": {"mode": "automatic"}}
         new = old | {"state": {"mode": "off"}}
         client.fetch_state.side_effect = [old, new]
-        coordinator = UpdraftCoordinator(self.hass, client, selected, entry)
+        coordinator = GafctlCoordinator(self.hass, client, selected, entry)
         coordinator.async_set_updated_data(old)
         await coordinator.async_set_mode("off", only_if_current="automatic")
         client.set_control.assert_awaited_once_with("configured", {"kind": "quick_connect_conditional_off", "only_if_current": "automatic"})
@@ -257,11 +257,11 @@ class RegistryTests(unittest.IsolatedAsyncioTestCase):
         client = AsyncMock()
         client.fetch_devices.return_value = [selected]
         client.fetch_state.side_effect = [old, new]
-        coordinator = UpdraftCoordinator(self.hass, client, selected, entry)
+        coordinator = GafctlCoordinator(self.hass, client, selected, entry)
         coordinator.async_set_updated_data(old)
-        self.hass.data["updraft"] = {entry.entry_id: coordinator}
+        self.hass.data["gafctl"] = {entry.entry_id: coordinator}
         entities = []
-        await updraft_number.async_setup_entry(self.hass, entry, entities.extend)
+        await gafctl_number.async_setup_entry(self.hass, entry, entities.extend)
         timer = entities[0]
         self.assertTrue(timer.available)
         self.assertIsNone(timer.native_value)
@@ -284,11 +284,11 @@ class RegistryTests(unittest.IsolatedAsyncioTestCase):
         client = AsyncMock()
         client.fetch_devices.return_value = [selected]
         client.fetch_state.side_effect = [old, new]
-        coordinator = UpdraftCoordinator(self.hass, client, selected, entry)
+        coordinator = GafctlCoordinator(self.hass, client, selected, entry)
         coordinator.async_set_updated_data(old)
-        self.hass.data["updraft"] = {entry.entry_id: coordinator}
+        self.hass.data["gafctl"] = {entry.entry_id: coordinator}
         entities = []
-        await updraft_number.async_setup_entry(self.hass, entry, entities.extend)
+        await gafctl_number.async_setup_entry(self.hass, entry, entities.extend)
         self.assertEqual(len(entities), 3)
         temperature, humidity, timer = entities
         self.assertTrue(temperature.available)
@@ -315,11 +315,11 @@ class RegistryTests(unittest.IsolatedAsyncioTestCase):
         client = AsyncMock()
         client.fetch_devices.return_value = [selected]
         client.fetch_state.side_effect = [old, new]
-        coordinator = UpdraftCoordinator(self.hass, client, selected, entry)
+        coordinator = GafctlCoordinator(self.hass, client, selected, entry)
         coordinator.async_set_updated_data(old)
-        self.hass.data["updraft"] = {entry.entry_id: coordinator}
+        self.hass.data["gafctl"] = {entry.entry_id: coordinator}
         numbers = []
-        await updraft_number.async_setup_entry(self.hass, entry, numbers.extend)
+        await gafctl_number.async_setup_entry(self.hass, entry, numbers.extend)
         await numbers[0].async_set_native_value(110)
         client.set_control.assert_awaited_once_with("configured", {"kind": "quick_connect_automatic_temperature", "temperature_f": 110})
 
@@ -344,9 +344,9 @@ class RegistryTests(unittest.IsolatedAsyncioTestCase):
         client.fetch_devices.return_value = [device()]
         client.refresh.return_value = {"available": True, "freshness": "fresh", "state": {"temperature_f": 100}}
         client.fetch_state.return_value = client.refresh.return_value
-        coordinator = UpdraftCoordinator(self.hass, client, device(), entry)
+        coordinator = GafctlCoordinator(self.hass, client, device(), entry)
         coordinator.async_set_updated_data({"available": False, "state": None})
-        button = UpdraftRefreshButton(coordinator, entry)
+        button = GafctlRefreshButton(coordinator, entry)
         self.assertTrue(button.available)
         await button.async_press()
         client.refresh.assert_awaited_once_with("configured", "legacy_ble")
@@ -358,11 +358,11 @@ class RegistryTests(unittest.IsolatedAsyncioTestCase):
         client = AsyncMock()
         client.fetch_devices.return_value = [device()]
         client.refresh.side_effect = ApiError("device refresh did not complete")
-        coordinator = UpdraftCoordinator(self.hass, client, device(), entry)
+        coordinator = GafctlCoordinator(self.hass, client, device(), entry)
         old = {"available": True, "state": {"temperature_f": 99}}
         coordinator.async_set_updated_data(old)
         with self.assertRaises(HomeAssistantError):
-            await UpdraftRefreshButton(coordinator, entry).async_press()
+            await GafctlRefreshButton(coordinator, entry).async_press()
         self.assertEqual(coordinator.data, old)
         client.refresh.assert_awaited_once()
 
@@ -371,9 +371,9 @@ class RegistryTests(unittest.IsolatedAsyncioTestCase):
         for current in (device(owner="mqtt"), device("650e8400-e29b-41d4-a716-446655440000")):
             client = AsyncMock()
             client.fetch_devices.return_value = [current]
-            coordinator = UpdraftCoordinator(self.hass, client, device(), entry)
+            coordinator = GafctlCoordinator(self.hass, client, device(), entry)
             with self.assertRaises(HomeAssistantError):
-                await UpdraftRefreshButton(coordinator, entry).async_press()
+                await GafctlRefreshButton(coordinator, entry).async_press()
             client.refresh.assert_not_called()
 
     async def test_refresh_reports_failure_if_followup_cannot_get_current_readings(self):
@@ -382,9 +382,9 @@ class RegistryTests(unittest.IsolatedAsyncioTestCase):
         client.fetch_devices.return_value = [device()]
         client.refresh.return_value = {"available": True, "state": {"temperature_f": 100}}
         client.fetch_state.return_value = {"available": False, "state": None}
-        coordinator = UpdraftCoordinator(self.hass, client, device(), entry)
+        coordinator = GafctlCoordinator(self.hass, client, device(), entry)
         with self.assertRaises(HomeAssistantError):
-            await UpdraftRefreshButton(coordinator, entry).async_press()
+            await GafctlRefreshButton(coordinator, entry).async_press()
 
     async def test_refresh_completion_rejects_owner_or_proxy_changed_during_read(self):
         entry = await self.entry()
@@ -392,11 +392,11 @@ class RegistryTests(unittest.IsolatedAsyncioTestCase):
             client = AsyncMock()
             client.fetch_devices.side_effect = [[device()], [changed]]
             client.refresh.return_value = {"available": True, "state": {"temperature_f": 99}}
-            coordinator = UpdraftCoordinator(self.hass, client, device(), entry)
+            coordinator = GafctlCoordinator(self.hass, client, device(), entry)
             old = {"available": False, "state": None}
             coordinator.async_set_updated_data(old)
             with self.assertRaises(HomeAssistantError):
-                await UpdraftRefreshButton(coordinator, entry).async_press()
+                await GafctlRefreshButton(coordinator, entry).async_press()
             self.assertEqual(coordinator.data, old)
 
     async def test_late_refresh_response_does_not_replace_newer_periodic_data(self):
@@ -405,21 +405,21 @@ class RegistryTests(unittest.IsolatedAsyncioTestCase):
         client.fetch_devices.return_value = [device()]
         newer = {"available": True, "freshness": "fresh", "state": {"temperature_f": 110}}
         older = {"available": True, "freshness": "fresh", "state": {"temperature_f": 100}}
-        coordinator = UpdraftCoordinator(self.hass, client, device(), entry)
+        coordinator = GafctlCoordinator(self.hass, client, device(), entry)
         async def delayed_response(*_):
             coordinator.async_set_updated_data(newer)
             return older
         client.refresh.side_effect = delayed_response
         client.fetch_state.return_value = newer
-        await UpdraftRefreshButton(coordinator, entry).async_press()
+        await GafctlRefreshButton(coordinator, entry).async_press()
         self.assertEqual(coordinator.data, newer)
 
-    async def entry(self, proxy_id=PROXY_ID, domain="updraft"):
+    async def entry(self, proxy_id=PROXY_ID, domain="gafctl"):
         entry = ConfigEntry(
             version=2, minor_version=1,
             domain=domain, title="Vent", source="user",
             data={"api_url": "http://127.0.0.1:8787", "device_id": "configured", "proxy_id": proxy_id, "backend": "legacy_ble"},
-            options={}, unique_id=f"updraft_{proxy_id}_configured",
+            options={}, unique_id=f"gafctl_{proxy_id}_configured",
             discovery_keys=MappingProxyType({}), subentries_data=[],
         )
         with patch.object(ConfigEntries, "async_setup", AsyncMock(return_value=True)):
@@ -440,7 +440,7 @@ class RegistryTests(unittest.IsolatedAsyncioTestCase):
     async def test_mqtt_handoff_removes_http_entities_and_empty_device(self):
         entry = await self.entry()
         sensor, old_device = self.registered_sensor(entry)
-        coordinator = UpdraftCoordinator(self.hass, AsyncMock(), device(), entry)
+        coordinator = GafctlCoordinator(self.hass, AsyncMock(), device(), entry)
         coordinator.device = device(owner="mqtt")
         with patch.object(ConfigEntries, "async_reload", AsyncMock(return_value=True)):
             await coordinator._reload_entry()
@@ -454,7 +454,7 @@ class RegistryTests(unittest.IsolatedAsyncioTestCase):
         old_sensor, old_device = self.registered_sensor(entry)
         other_sensor, other_device = self.registered_sensor(other)
         mqtt_sensor, mqtt_device = self.registered_sensor(mqtt)
-        coordinator = UpdraftCoordinator(self.hass, AsyncMock(), device(), entry)
+        coordinator = GafctlCoordinator(self.hass, AsyncMock(), device(), entry)
         coordinator.device = device(owner="mqtt")
         with patch.object(ConfigEntries, "async_reload", AsyncMock(return_value=True)):
             await coordinator._reload_entry()
@@ -469,7 +469,7 @@ class RegistryTests(unittest.IsolatedAsyncioTestCase):
         entry = await self.entry()
         sensor, registered = self.registered_sensor(entry)
         obsolete, _ = self.registered_sensor(entry, "obsolete")
-        coordinator = UpdraftCoordinator(self.hass, AsyncMock(), device(owner="mqtt"), entry)
+        coordinator = GafctlCoordinator(self.hass, AsyncMock(), device(owner="mqtt"), entry)
         coordinator.device = device()
         with patch.object(ConfigEntries, "async_reload", AsyncMock(return_value=True)):
             await coordinator._reload_entry()
@@ -481,7 +481,7 @@ class RegistryTests(unittest.IsolatedAsyncioTestCase):
         entry = await self.entry()
         client = AsyncMock()
         client.fetch_devices.return_value = [device("650e8400-e29b-41d4-a716-446655440000")]
-        coordinator = UpdraftCoordinator(self.hass, client, device(), entry)
+        coordinator = GafctlCoordinator(self.hass, client, device(), entry)
         from homeassistant.helpers.update_coordinator import UpdateFailed
         with self.assertRaises(UpdateFailed):
             await coordinator._async_update_data()
@@ -490,19 +490,19 @@ class RegistryTests(unittest.IsolatedAsyncioTestCase):
     async def test_failed_inventory_cannot_bypass_identity_and_ownership_validation(self):
         entry = await self.entry()
         client = AsyncMock()
-        from custom_components.updraft.client import ApiError
+        from custom_components.gafctl.client import ApiError
         from homeassistant.helpers.update_coordinator import UpdateFailed
         client.fetch_devices.side_effect = ApiError("inventory unavailable")
         client.fetch_state.return_value = {"available": True, "state": {"temperature_f": 100}}
-        coordinator = UpdraftCoordinator(self.hass, client, device(), entry)
+        coordinator = GafctlCoordinator(self.hass, client, device(), entry)
         with self.assertRaises(UpdateFailed):
             await coordinator._async_update_data()
         client.fetch_state.assert_not_called()
 
     async def test_generated_mqtt_templates_accept_nullable_payloads(self):
-        fixture = os.environ.get("UPDRAFT_DISCOVERY_FIXTURE")
+        fixture = os.environ.get("GAFCTL_DISCOVERY_FIXTURE")
         if not fixture:
-            self.skipTest("set UPDRAFT_DISCOVERY_FIXTURE to generated discovery configs")
+            self.skipTest("set GAFCTL_DISCOVERY_FIXTURE to generated discovery configs")
         configs = json.loads(Path(fixture).read_text())
         normal = {
             "available": True, "inventory_status": "present", "last_error": None,
@@ -534,9 +534,9 @@ class RegistryTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(rendered, ["unknown", "stale", "fresh", "fresh"])
 
     async def test_generated_mqtt_commands_preserve_types_and_switch_conditions(self):
-        fixture = os.environ.get("UPDRAFT_DISCOVERY_FIXTURE")
+        fixture = os.environ.get("GAFCTL_DISCOVERY_FIXTURE")
         if not fixture:
-            self.skipTest("set UPDRAFT_DISCOVERY_FIXTURE to generated discovery configs")
+            self.skipTest("set GAFCTL_DISCOVERY_FIXTURE to generated discovery configs")
         for topic, config in json.loads(Path(fixture).read_text()):
             template = config.get("command_template")
             if not template:
@@ -561,9 +561,9 @@ class RegistryTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(len(config["availability"]), 1)
 
     async def test_generated_mqtt_binary_modes_and_presets_preserve_unknown(self):
-        fixture = os.environ.get("UPDRAFT_DISCOVERY_FIXTURE")
+        fixture = os.environ.get("GAFCTL_DISCOVERY_FIXTURE")
         if not fixture:
-            self.skipTest("set UPDRAFT_DISCOVERY_FIXTURE to generated discovery configs")
+            self.skipTest("set GAFCTL_DISCOVERY_FIXTURE to generated discovery configs")
         for topic, config in json.loads(Path(fixture).read_text()):
             render = lambda settings: Template(config["value_template"], self.hass).async_render({"value_json": {"state": {"settings": settings}}})
             if "/binary_sensor/" in topic and topic.endswith("_mode/config"):

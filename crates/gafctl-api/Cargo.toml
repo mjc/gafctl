@@ -1,0 +1,17 @@
+[package]
+name = "gafctl-api"
+version = "0.1.0"
+edition = "2024"
+description = "Shared Gafctl v2 device and control contract"
+
+[lints]
+workspace = true
+
+[dependencies]
+serde.workspace = true
+thiserror.workspace = true
+uuid.workspace = true
+gafctl-protocol = { path = "../gafctl-protocol" }
+
+[dev-dependencies]
+serde_json.workspace = true

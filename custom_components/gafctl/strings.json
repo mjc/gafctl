@@ -1,0 +1,39 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Connect to Gafctl",
+        "description": "Enter the local address of the Gafctl API.",
+        "data": {
+          "api_url": "API address"
+        }
+      },
+      "device": {
+        "title": "Choose devices",
+        "description": "Select the HTTP-owned devices to add. Each gets its own entry.",
+        "data": {
+          "device_ids": "Devices"
+        }
+      },
+      "reconfigure": {
+        "title": "Change API address",
+        "description": "Enter the new address of the same Gafctl proxy.",
+        "data": {
+          "api_url": "API address"
+        }
+      }
+    },
+    "error": {
+      "invalid_url": "Enter a valid HTTP or HTTPS address.",
+      "cannot_connect": "Cannot reach the Gafctl API or its response was invalid.",
+      "no_device": "The API did not report an unconfigured device owned by HTTP.",
+      "device_unavailable": "A selected device changed or is no longer available.",
+      "wrong_device": "This address does not report the configured proxy and device."
+    },
+    "abort": {
+      "already_configured": "This device is already configured.",
+      "device_unavailable": "The selected device is no longer available.",
+      "reconfigure_successful": "API address updated."
+    }
+  }
+}

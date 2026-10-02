@@ -8,13 +8,13 @@ use std::{
 };
 
 use futures_util::{StreamExt, stream};
+use gafctl_quickconnect::{
+    ClientError, QuickConnectClient, QuickConnectCommand, QuickConnectSettings,
+    QuickConnectSettingsBody,
+};
 use tokio::{
     sync::RwLock,
     time::{Instant, sleep, timeout},
-};
-use updraft_quickconnect::{
-    ClientError, QuickConnectClient, QuickConnectCommand, QuickConnectSettings,
-    QuickConnectSettingsBody,
 };
 
 use crate::{
@@ -226,24 +226,21 @@ impl QuickConnectControlService {
         else {
             return QuickConnectControlStatus::Rejected;
         };
-        let body =
-            match updraft_quickconnect::build_settings_body(&intent.command, &before.settings) {
-                Ok(body) => body,
-                Err(updraft_quickconnect::QuickConnectCommandError::ModeAlreadyInactive) => {
-                    return if runtime
-                        .set_control_state_if_current(
-                            generation,
-                            crate::backend::common_state(before),
-                        )
-                        .await
-                    {
-                        QuickConnectControlStatus::Confirmed
-                    } else {
-                        QuickConnectControlStatus::Rejected
-                    };
-                }
-                Err(_) => return QuickConnectControlStatus::Rejected,
-            };
+        let body = match gafctl_quickconnect::build_settings_body(&intent.command, &before.settings)
+        {
+            Ok(body) => body,
+            Err(gafctl_quickconnect::QuickConnectCommandError::ModeAlreadyInactive) => {
+                return if runtime
+                    .set_control_state_if_current(generation, crate::backend::common_state(before))
+                    .await
+                {
+                    QuickConnectControlStatus::Confirmed
+                } else {
+                    QuickConnectControlStatus::Rejected
+                };
+            }
+            Err(_) => return QuickConnectControlStatus::Rejected,
+        };
         let Some(Ok(prepared)) = self
             .while_current(runtime, generation, self.client.prepare_settings_write())
             .await
@@ -281,7 +278,7 @@ impl QuickConnectControlService {
         runtime: &Arc<DeviceRuntime>,
         provider_id: &str,
         generation: u64,
-    ) -> Option<updraft_quickconnect::QuickConnectDeviceState> {
+    ) -> Option<gafctl_quickconnect::QuickConnectDeviceState> {
         let before = self
             .while_current(
                 runtime,
@@ -361,7 +358,7 @@ impl QuickConnectControlService {
         runtime: &DeviceRuntime,
         generation: u64,
         provider_id: &str,
-        before: &updraft_quickconnect::QuickConnectDeviceState,
+        before: &gafctl_quickconnect::QuickConnectDeviceState,
         body: &QuickConnectSettingsBody,
     ) -> QuickConnectControlStatus {
         let result = self
@@ -480,10 +477,10 @@ impl QuickConnectControlService {
 #[derive(Default)]
 struct ReadbackProgress {
     matched: bool,
-    state: Option<updraft_quickconnect::QuickConnectDeviceState>,
+    state: Option<gafctl_quickconnect::QuickConnectDeviceState>,
 }
 
-fn fresh_state(state: &updraft_quickconnect::QuickConnectDeviceState) -> bool {
+fn fresh_state(state: &gafctl_quickconnect::QuickConnectDeviceState) -> bool {
     state.fetched_at_unix_ms.is_some_and(|fetched_at| {
         unix_millis(SystemTime::now())
             .and_then(|now| now.checked_sub(fetched_at))
@@ -529,7 +526,7 @@ mod tests {
             QuickConnectControlStatus,
         },
     };
-    use updraft_quickconnect::{
+    use gafctl_quickconnect::{
         AccountRole, Credentials, QuickConnectClient, QuickConnectCommand, QuickConnectConfig,
     };
 
@@ -603,7 +600,7 @@ mod tests {
         )
         .unwrap();
         let store_path = std::env::temp_dir()
-            .join(format!("updraft-control-{}", uuid::Uuid::new_v4()))
+            .join(format!("gafctl-control-{}", uuid::Uuid::new_v4()))
             .join("identities.json");
         let mut registry = DeviceRegistry::load(&store_path).unwrap();
         let device_id = registry
@@ -669,7 +666,7 @@ mod tests {
                 fresh_intent(
                     "inactive-timer-off",
                     QuickConnectCommand::ClearMode {
-                        mode: updraft_quickconnect::QuickConnectCommandMode::Timer,
+                        mode: gafctl_quickconnect::QuickConnectCommandMode::Timer,
                     },
                 ),
             )
