@@ -836,6 +836,19 @@ mod tests {
     }
 
     #[test]
+    fn discovery_topics_use_a_broker_acl_node_owned_by_gafctl() {
+        let device = mqtt_device(ProxyId::default(), "configured");
+        let topics = Topics(device.proxy_id);
+        assert_eq!(
+            topics.discovery(&device.id, "sensor", "temperature"),
+            format!(
+                "homeassistant/sensor/gafctl/{}_temperature/config",
+                topics.identifier(&device.id)
+            )
+        );
+    }
+
+    #[test]
     fn namespaced_templates_preserve_unknown_readings_and_freshness() {
         let mut device = DeviceDescriptor::configured_ble();
         device.state_source = EntitySource::Mqtt;
@@ -844,7 +857,7 @@ mod tests {
         let devices = [device, cloud];
         let configs = discovery::configs(&devices).collect::<Vec<_>>();
         assert!(configs.iter().any(|(topic, config)| {
-            topic.ends_with("/freshness/config")
+            topic.ends_with("_freshness/config")
                 && config["value_template"]
                     .as_str()
                     .unwrap()
@@ -852,7 +865,7 @@ mod tests {
         }));
         let threshold = configs
             .iter()
-            .find(|(topic, _)| topic.ends_with("/automatic_temperature_threshold/config"))
+            .find(|(topic, _)| topic.ends_with("_automatic_temperature_threshold/config"))
             .unwrap();
         assert!(
             threshold.1["value_template"]
@@ -957,7 +970,7 @@ mod tests {
         let configs = discovery::configs(std::slice::from_ref(&device)).collect::<Vec<_>>();
         let temperature = configs
             .iter()
-            .find(|(topic, _)| topic.ends_with("/temperature/config"))
+            .find(|(topic, _)| topic.ends_with("_temperature/config"))
             .unwrap();
         assert_eq!(temperature.1["device_class"], "temperature");
         assert_eq!(temperature.1["state_class"], "measurement");
@@ -967,7 +980,7 @@ mod tests {
                 .iter()
                 .all(|(topic, config)| config["availability_mode"] == "all"
                     && config["availability"][0]["topic"] == topics.process_availability()
-                    && if topic.ends_with("/refresh/config") {
+                    && if topic.ends_with("_refresh/config") {
                         config["availability"].as_array().unwrap().len() == 1
                     } else {
                         config["availability"][1]["topic"]
@@ -1363,6 +1376,12 @@ mod tests {
             .unwrap();
         let bridge = start(config(broker.port, true), snapshot(device.clone()));
         receive_topic(&mut received, &topics.process_availability()).await;
+        let discovery_topic = topics.discovery(&device.id, "sensor", "temperature");
+        let state_topic = topics.device(&device.id, "state");
+        for topic in [&discovery_topic, &state_topic] {
+            observer.subscribe(topic, QoS::AtLeastOnce).await.unwrap();
+            assert!(!receive_topic(&mut received, topic).await.payload.is_empty());
+        }
         broker.restart().await;
         let (observer, mut received) = observed_client("reconnected-observer", broker.port);
         observer

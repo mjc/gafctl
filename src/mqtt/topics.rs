@@ -42,7 +42,7 @@ impl Topics {
 
     pub(super) fn discovery(self, id: &DeviceId, domain: &str, key: &str) -> String {
         format!(
-            "homeassistant/{domain}/{}/{key}/config",
+            "homeassistant/{domain}/gafctl/{}_{key}/config",
             self.identifier(id)
         )
     }

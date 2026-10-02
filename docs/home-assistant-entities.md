@@ -143,16 +143,17 @@ only these permissions:
 | Account | Operation | Topics |
 | --- | --- | --- |
 | Gafctl | Publish | `gafctl/+/availability`, `gafctl/+/+/state`, `gafctl/+/+/availability`, `gafctl/+/+/control/result`, `gafctl/+/+/refresh/result` |
-| Gafctl | Publish discovery | `homeassistant/+/+/+/config` |
+| Gafctl | Publish discovery | `homeassistant/+/gafctl/+/config` |
 | Gafctl | Subscribe | `gafctl/+/+/control/set`, `gafctl/+/+/refresh/set` |
 | Home Assistant | Publish | `gafctl/+/+/control/set`, `gafctl/+/+/refresh/set` |
-| Home Assistant | Subscribe | `gafctl/+/availability`, `gafctl/+/+/state`, `gafctl/+/+/availability`, `gafctl/+/+/control/result`, `gafctl/+/+/refresh/result`, `homeassistant/+/+/+/config` |
+| Home Assistant | Subscribe | `gafctl/+/availability`, `gafctl/+/+/state`, `gafctl/+/+/availability`, `gafctl/+/+/control/result`, `gafctl/+/+/refresh/result`, `homeassistant/+/gafctl/+/config` |
 
 Avoid a publish grant on all of `gafctl/#`; that would let a command client
 publish service state too. Every proxy has its own namespace. There are no unscoped aliases.
 
 Read `proxy_id` and device `id` from `/api/v2/devices`. Device topics use
-`gafctl/{proxy_id}/{id}/...`; discovery identifiers also include both IDs. MQTT
+`gafctl/{proxy_id}/{id}/...`; discovery uses `homeassistant/{component}/gafctl/{identifier}_{key}/config`,
+with both IDs in the identifier. MQTT
 client IDs include the proxy UUID so separate services can share a broker.
 
 Device state and availability messages are retained. Process availability has
