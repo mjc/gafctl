@@ -42,7 +42,8 @@ timer mode and reports the requested minutes. Remaining time is a separate
 sensor. Fractional threshold readback is displayed without rounding; new
 settings use whole units. The full ranges have not been tested on hardware.
 
-QuickConnect devices expose temperature, humidity, and available diagnostics.
+[QuickConnect models and retrofit controllers](hardware.md#quickconnect) expose
+temperature, humidity, and available diagnostics.
 They include the Refresh readings button without enabling cloud writes.
 Read-only diagnostics include the raw signal-strength and verification fields,
 OTA-in-progress, humidity monitoring, and automatic/timer/manual mode mirrors.

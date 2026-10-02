@@ -2,7 +2,8 @@
 
 First build Gafctl and confirm a direct state read using the
 [README](../README.md). The service computer needs Bluetooth within range of an
-original ERV5SMT or EGV5SMT. QuickConnect requires Internet access.
+original ERV5SMT or EGV5SMT. QuickConnect requires Internet access; see
+[fan models and controller types](hardware.md) to choose a backend.
 
 ## Listen for Home Assistant
 
@@ -97,7 +98,8 @@ readings before you add the [Home Assistant integration](../README.md#add-it-to-
 
 ## QuickConnect (experimental)
 
-Use this only for a fan configured in the **GAF Master Flow QuickConnect** app.
+Use this for any [QuickConnect model or retrofit controller](hardware.md#quickconnect)
+configured in the **GAF Master Flow QuickConnect** app.
 Original ERV5SMT and EGV5SMT controllers use Bluetooth. QuickConnect has not been
 tested with a live account or fan; see [hardware](hardware.md#quickconnect) and
 [API research](quickconnect-contract.md).

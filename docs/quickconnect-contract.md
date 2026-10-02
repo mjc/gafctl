@@ -1,9 +1,10 @@
 # QuickConnect cloud API research
 
-QuickConnect is the newer GAF Master Flow Wi-Fi controller, used in the ERV5QCT
-and EGV5QCT product families. It has a separate cloud API from the original
-ERV5SMT/EGV5SMT Bluetooth controller. See [fan models](hardware.md) for product
-sources and [deployment](deployment.md#quickconnect-experimental) for configuration.
+QuickConnect is the GAF Master Flow cloud controller used in Wi-Fi Attic Vent
+and EZ Cool QuickConnect models, and in the retrofit module for ERV/EGV fans.
+It has a separate API from the original ERV5SMT/EGV5SMT Bluetooth controller.
+See [fan models](hardware.md#quickconnect) for the model list and manufacturer
+sources, and [deployment](deployment.md#quickconnect-experimental) for configuration.
 
 The API description comes from a community Home Assistant integration.
 All repository fixtures are synthetic. There is no live account capture or

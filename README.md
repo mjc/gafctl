@@ -1,30 +1,40 @@
 # gafctl
 
-Gafctl connects **GAF Master Flow Wi-Fi Attic Vent** fans to Home Assistant:
+Gafctl connects **GAF Master Flow** attic fans to Home Assistant. Its HTTP API,
+MQTT bridge, and CLI provide readings, settings, and controls.
 
-- **ERV5SMT** — roof mount.
-- **EGV5SMT** — gable mount.
+| Fan or controller | Models | Connection |
+| --- | --- | --- |
+| Original Wi-Fi Attic Vent | ERV5SMT (roof), EGV5SMT (gable) | Bluetooth; no GAF account or Internet needed |
+| Wi-Fi Attic Vent with QuickConnect | ERV5QCT (roof), EGV5QCT (gable) | QuickConnect cloud API |
+| EZ Cool plug-in with QuickConnect | EZCQCR1 (roof), EZCQCG1 (gable) | QuickConnect cloud API |
+| QuickConnect retrofit module | ERV/EGV series with the module installed | QuickConnect cloud API |
 
-These models use the **GAF Wi-Fi Vent** app. Gafctl reads and controls them over
-Bluetooth. Its HTTP API and MQTT bridge provide temperature, humidity, settings,
-and controls to Home Assistant. The CLI can also read and control a fan directly.
-These models require no GAF account or Internet connection.
+GAF's [Wi-Fi Attic Vent product sheet](https://www.gaf.com/en-us/document-library/documents/data-sheets/master-flow-wi-fi-attic-vent-resmf314-%2811-22%29-_sell-sheet.pdf)
+lists the QCT models. Its [powered ventilation warranty](https://www.gaf.com/en-us/document-library/documents/warranties/master-flow-powered-ventilation-products-limited-warranty-trilingual-reswt189.pdf)
+lists the EZ Cool QuickConnect models, and its [ventilation catalog](https://www.gaf.com/en-us/document-library/documents/brochures-%26-literature/brochure__ventilation_full_line_brochure__rescb100.pdf)
+describes the retrofit module on page 19. See
+[fan models and compatibility](docs/hardware.md) for controller identification.
 
-The newer **Master Flow QuickConnect** models use a different app and cloud
-service. Their backend is experimental; see
-[fan models and compatibility](docs/hardware.md).
+QuickConnect support covers built-in and retrofit controllers. The backend is
+experimental, has no live hardware verification, and starts read-only.
 
 ## What you need
 
-- An installed ERV5SMT or EGV5SMT with Bluetooth firmware **3.0.0**. GAF added
-  Bluetooth in that firmware version; older firmware needs the manufacturer's
-  app to update it.
-- A computer with Bluetooth within range of the fan. For an always-on service,
+- **Original controller:** an ERV5SMT or EGV5SMT with Bluetooth firmware **3.0.0**.
+  GAF added Bluetooth in that firmware version; older firmware needs the
+  **GAF Wi-Fi Vent** app to update it.
+- A computer to run Gafctl. For the original controller, it needs Bluetooth within
+  range of the fan. For an always-on Bluetooth service,
   use a Linux computer with BlueZ. macOS can run the Bluetooth command line too.
+- **QuickConnect controller:** a fan set up in the **GAF Master Flow QuickConnect**
+  app, an account, and Internet access. Follow the
+  [QuickConnect service setup](docs/deployment.md#quickconnect-experimental);
+  the Bluetooth scan and device-ID examples below apply to original controllers.
 - Home Assistant, if you want its dashboard and automations.
 
-Gafctl uses Bluetooth and leaves the computer on its normal network. Fan
-firmware updates require the manufacturer's app.
+Both backends leave the computer on its normal network. Fan firmware updates
+require the manufacturer's app.
 
 ## Install
 
