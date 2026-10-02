@@ -1,7 +1,5 @@
 """Selectors for GAF threshold and timer presets and QuickConnect modes."""
 
-from collections.abc import Mapping
-
 from homeassistant.components.select import SelectEntity
 from homeassistant.const import EntityCategory
 from homeassistant.core import HomeAssistant
@@ -25,6 +23,11 @@ THRESHOLD_OPTIONS = {
 }
 TIMER_OPTIONS = {label: preset for preset, (label, _) in TIMER_PRESETS.items()}
 MODE_OPTIONS = {label: mode for mode, label in MODE_LABELS.items()}
+SELECTS = {
+    "automatic_thresholds": ("Automatic thresholds", THRESHOLD_OPTIONS),
+    "timer": ("Fan timer", TIMER_OPTIONS),
+    "mode": ("Mode", MODE_OPTIONS),
+}
 
 
 async def async_setup_entry(
@@ -35,15 +38,7 @@ async def async_setup_entry(
     coordinator: GafctlCoordinator = entry.runtime_data
     control_keys = entity_keys(coordinator.device).get("select", set())
     async_add_entities(
-        (
-            GafctlControlSelect(coordinator, key, name, options)
-            for key, name, options in (
-                ("automatic_thresholds", "Automatic thresholds", THRESHOLD_OPTIONS),
-                ("timer", "Fan timer", TIMER_OPTIONS),
-                ("mode", "Mode", MODE_OPTIONS),
-            )
-            if key in control_keys
-        )
+        GafctlControlSelect(coordinator, key) for key in SELECTS if key in control_keys
     )
 
 
@@ -52,17 +47,10 @@ class GafctlControlSelect(GafctlEntity, SelectEntity):
 
     _attr_entity_category = EntityCategory.CONFIG
 
-    def __init__(
-        self,
-        coordinator: GafctlCoordinator,
-        key: str,
-        name: str,
-        presets: Mapping[str, str],
-    ) -> None:
+    def __init__(self, coordinator: GafctlCoordinator, key: str) -> None:
         super().__init__(coordinator, key)
-        self._presets = presets
-        self._attr_name = name
-        self._attr_options = list(presets)
+        self._attr_name, self._presets = SELECTS[key]
+        self._attr_options = list(self._presets)
 
     @property
     def available(self) -> bool:

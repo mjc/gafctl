@@ -52,7 +52,8 @@ def diagnostics(**overrides):
     } | overrides
 
 
-def readings(*, settings, **overrides):
+def readings(*, settings=None, **overrides):
+    settings = legacy_settings() if settings is None else settings
     return {
         "temperature_f": None,
         "humidity_percent": None,
@@ -76,3 +77,15 @@ def state_data(*, state=None, available=True, freshness="fresh", backend="legacy
         "last_error": None,
         "state": state,
     }
+
+
+def changed_device(selected, **fields):
+    """Update capabilities without repeating the descriptor envelope."""
+    selected = selected.copy()
+    if "commands" in fields:
+        selected["capabilities"] = selected["capabilities"] | {
+            "commands": [{"kind": kind} for kind in fields.pop("commands")]
+        }
+    if "owner" in fields:
+        selected["state_source"] = selected["command_source"] = fields.pop("owner")
+    return selected | fields

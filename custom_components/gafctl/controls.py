@@ -163,7 +163,13 @@ THRESHOLDS = {
     "automatic105_f30_percent": (105.0, 30.0),
     "automatic105_1_f30_1_percent": (105.1, 30.1),
 }
+_THRESHOLD_PRESETS: dict[tuple[float | None, float | None], str] = {
+    values: preset for preset, values in THRESHOLDS.items()
+}
 TIMER_PRESETS = {"timer_clear": ("Clear timer", 0), "timer_one_minute": ("1 minute", 1)}
+_TIMER_PRESETS: dict[int | None, str] = {
+    duration: preset for preset, (_, duration) in TIMER_PRESETS.items()
+}
 CONTROL_PRESETS = frozenset((*THRESHOLDS, *TIMER_PRESETS))
 
 
@@ -175,10 +181,7 @@ def threshold_control_preset(readings: Readings) -> str | None:
         tenths(settings["automatic_temperature_tenths_f"]),
         tenths(settings["automatic_humidity_tenths_percent"]),
     )
-    return next(
-        (preset for preset, thresholds in THRESHOLDS.items() if current == thresholds),
-        None,
-    )
+    return _THRESHOLD_PRESETS.get(current)
 
 
 def preset_matches(readings: Readings, preset: str) -> bool:
@@ -237,15 +240,9 @@ def timer_control_preset(state: Readings) -> str | None:
     settings = state["settings"]
     if settings["backend"] != "legacy_ble":
         return None
-    current = (settings["timer_remaining_minutes"], settings["timer_original_minutes"])
-    return next(
-        (
-            preset
-            for preset, (_, duration) in TIMER_PRESETS.items()
-            if current == (duration, duration)
-        ),
-        None,
-    )
+    remaining = settings["timer_remaining_minutes"]
+    original = settings["timer_original_minutes"]
+    return _TIMER_PRESETS.get(original) if original == remaining else None
 
 
 def _is_finite_number(value: object) -> TypeGuard[int | float]:

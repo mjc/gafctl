@@ -1,13 +1,6 @@
-"""Reported controller flags and the cloud running estimate."""
+"""Reported controller flags and the running estimate."""
 
-from collections.abc import Callable
-from dataclasses import dataclass
-from functools import partial
-
-from homeassistant.components.binary_sensor import (
-    BinarySensorEntity,
-    BinarySensorEntityDescription,
-)
+from homeassistant.components.binary_sensor import BinarySensorEntity
 from homeassistant.const import EntityCategory
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
@@ -15,65 +8,31 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from .controls import MODE_LABELS, entity_keys
 from .coordinator import GafctlConfigEntry, GafctlCoordinator
 from .entity import GafctlReadingEntity
-from .models import JsonObject, Readings
+from .models import JsonObject
 
-
-@dataclass(frozen=True, kw_only=True)
-class GafctlBinaryDescription(BinarySensorEntityDescription):
-    value: Callable[[Readings], bool | None]
-    provenance: str = "reported"
-
-
-def mode_value(readings: Readings, *, mode: str) -> bool | None:
-    settings = readings["settings"]
-    return settings["mode"] == mode if settings["mode"] in MODE_LABELS else None
-
-
-DESCRIPTIONS = (
-    GafctlBinaryDescription(
-        key="controller_fan_flag",
-        value=lambda readings: (
-            readings["settings"]["controller_fan_on"]
-            if readings["settings"]["backend"] == "legacy_ble"
-            else None
-        ),
-        name="Controller fan flag",
-        provenance="controller",
+BINARY_FIELDS = {
+    "controller_fan_flag": (
+        "Controller fan flag",
+        ("settings", "controller_fan_on"),
+        "controller",
     ),
-    GafctlBinaryDescription(
-        key="running_estimate",
-        value=lambda readings: readings["estimated_running"],
-        name="Running estimate",
-        provenance="inferred",
+    "running_estimate": ("Running estimate", ("estimated_running",), "inferred"),
+    "ota_in_progress": (
+        "OTA in progress",
+        ("diagnostics", "ota_in_progress"),
+        "reported",
     ),
-    GafctlBinaryDescription(
-        key="ota_in_progress",
-        value=lambda readings: (
-            readings["diagnostics"]["ota_in_progress"]
-            if readings["diagnostics"]
-            else None
-        ),
-        name="OTA in progress",
-    ),
-    *(
-        GafctlBinaryDescription(
-            key=f"{mode}_mode",
-            name=f"{label} mode",
-            value=partial(mode_value, mode=mode),
-        )
+    **{
+        f"{mode}_mode": (f"{label} mode", ("settings", "mode"), "reported")
         for mode, label in MODE_LABELS.items()
         if mode != "off"
+    },
+    "humidity_monitor": (
+        "Humidity monitoring",
+        ("settings", "humidity_monitor"),
+        "reported",
     ),
-    GafctlBinaryDescription(
-        key="humidity_monitor",
-        value=lambda readings: (
-            readings["settings"]["humidity_monitor"]
-            if readings["settings"]["backend"] == "quick_connect"
-            else None
-        ),
-        name="Humidity monitoring",
-    ),
-)
+}
 
 
 async def async_setup_entry(
@@ -81,28 +40,31 @@ async def async_setup_entry(
     entry: GafctlConfigEntry,
     async_add_entities: AddEntitiesCallback,
 ) -> None:
-    coordinator: GafctlCoordinator = entry.runtime_data
+    coordinator = entry.runtime_data
     keys = entity_keys(coordinator.device).get("binary_sensor", set())
     async_add_entities(
-        GafctlBinarySensor(coordinator, description)
-        for description in DESCRIPTIONS
-        if description.key in keys
+        GafctlBinarySensor(coordinator, key) for key in BINARY_FIELDS if key in keys
     )
 
 
 class GafctlBinarySensor(GafctlReadingEntity, BinarySensorEntity):
-    """A reported boolean; unknown values stay unknown."""
-
     _attr_entity_category = EntityCategory.DIAGNOSTIC
-    entity_description: GafctlBinaryDescription
+
+    def __init__(self, coordinator: GafctlCoordinator, key: str) -> None:
+        super().__init__(coordinator, key)
+        self._attr_name, self._path, self._provenance = BINARY_FIELDS[key]
 
     @property
     def is_on(self) -> bool | None:
-        state = self.state_values
-        return self.entity_description.value(state) if state else None
+        value = self.reading_value(self._path)
+        if self._key.endswith("_mode"):
+            return (
+                value == self._key.removesuffix("_mode")
+                if value in MODE_LABELS
+                else None
+            )
+        return value
 
     @property
     def extra_state_attributes(self) -> JsonObject:
-        return {
-            "provenance": self.entity_description.provenance
-        } | self.reading_attributes
+        return {"provenance": self._provenance} | self.reading_attributes

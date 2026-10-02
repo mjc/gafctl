@@ -7,7 +7,7 @@ import time
 from collections.abc import Mapping
 from typing import Any, cast
 from urllib.parse import urljoin, urlparse
-from uuid import RFC_4122, UUID, uuid4
+from uuid import UUID, uuid4
 
 from .controls import CONTROL_HTTP_STATUSES
 from .models import (
@@ -51,7 +51,7 @@ class ApiClient:
         selected = cast(list[Device], devices)
         try:
             for device in selected:
-                _proxy_id(device["proxy_id"])
+                _validate_proxy_id(device["proxy_id"])
                 if (
                     not _valid_identifier(device["id"])
                     or device["backend"] not in ("legacy_ble", "quick_connect")
@@ -71,33 +71,26 @@ class ApiClient:
         return selected
 
     async def fetch_state(self, device_id: str) -> DeviceState:
-        if not _valid_identifier(device_id):
-            raise ApiError("invalid configured device")
-        payload = await self._get_json(f"api/v2/devices/{device_id}/state")
+        payload = await self._get_json(_device_path(device_id, "state"))
         return _state_response(payload, device_id)
 
     async def refresh(self, device_id: str, backend: str) -> DeviceState:
-        if not _valid_identifier(device_id):
-            raise ApiError("invalid configured device")
-        url = urljoin(self._base_url, f"api/v2/devices/{device_id}/refresh")
+        path = _device_path(device_id, "refresh")
         try:
-            async with self._session.post(url, timeout=300) as response:
-                payload = await response.json()
-                if not isinstance(payload, Mapping):
-                    raise ApiError("proxy returned invalid refresh outcome")
-                status = payload.get("status")
-                if response.status != 200 or status != "fresh":
-                    if status == "superseded":
-                        raise ApiError(
-                            "device refresh was superseded by another operation"
-                        )
-                    raise ApiError("device refresh did not complete")
-                result = _state_response(payload, device_id)
-                if payload["backend"] != backend:
-                    raise ApiError("proxy returned a refresh for a different backend")
-                if not result["available"] or payload["inventory_status"] != "present":
-                    raise ApiError("proxy returned a refresh without current readings")
-                return result
+            http_status, payload = await self._request("POST", path)
+            if not isinstance(payload, Mapping):
+                raise ApiError("proxy returned invalid refresh outcome")
+            status = payload.get("status")
+            if status == "superseded":
+                raise ApiError("device refresh was superseded by another operation")
+            if http_status != 200 or status != "fresh":
+                raise ApiError("device refresh did not complete")
+            result = _state_response(payload, device_id)
+            if result["backend"] != backend:
+                raise ApiError("proxy returned a refresh for a different backend")
+            if not result["available"] or result["inventory_status"] != "present":
+                raise ApiError("proxy returned a refresh without current readings")
+            return result
         except ApiError:
             raise
         except Exception as error:
@@ -105,22 +98,18 @@ class ApiClient:
 
     async def set_control(self, device_id: str, command: JsonObject) -> None:
         """Send exactly once and require a matching confirmed response."""
-        if not _valid_identifier(device_id):
-            raise ApiError("invalid configured device")
+        path = _device_path(device_id, "control")
         request_id = uuid4().hex
-        url = urljoin(self._base_url, f"api/v2/devices/{device_id}/control")
         try:
-            async with self._session.post(
-                url,
+            http_status, payload = await self._request(
+                "POST",
+                path,
                 json={
                     "request_id": request_id,
                     "issued_at_unix_ms": time.time_ns() // 1_000_000,
                     "command": command,
                 },
-                timeout=300,
-            ) as response:
-                payload = await response.json()
-                http_status = response.status
+            )
         except Exception as error:
             raise ControlOutcomeUnknown(request_id) from error
         if not isinstance(payload, Mapping):
@@ -139,29 +128,35 @@ class ApiClient:
             )
 
     async def _get_json(self, path: str) -> Any:
-        url = urljoin(self._base_url, path)
         try:
-            async with self._session.get(url, timeout=10) as response:
-                if response.status != 200:
-                    raise ApiError(f"proxy returned HTTP {response.status}")
-                return await response.json()
+            _, payload = await self._request("GET", path)
+            return payload
         except ApiError:
             raise
         except Exception as error:
             raise ApiError("cannot connect to the local proxy") from error
 
+    async def _request(self, method: str, path: str, **kwargs: Any) -> tuple[int, Any]:
+        async with self._session.request(
+            method,
+            urljoin(self._base_url, path),
+            timeout=10 if method == "GET" else 300,
+            **kwargs,
+        ) as response:
+            if method == "GET" and response.status != 200:
+                raise ApiError(f"proxy returned HTTP {response.status}")
+            return response.status, await response.json()
 
-def _proxy_id(value: object) -> str:
+
+def _validate_proxy_id(value: object) -> None:
     if not isinstance(value, str):
         raise ApiError("proxy returned invalid proxy identity")
-    identifier = value
     try:
-        parsed = UUID(identifier)
+        parsed = UUID(value)
     except ValueError as error:
         raise ApiError("proxy returned invalid proxy identity") from error
-    if parsed.version != 4 or parsed.variant != RFC_4122 or str(parsed) != identifier:
+    if parsed.version != 4 or str(parsed) != value:
         raise ApiError("proxy returned invalid proxy identity")
-    return identifier
 
 
 def _valid_identifier(value: str) -> bool:
@@ -169,6 +164,12 @@ def _valid_identifier(value: str) -> bool:
         isinstance(value, str)
         and re.fullmatch(r"[A-Za-z0-9_-]{1,64}", value) is not None
     )
+
+
+def _device_path(device_id: str, action: str) -> str:
+    if not _valid_identifier(device_id):
+        raise ApiError("invalid configured device")
+    return f"api/v2/devices/{device_id}/{action}"
 
 
 def _state_response(raw: Any, device_id: str) -> DeviceState:

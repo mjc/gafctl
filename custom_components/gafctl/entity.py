@@ -5,12 +5,11 @@ from contextlib import contextmanager
 
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.device_registry import DeviceInfo
-from homeassistant.helpers.entity import EntityDescription
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .const import DOMAIN
 from .coordinator import GafctlCoordinator
-from .models import ApiError, JsonObject, Readings
+from .models import ApiError, JsonObject, JsonValue, Readings
 
 
 @contextmanager
@@ -58,6 +57,8 @@ class GafctlEntity(CoordinatorEntity[GafctlCoordinator]):
     @property
     def device_info(self) -> DeviceInfo:
         device = self.coordinator.device
+        readings = self.state_values
+        diagnostics = readings["diagnostics"] if readings else None
         return DeviceInfo(
             identifiers={(DOMAIN, self._entry.unique_id)},
             name=device["name"] if device else self._entry.title,
@@ -65,18 +66,20 @@ class GafctlEntity(CoordinatorEntity[GafctlCoordinator]):
             model="GAF Wi-Fi Vent"
             if self._entry.data["backend"] == "legacy_ble"
             else "GAF QuickConnect Vent",
-            sw_version=self.state_values["diagnostics"]["firmware_version"]
-            if self.state_values and self.state_values["diagnostics"]
-            else None,
+            sw_version=diagnostics["firmware_version"] if diagnostics else None,
         )
 
 
 class GafctlReadingEntity(GafctlEntity):
-    def __init__(
-        self, coordinator: GafctlCoordinator, description: EntityDescription
-    ) -> None:
-        super().__init__(coordinator, description.key)
-        self.entity_description = description
+    def reading_value(self, path: tuple[str, ...]) -> JsonValue:
+        readings = self.state_values
+        if readings is None:
+            return None
+        if len(path) == 1:
+            return readings[path[0]]
+        section, field = path
+        values = readings[section]
+        return values.get(field) if values is not None else None
 
     @property
     def available(self) -> bool:

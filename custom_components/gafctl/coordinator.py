@@ -99,7 +99,7 @@ class GafctlCoordinator(DataUpdateCoordinator[DeviceState]):
         if (
             current is None
             or not current["capabilities"]["read_state"]
-            or (not self.http_owned)
+            or not self.http_owned
         ):
             raise ApiError("this device does not own HTTP readings")
         return current
@@ -108,7 +108,7 @@ class GafctlCoordinator(DataUpdateCoordinator[DeviceState]):
         if (
             self._entities_loaded
             and entity_keys(self.device) != self.loaded_entity_keys
-            and (not self._reload_scheduled)
+            and not self._reload_scheduled
         ):
             self._reload_scheduled = True
             self.hass.async_create_task(self._reload_entry())
