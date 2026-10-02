@@ -62,6 +62,8 @@ struct ApiState {
     #[cfg(feature = "mqtt")]
     mqtt_updates: Option<watch::Sender<Arc<crate::mqtt::MqttStateSnapshot>>>,
     #[cfg(feature = "mqtt")]
+    mqtt_publication: Arc<tokio::sync::Mutex<()>>,
+    #[cfg(feature = "mqtt")]
     mqtt_discovery_enabled: bool,
     quickconnect_control: Option<QuickConnectControlService>,
     quickconnect_runtime: Option<QuickConnectRuntime>,
@@ -108,6 +110,8 @@ impl ApiState {
             #[cfg(feature = "mqtt")]
             mqtt_updates: None,
             #[cfg(feature = "mqtt")]
+            mqtt_publication: Arc::new(tokio::sync::Mutex::new(())),
+            #[cfg(feature = "mqtt")]
             mqtt_discovery_enabled: false,
             quickconnect_control: None,
             quickconnect_runtime: None,
@@ -122,6 +126,8 @@ impl ApiState {
             ble_device: Some(Arc::new(LegacyBleRuntime::new(device_id, device))),
             #[cfg(feature = "mqtt")]
             mqtt_updates: None,
+            #[cfg(feature = "mqtt")]
+            mqtt_publication: Arc::new(tokio::sync::Mutex::new(())),
             #[cfg(feature = "mqtt")]
             mqtt_discovery_enabled: false,
             quickconnect_control: None,
@@ -317,34 +323,46 @@ impl ApiState {
     }
 
     async fn poll_quickconnect(&self) {
-        let Some(runtime) = self.quickconnect_runtime.clone() else {
+        let Some(cloud) = self.quickconnect_runtime.as_ref() else {
             return;
         };
         let generations = self
             .registry
             .read()
             .await
-            .begin_quickconnect_poll(&runtime.account_id);
-        let polls = runtime.client.poll_devices().await;
-        let mut registry = self.registry.write().await;
-        let result = match polls {
-            Ok(polls) => {
-                registry
-                    .reconcile_quickconnect_polls(&runtime.account_id, polls, &generations)
+            .begin_quickconnect_poll(&cloud.account_id);
+        let targets = match cloud.client.read_inventory().await {
+            Ok(inventory) => {
+                self.registry
+                    .write()
+                    .await
+                    .reconcile_quickconnect_inventory(&cloud.account_id, inventory, &generations)
                     .await
             }
             Err(error) => {
-                registry
-                    .mark_quickconnect_inventory_unavailable(&runtime.account_id, &generations)
+                self.registry
+                    .read()
+                    .await
+                    .mark_quickconnect_inventory_unavailable(&cloud.account_id, &generations)
                     .await;
                 Err(error.into())
             }
         };
-        drop(registry);
-        if let Err(error) = result {
-            tracing::warn!(error = %error, "QuickConnect polling failed");
-        }
         self.publish_state().await;
+        match targets {
+            Ok(targets) => {
+                stream::iter(targets)
+                    .for_each_concurrent(
+                        Some(crate::backend::QUICKCONNECT_POLL_CONCURRENCY),
+                        |target| async move {
+                            target.read(&cloud.client).await;
+                            self.publish_state().await;
+                        },
+                    )
+                    .await
+            }
+            Err(error) => tracing::warn!(%error, "QuickConnect inventory polling failed"),
+        }
     }
 
     #[cfg(feature = "mqtt")]
@@ -362,6 +380,7 @@ impl ApiState {
         let Some(updates) = &self.mqtt_updates else {
             return;
         };
+        let _publication = self.mqtt_publication.lock().await;
         match self.mqtt_state_snapshot().await {
             Ok(snapshot) => {
                 self.publish_current_mqtt_snapshot(updates, snapshot).await;
@@ -1475,6 +1494,305 @@ mod tests {
 
     use super::*;
 
+    #[derive(Default)]
+    struct CloudPollFixture {
+        devices: Vec<String>,
+        blocked: Vec<String>,
+        reads: std::sync::atomic::AtomicUsize,
+        active: std::sync::atomic::AtomicUsize,
+        peak: std::sync::atomic::AtomicUsize,
+        released: std::sync::atomic::AtomicBool,
+        release: tokio::sync::Notify,
+    }
+
+    impl CloudPollFixture {
+        fn release(&self) {
+            self.released
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+            self.release.notify_waiters();
+        }
+    }
+
+    async fn cloud_poll_fixture_detail(
+        State(fixture): State<Arc<CloudPollFixture>>,
+        uri: axum::http::Uri,
+    ) -> Json<serde_json::Value> {
+        use std::sync::atomic::Ordering::SeqCst;
+        fixture.reads.fetch_add(1, SeqCst);
+        let active = fixture.active.fetch_add(1, SeqCst) + 1;
+        fixture.peak.fetch_max(active, SeqCst);
+        let blocked = fixture.blocked.iter().any(|id| {
+            uri.query()
+                .is_some_and(|query| query.strip_prefix("deviceId=") == Some(id.as_str()))
+        });
+        if blocked {
+            let released = fixture.release.notified();
+            tokio::pin!(released);
+            released.as_mut().enable();
+            if !fixture.released.load(SeqCst) {
+                released.await;
+            }
+        }
+        fixture.active.fetch_sub(1, SeqCst);
+        Json(serde_json::json!({"responseData":{
+            "deviceConfig":{"setTemperature":78,"setHumidity":44},
+            "deviceSettings":{"automaticMode":true,"timerMode":false,"fanMode":false,
+                "setTemperature":105,"setHumidity":40,"humidityMonitor":true}
+        }}))
+    }
+
+    async fn cloud_poll_fixture(
+        devices: &[&str],
+        blocked: &[&str],
+    ) -> (
+        ApiState,
+        Arc<CloudPollFixture>,
+        tokio::task::JoinHandle<()>,
+        PathBuf,
+    ) {
+        let path = identity_store_path();
+        let registry = DeviceRegistry::load(&path).unwrap();
+        let fixture = Arc::new(CloudPollFixture {
+            devices: devices.iter().map(|id| (*id).to_owned()).collect(),
+            blocked: blocked.iter().map(|id| (*id).to_owned()).collect(),
+            ..CloudPollFixture::default()
+        });
+        let app = Router::new()
+            .route(
+                "/cognito/login",
+                post(|| async {
+                    Json(serde_json::json!({"responseData":{"idToken":"synthetic-token"}}))
+                }),
+            )
+            .route(
+                "/gaf/device/deviceList",
+                get(|State(fixture): State<Arc<CloudPollFixture>>| async move {
+                    let devices = fixture
+                        .devices
+                        .iter()
+                        .map(|id| serde_json::json!({"deviceId":id,"name":id}))
+                        .collect::<Vec<_>>();
+                    Json(serde_json::json!({"responseData":{"devices":devices}}))
+                }),
+            )
+            .route("/gaf/device", get(cloud_poll_fixture_detail))
+            .with_state(Arc::clone(&fixture));
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}/", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let mut state = ApiState::with_registry(registry);
+        state.quickconnect_runtime = Some(QuickConnectRuntime {
+            account_id: "synthetic-account".to_owned(),
+            client: QuickConnectClient::new(
+                updraft_quickconnect::Credentials::new(
+                    "user",
+                    "password",
+                    updraft_quickconnect::AccountRole::Contractor,
+                ),
+                QuickConnectConfig::new(
+                    format!("{base}cognito/").parse().unwrap(),
+                    format!("{base}gaf/").parse().unwrap(),
+                ),
+            )
+            .unwrap(),
+        });
+        (state, fixture, server, path)
+    }
+
+    async fn wait_for_cloud_reads(fixture: &CloudPollFixture, count: usize) {
+        let attempts = stream::iter(0..100)
+            .then(|_| async {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+                fixture.reads.load(std::sync::atomic::Ordering::SeqCst) >= count
+            })
+            .filter_map(|ready| futures_util::future::ready(ready.then_some(())));
+        tokio::pin!(attempts);
+        assert!(attempts.next().await.is_some(), "cloud reads did not start");
+    }
+
+    #[cfg(feature = "mqtt")]
+    #[tokio::test]
+    async fn cloud_poll_publishes_fast_device_before_blocked_sibling() {
+        let (mut state, fixture, server, path) =
+            cloud_poll_fixture(&["slow", "fast"], &["slow"]).await;
+        let (updates, observed) =
+            watch::channel(Arc::new(state.mqtt_state_snapshot().await.unwrap()));
+        state.mqtt_updates = Some(updates);
+        let polling = tokio::spawn({
+            let state = state.clone();
+            async move { state.poll_quickconnect().await }
+        });
+        let publications = stream::unfold(observed, |mut observed| async move {
+            observed.changed().await.ok()?;
+            let ready = {
+                let snapshot = observed.borrow_and_update();
+                snapshot
+                    .devices
+                    .iter()
+                    .find(|device| device.name == "fast")
+                    .is_some_and(|device| {
+                        snapshot
+                            .publications
+                            .iter()
+                            .any(|item| item.id == device.id && item.available)
+                    })
+            };
+            Some((ready, observed))
+        })
+        .filter_map(|ready| futures_util::future::ready(ready.then_some(())));
+        tokio::pin!(publications);
+        let fast_published = tokio::time::timeout(Duration::from_secs(2), publications.next())
+            .await
+            .ok()
+            .flatten()
+            .is_some();
+        fixture.release();
+        polling.await.unwrap();
+        server.abort();
+        fs::remove_file(path).unwrap();
+        assert!(
+            fast_published,
+            "fast cloud publication waited for blocked sibling"
+        );
+    }
+
+    #[tokio::test]
+    async fn cloud_poll_bounds_concurrent_device_reads() {
+        let devices = ["a", "b", "c", "d", "e", "f"];
+        let (state, fixture, server, path) = cloud_poll_fixture(&devices, &devices).await;
+        let polling = tokio::spawn(async move { state.poll_quickconnect().await });
+        wait_for_cloud_reads(&fixture, 4).await;
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        let blocked_reads = fixture.reads.load(std::sync::atomic::Ordering::SeqCst);
+        fixture.release();
+        polling.await.unwrap();
+        server.abort();
+        fs::remove_file(path).unwrap();
+        assert_eq!(blocked_reads, 4);
+        assert_eq!(fixture.reads.load(std::sync::atomic::Ordering::SeqCst), 6);
+        assert_eq!(fixture.peak.load(std::sync::atomic::Ordering::SeqCst), 4);
+    }
+
+    #[tokio::test]
+    async fn cloud_poll_skips_transaction_queued_read_superseded_by_control() {
+        let (state, fixture, server, path) = cloud_poll_fixture(&["vent"], &[]).await;
+        let cloud = state.quickconnect_runtime.as_ref().unwrap();
+        let mut registry = state.registry.write().await;
+        registry
+            .reconcile_quickconnect(
+                &cloud.account_id,
+                &[crate::backend::CloudDeviceInput::new(
+                    "vent".to_owned(),
+                    "vent".to_owned(),
+                )],
+            )
+            .unwrap();
+        let generations = registry.begin_quickconnect_poll(&cloud.account_id);
+        let target = registry
+            .reconcile_quickconnect_inventory(
+                &cloud.account_id,
+                cloud.client.read_inventory().await.unwrap(),
+                &generations,
+            )
+            .await
+            .unwrap()
+            .pop()
+            .unwrap();
+        let runtime = registry.runtime(&target.id).unwrap();
+        drop(registry);
+        let transaction = runtime.acquire_transaction().await;
+        let client = cloud.client.clone();
+        let polling = tokio::spawn(async move { target.read(&client).await });
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        let blocked_reads = fixture.reads.load(std::sync::atomic::Ordering::SeqCst);
+        runtime.begin_control_intent();
+        drop(transaction);
+        polling.await.unwrap();
+        server.abort();
+        fs::remove_file(path).unwrap();
+        assert_eq!(blocked_reads, 0, "poll bypassed the device transaction");
+        assert_eq!(
+            fixture.reads.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "superseded poll reached the backend"
+        );
+    }
+
+    #[cfg(feature = "mqtt")]
+    #[tokio::test]
+    async fn mqtt_snapshot_collection_serializes_sibling_publications() {
+        let (mut state, id, fixture, server, path) = refresh_fixture().await;
+        fixture.release.notify_one();
+        state.refresh_device(&id).await.unwrap();
+        state
+            .registry
+            .write()
+            .await
+            .reconcile_quickconnect(
+                "synthetic-account",
+                &[crate::backend::CloudDeviceInput::new(
+                    "another-device".to_owned(),
+                    "Second".to_owned(),
+                )],
+            )
+            .unwrap();
+        let runtimes = {
+            let registry = state.registry.read().await;
+            registry
+                .descriptors()
+                .map(|device| (device.id.clone(), registry.runtime(&device.id).unwrap()))
+                .collect::<Vec<_>>()
+        };
+        let reading = state
+            .registry
+            .read()
+            .await
+            .runtime(&id)
+            .unwrap()
+            .state()
+            .await
+            .unwrap();
+        for (_, runtime) in &runtimes {
+            runtime.set_state(reading.clone()).await;
+        }
+        let (updates, observed) =
+            watch::channel(Arc::new(state.mqtt_state_snapshot().await.unwrap()));
+        state.mqtt_updates = Some(updates);
+        let gate = runtimes[1].1.block_snapshot_for_test().await;
+        let older = tokio::spawn({
+            let state = state.clone();
+            async move { state.publish_state().await }
+        });
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        let collection_holds_publication_lock = state.mqtt_publication.try_lock().is_err();
+        let mut newest = reading;
+        newest.temperature_f = Some(91.0);
+        runtimes[0].1.set_state(newest).await;
+        let newer = tokio::spawn({
+            let state = state.clone();
+            async move { state.publish_state().await }
+        });
+        drop(gate);
+        older.await.unwrap();
+        newer.await.unwrap();
+        let published = observed.borrow();
+        let first = published
+            .publications
+            .iter()
+            .find(|item| item.id == runtimes[0].0)
+            .unwrap();
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&first.payload).unwrap()["state"]["temperature_f"],
+            91.0
+        );
+        assert!(
+            collection_holds_publication_lock,
+            "collection allowed concurrent stale publication"
+        );
+        server.abort();
+        fs::remove_file(path).unwrap();
+    }
+
     #[cfg(feature = "mqtt")]
     #[tokio::test]
     async fn mqtt_refresh_uses_device_reader_and_rechecks_queued_freshness() {
@@ -2308,7 +2626,8 @@ mod tests {
     }
 
     fn identity_store_path() -> PathBuf {
-        std::env::temp_dir()
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("target/operations")
             .join(format!("updraft-api-identities-{}", uuid::Uuid::new_v4()))
             .join("identities.json")
     }

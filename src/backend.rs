@@ -23,6 +23,48 @@ use updraft_quickconnect::QuickConnectCommand;
 const DEVICE_STATE_FRESHNESS_LIMIT_MS: u64 = 90_000;
 const CONTROL_QUEUE_CAPACITY: usize = 8;
 
+pub(crate) const QUICKCONNECT_POLL_CONCURRENCY: usize = 4;
+const QUICKCONNECT_DETAIL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(270);
+
+pub struct QuickConnectReadTarget {
+    pub id: DeviceId,
+    provider_id: String,
+    runtime: Arc<DeviceRuntime>,
+    generation: u64,
+}
+
+impl QuickConnectReadTarget {
+    pub async fn read(&self, client: &updraft_quickconnect::QuickConnectClient) {
+        if tokio::time::timeout(QUICKCONNECT_DETAIL_TIMEOUT, self.read_locked(client))
+            .await
+            .is_err()
+        {
+            self.runtime
+                .mark_detail_unavailable_if_current(self.generation)
+                .await;
+        }
+    }
+
+    async fn read_locked(&self, client: &updraft_quickconnect::QuickConnectClient) {
+        let _transaction = self.runtime.acquire_transaction().await;
+        if self.runtime.state_generation.load(Ordering::Acquire) != self.generation {
+            return;
+        }
+        match client.read_device_state(&self.provider_id).await {
+            Ok(state) => {
+                self.runtime
+                    .set_state_if_current(self.generation, common_state(state))
+                    .await;
+            }
+            Err(_) => {
+                self.runtime
+                    .mark_detail_unavailable_if_current(self.generation)
+                    .await;
+            }
+        }
+    }
+}
+
 #[derive(Clone, Eq, Hash, Ord, PartialEq, PartialOrd, Deserialize, Serialize)]
 struct ProviderIdentity {
     account_id: String,
@@ -196,6 +238,13 @@ impl DeviceRuntime {
             snapshot.last_error = Some("device state expired".to_owned());
         }
         snapshot
+    }
+
+    #[cfg(all(test, feature = "mqtt"))]
+    pub(crate) async fn block_snapshot_for_test(
+        &self,
+    ) -> tokio::sync::RwLockWriteGuard<'_, DeviceRuntimeSnapshot> {
+        self.snapshot.write().await
     }
 
     pub async fn set_state(&self, state: DeviceState) {
@@ -503,16 +552,24 @@ impl DeviceRegistry {
         client: &updraft_quickconnect::QuickConnectClient,
     ) -> Result<Vec<DeviceId>, QuickConnectPollingError> {
         let generations = self.begin_quickconnect_poll(account_id);
-        let polls = match client.poll_devices().await {
-            Ok(polls) => polls,
+        let inventory = match client.read_inventory().await {
+            Ok(inventory) => inventory,
             Err(error) => {
                 self.mark_quickconnect_inventory_unavailable(account_id, &generations)
                     .await;
                 return Err(error.into());
             }
         };
-        self.reconcile_quickconnect_polls(account_id, polls, &generations)
-            .await
+        let targets = self
+            .reconcile_quickconnect_inventory(account_id, inventory, &generations)
+            .await?;
+        let ids = targets.iter().map(|target| target.id.clone()).collect();
+        futures_util::stream::iter(targets)
+            .for_each_concurrent(Some(QUICKCONNECT_POLL_CONCURRENCY), |target| async move {
+                target.read(client).await;
+            })
+            .await;
+        Ok(ids)
     }
 
     pub fn begin_quickconnect_poll(&self, account_id: &str) -> BTreeMap<DeviceId, u64> {
@@ -527,21 +584,18 @@ impl DeviceRegistry {
             .collect()
     }
 
-    pub async fn reconcile_quickconnect_polls(
+    pub async fn reconcile_quickconnect_inventory(
         &mut self,
         account_id: &str,
-        polls: Vec<updraft_quickconnect::QuickConnectDevicePoll>,
+        inventory: Vec<updraft_quickconnect::InventoryDevice>,
         generations: &BTreeMap<DeviceId, u64>,
-    ) -> Result<Vec<DeviceId>, QuickConnectPollingError> {
-        let inputs = polls
+    ) -> Result<Vec<QuickConnectReadTarget>, QuickConnectPollingError> {
+        let inputs = inventory
             .iter()
-            .map(|poll| {
+            .map(|device| {
                 CloudDeviceInput::new(
-                    poll.inventory.provider_id().to_owned(),
-                    poll.inventory
-                        .name()
-                        .unwrap_or("QuickConnect device")
-                        .to_owned(),
+                    device.provider_id().to_owned(),
+                    device.name().unwrap_or("QuickConnect device").to_owned(),
                 )
             })
             .collect::<Vec<_>>();
@@ -553,57 +607,54 @@ impl DeviceRegistry {
                 return Err(error.into());
             }
         };
-        let present = polls
-            .iter()
-            .map(|poll| poll.inventory.provider_id().to_owned())
-            .collect::<HashSet<_>>();
-        let runtimes = ids
-            .iter()
-            .cloned()
-            .zip(polls)
-            .filter_map(|(id, poll)| {
+        self.mark_missing_quickconnect_devices(account_id, &ids, generations)
+            .await;
+        Ok(ids
+            .into_iter()
+            .zip(inventory)
+            .filter_map(|(id, device)| {
                 self.runtime(&id).map(|runtime| {
                     let generation = generations
                         .get(&id)
                         .copied()
                         .unwrap_or_else(|| runtime.begin_state_read());
-                    (runtime, generation, poll)
+                    QuickConnectReadTarget {
+                        id,
+                        provider_id: device.into_provider_id(),
+                        runtime,
+                        generation,
+                    }
                 })
             })
-            .collect::<Vec<_>>();
+            .collect())
+    }
+
+    async fn mark_missing_quickconnect_devices(
+        &self,
+        account_id: &str,
+        ids: &[DeviceId],
+        generations: &BTreeMap<DeviceId, u64>,
+    ) {
+        let present = ids.iter().collect::<HashSet<_>>();
         let missing = self
             .identities
             .bindings
             .iter()
-            .filter(|binding| binding.identity.account_id == account_id)
-            .filter(|binding| !present.contains(&binding.identity.provider_id))
+            .filter(|binding| {
+                binding.identity.account_id == account_id && !present.contains(&binding.local_id)
+            })
             .filter_map(|binding| {
                 self.runtimes
                     .get(&binding.local_id)
                     .zip(generations.get(&binding.local_id))
-                    .map(|(runtime, generation)| (Arc::clone(runtime), *generation))
             })
+            .map(|(runtime, generation)| (Arc::clone(runtime), *generation))
             .collect::<Vec<_>>();
         futures_util::stream::iter(missing)
             .for_each(|(runtime, generation)| async move {
                 runtime.mark_missing_if_current(generation).await;
             })
             .await;
-        futures_util::stream::iter(runtimes)
-            .for_each(|(runtime, generation, poll)| async move {
-                match poll.detail {
-                    Ok(state) => {
-                        runtime
-                            .set_state_if_current(generation, common_state(state))
-                            .await;
-                    }
-                    Err(_) => {
-                        runtime.mark_detail_unavailable_if_current(generation).await;
-                    }
-                }
-            })
-            .await;
-        Ok(ids)
     }
 
     pub async fn mark_quickconnect_inventory_unavailable(

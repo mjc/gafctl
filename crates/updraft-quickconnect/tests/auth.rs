@@ -137,18 +137,21 @@ async fn read_only_poll_keeps_inventory_when_one_detail_fetch_fails() {
         Credentials::new("user", "password", AccountRole::Contractor),
     );
 
-    let polls = client.poll_devices().await.unwrap();
+    let inventory = client.read_inventory().await.unwrap();
+    let failed = client.read_device_state(inventory[0].provider_id()).await;
+    let successful = client
+        .read_device_state(inventory[1].provider_id())
+        .await
+        .unwrap();
 
-    assert_eq!(polls.len(), 2);
-    assert_eq!(polls[0].inventory.provider_id(), "synthetic-failed-device");
-    assert_eq!(polls[0].inventory.name(), Some("Failed detail"));
+    assert_eq!(inventory.len(), 2);
+    assert_eq!(inventory[0].provider_id(), "synthetic-failed-device");
+    assert_eq!(inventory[0].name(), Some("Failed detail"));
     assert_eq!(
-        polls[0].detail,
+        failed,
         Err(updraft_quickconnect::ClientError::HttpStatus(503))
     );
-    assert_eq!(polls[0].fetched_at_unix_ms, None);
-    let successful = polls[1].detail.as_ref().unwrap();
-    assert_eq!(polls[1].inventory.provider_id(), "synthetic-live-device");
+    assert_eq!(inventory[1].provider_id(), "synthetic-live-device");
     assert_eq!(successful.temperature_f, Some(78.0));
     assert_eq!(successful.humidity_percent, Some(44.0));
     assert_eq!(successful.settings.automatic_temperature_f, Some(105));

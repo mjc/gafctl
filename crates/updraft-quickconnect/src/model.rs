@@ -16,6 +16,11 @@ impl InventoryDevice {
         &self.provider_id
     }
 
+    /// Consume the inventory entry for a retained device-read target.
+    pub fn into_provider_id(self) -> String {
+        self.provider_id
+    }
+
     /// Return the provider's optional display name.
     pub fn name(&self) -> Option<&str> {
         self.name.as_deref()
@@ -72,24 +77,6 @@ pub struct QuickConnectDeviceState {
     pub diagnostics: QuickConnectDiagnostics,
     pub fetched_at_unix_ms: Option<u64>,
     pub observed_at_unix_ms: Option<u64>,
-}
-
-/// Inventory registration and its independent detail result.
-pub struct QuickConnectDevicePoll {
-    pub inventory: InventoryDevice,
-    pub detail: Result<QuickConnectDeviceState, ClientError>,
-    pub fetched_at_unix_ms: Option<u64>,
-}
-
-impl fmt::Debug for QuickConnectDevicePoll {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("QuickConnectDevicePoll")
-            .field("inventory", &self.inventory)
-            .field("detail", &self.detail.as_ref().map(|_| "[decoded]"))
-            .field("fetched_at_unix_ms", &self.fetched_at_unix_ms)
-            .finish()
-    }
 }
 
 pub(crate) fn parse_inventory(payload: Value) -> Result<Vec<InventoryDevice>, ClientError> {

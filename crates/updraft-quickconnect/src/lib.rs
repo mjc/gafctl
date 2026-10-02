@@ -17,8 +17,8 @@ pub use commands::{
     QuickConnectSettingsBody, build_settings_body,
 };
 pub use model::{
-    DeviceModeStatus, InventoryDevice, QuickConnectDevicePoll, QuickConnectDeviceState,
-    QuickConnectDiagnostics, QuickConnectSettings,
+    DeviceModeStatus, InventoryDevice, QuickConnectDeviceState, QuickConnectDiagnostics,
+    QuickConnectSettings,
 };
 
 const USER_POOL_ID: &str = "us-east-2_F6aHzg32w";
@@ -172,33 +172,9 @@ impl QuickConnectClient {
         validate_inventory_response(self.get_json("device/deviceList").await?)
     }
 
-    /// Poll inventory and enrich each entry independently with its current detail.
-    pub async fn poll_devices(&self) -> Result<Vec<QuickConnectDevicePoll>, ClientError> {
-        use futures_util::StreamExt;
-
-        let inventory = model::parse_inventory(self.list_devices().await?)?;
-        let devices = stream::iter(inventory)
-            .then(|inventory| async move {
-                let detail =
-                    self.device_detail(inventory.provider_id())
-                        .await
-                        .and_then(|payload| {
-                            let fetched_at = unix_millis(SystemTime::now());
-                            model::parse_device_state(payload, fetched_at)
-                        });
-                let fetched_at_unix_ms = detail
-                    .as_ref()
-                    .ok()
-                    .and_then(|state| state.fetched_at_unix_ms);
-                QuickConnectDevicePoll {
-                    inventory,
-                    detail,
-                    fetched_at_unix_ms,
-                }
-            })
-            .collect::<Vec<_>>()
-            .await;
-        Ok(devices)
+    /// Read typed inventory without waiting for device detail requests.
+    pub async fn read_inventory(&self) -> Result<Vec<InventoryDevice>, ClientError> {
+        model::parse_inventory(self.list_devices().await?)
     }
 
     /// Read one device detail record using its provider ID as an encoded query value.
