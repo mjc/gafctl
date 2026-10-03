@@ -57,9 +57,9 @@ systemctl status gafctl.service
 journalctl -u gafctl.service -n 50 --no-pager
 ```
 
-On NixOS, manage the package, service user, Bluetooth, D-Bus policy, state
-location, and firewall declaratively. The repository's development environment
-uses devenv; it exports no NixOS package or module.
+On NixOS, use the [flake package and service module](installation.md#nix).
+The module manages the service user, Bluetooth, D-Bus policy, state directory,
+and optional firewall rule. Development commands still use devenv.
 
 Allow the required network access, then check from the Home Assistant host:
 

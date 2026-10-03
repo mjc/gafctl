@@ -32,6 +32,7 @@ in {
       actionlint
       shellcheck
       curl
+      nixfmt
     ]
     ++ lib.optionals linux [dbus];
 
@@ -63,10 +64,12 @@ in {
   tasks."check:install".exec = "packaging/check.sh";
   tasks."check:compose".exec = "packaging/check-compose.sh";
   tasks."check:install-native".exec = "python3 packaging/check-native.py";
+  tasks."check:nix".exec = "nixfmt --check flake.nix nix/*.nix && nix flake check --all-systems --no-build";
   tasks."build:service".exec = "cargo build --release --locked --no-default-features --features http,mqtt --bin gafctl-server";
   tasks."build:cli".exec = "cargo build --release --locked --no-default-features --features cli --bin gafctl";
   tasks."check:all".after =
     [
+      "check:nix"
       "check:fmt"
       "check:clippy"
       "check:clippy-cli"

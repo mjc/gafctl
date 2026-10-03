@@ -33,7 +33,7 @@ points elsewhere, start a fresh command from this repository's root.
 devenv tasks run check:all
 ```
 
-This runs formatting, Clippy with warnings denied for all features, CLI-only
+This runs Nix evaluation and formatting, Clippy with warnings denied for all features, CLI-only
 and HTTP-only configurations, workspace tests with all features, CLI-only and
 HTTP-only tests, Rust doctests, Ruff formatting and lint checks, strict typing of the Python
 client, models and controls, and the Python
@@ -100,6 +100,7 @@ live account compatibility is untested.
 | `crates/gafctl-bluetooth/` | Bluetooth discovery and communication |
 | `crates/gafctl-quickconnect/` | Cloud authentication, requests, and decoding |
 | `custom_components/gafctl/` | Home Assistant integration |
+| `nix/` | Package, Home Assistant component, NixOS module, and configuration checks |
 | `fixtures/quickconnect/` | Synthetic cloud request and response examples |
 
 The protocol crate has no Bluetooth or application dependency. The HTTP client
@@ -166,8 +167,8 @@ devenv tasks run check:install-native
 ```
 
 The native check installs both executables with Cargo into `target/install-native`
-and starts `gafctl server` with an empty device inventory and a fresh identity
-store. It does not inherit device or cloud settings from the shell.
+and starts `gafctl server` with an empty device inventory and an identity
+store under that directory. It does not inherit device or cloud settings from the shell.
 
 For Home Assistant OS, add this repository to a disposable guest's app store
 and install Gafctl through Supervisor. Copy `packaging/check-haos.sh` onto the
@@ -178,3 +179,25 @@ synthetic file. Install the separate integration, restart Home Assistant, and
 complete its config flow against a local API fixture to check entity loading.
 Run these checks on both `amd64` and `aarch64` guests. Use Nix-provided QEMU and
 mtools for guest setup, with native hardware acceleration.
+
+## Nix checks
+
+`check:nix` evaluates every supported flake system and checks Nix formatting.
+The module checks cover disabled, Bluetooth, cloud, MQTT, and mixed services;
+they reject missing credentials, passwords in the store, and unsafe listener
+settings. Package builds run the Rust tests in the Nix sandbox.
+
+```sh
+devenv tasks run check:nix
+devenv shell -- nix build .#gafctl
+devenv shell -- python3 packaging/check-native.py --package ./result
+```
+
+On a disposable NixOS test host with an existing `gafctl` system account and
+BlueZ policy, run `packaging/check-nix-service.sh` inside the devenv shell.
+It builds the module's generated test unit, starts a private MQTT broker,
+checks credential loading, HTTP, service permissions, and identity persistence
+across restart, then removes its units and fixtures. It uses ports 19787/19883
+and never configures a fan or cloud account. Set `GAFCTL_CHECK_SUDO=doas` if
+that is the host's privilege tool. The check reads BlueZ's object list as the
+service account without scanning or connecting to a device.

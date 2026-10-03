@@ -1,5 +1,6 @@
 """Exercise a source installation without connecting to devices."""
 
+import argparse
 import json
 import os
 import socket
@@ -9,11 +10,31 @@ from pathlib import Path
 from urllib.request import urlopen
 
 root = Path(__file__).resolve().parents[1]
+parser = argparse.ArgumentParser(description=__doc__)
+parser.add_argument("--package", type=Path, help="Check an existing installation")
+package = parser.parse_args().package
 installation = root / "target/install-native"
-subprocess.run(
-    ["cargo", "install", "--path", str(root), "--locked", "--root", str(installation)],
-    check=True,
-)
+installation.mkdir(parents=True, exist_ok=True)
+if package is None:
+    subprocess.run(
+        [
+            "cargo",
+            "install",
+            "--path",
+            str(root),
+            "--locked",
+            "--root",
+            str(installation),
+        ],
+        check=True,
+    )
+package = package or installation
+for executable in ("gafctl", "gafctl-server"):
+    subprocess.run(
+        [str(package / "bin" / executable), "--help"],
+        check=True,
+        stdout=subprocess.DEVNULL,
+    )
 with socket.socket() as listener:
     listener.bind(("127.0.0.1", 0))
     port = listener.getsockname()[1]
@@ -22,7 +43,7 @@ environment = {
 }
 environment["GAFCTL_IDENTITY_STORE"] = str(installation / "identities.json")
 with subprocess.Popen(
-    [str(installation / "bin/gafctl"), "server", "--bind", f"127.0.0.1:{port}"],
+    [str(package / "bin/gafctl"), "server", "--bind", f"127.0.0.1:{port}"],
     env=environment,
 ) as server:
     try:
@@ -41,4 +62,4 @@ with subprocess.Popen(
     finally:
         server.terminate()
         server.wait(timeout=5)
-print("Source install, sibling server launch, HTTP, graceful shutdown: passed")
+print("Installed binaries, sibling server launch, HTTP, graceful shutdown: passed")

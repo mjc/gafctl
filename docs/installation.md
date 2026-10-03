@@ -9,8 +9,8 @@ start the server.
 | Home Assistant OS | [Home Assistant app](#home-assistant-os) |
 | Ubuntu 24.04+, Debian 12+ | [Debian package or source build](#ubuntu-and-debian) |
 | Other Linux distributions | [Source build](#source-build) or [Docker Compose](#docker-compose) |
-| NixOS / nix-darwin | [devenv build](#nix) and declarative service configuration |
-| macOS | [devenv build](#nix); Bluetooth access runs natively |
+| NixOS / nix-darwin | [Nix package and NixOS module](#nix) |
+| macOS | [Nix package](#nix); Bluetooth access runs natively |
 
 Original ERV5SMT and EGV5SMT controllers need a Linux Bluetooth adapter and BlueZ
 for an always-on service. Containers use the host's BlueZ over D-Bus; they do
@@ -248,18 +248,88 @@ package manager. There is no Windows service package.
 
 ## Nix
 
-Use the repository's devenv environment:
+The flake provides `gafctl` for x86-64 Linux, ARM64 Linux, and ARM64 macOS.
+Both executables are installed together:
+
+```sh
+nix profile install github:mjc/gafctl#gafctl
+gafctl --help
+gafctl server --help
+```
+
+For a local build, use the repository's devenv environment:
 
 ```sh
 git clone https://github.com/mjc/gafctl.git
 cd gafctl
 devenv allow
-devenv shell -- cargo build --release --locked --bins
+devenv shell -- nix build .#gafctl
 ```
 
-The development environment supplies the pinned Rust toolchain and native
-libraries. For an always-on NixOS service, manage the package, service user,
-BlueZ, D-Bus policy, state directory, and firewall in your system configuration.
-See [service setup](deployment.md). This repository does not export a flake or
-NixOS module. macOS runs the Bluetooth CLI natively after granting Bluetooth
-access when prompted.
+### NixOS service
+
+Add `inputs.gafctl.url = "github:mjc/gafctl"` to your system flake and include
+`inputs.gafctl.nixosModules.default` in its NixOS modules. Configure an original
+controller with its host-local Bluetooth peripheral ID:
+
+```nix
+services.gafctl = {
+  enable = true;
+  bluetooth.deviceId = "PERIPHERAL_ID";
+};
+```
+
+The module creates the `gafctl` user, enables BlueZ for an original controller,
+grants that user D-Bus access, and persists identities in `/var/lib/gafctl`.
+Cloud-only or MQTT-only configurations do not enable Bluetooth. The service
+restarts after failures and loads passwords through systemd credentials.
+
+For MQTT, add:
+
+```nix
+services.gafctl.mqtt = {
+  enable = true;
+  host = "BROKER_HOST";
+  username = "gafctl";
+  passwordFile = "/run/secrets/gafctl-mqtt";
+  discovery = true;
+};
+```
+
+For experimental QuickConnect access, add:
+
+```nix
+services.gafctl.quickconnect = {
+  enable = true;
+  username = "GAF_ACCOUNT";
+  passwordFile = "/run/secrets/gafctl-quickconnect";
+  role = "consumer";
+};
+```
+
+Provision these password files at runtime with private permissions. Use quoted
+absolute paths as shown, not Nix path literals or `builtins.readFile`; secrets
+must stay outside the Nix store. QuickConnect writes remain disabled unless you
+set `quickconnect.writesEnabled = true`. Backends can be enabled together.
+
+The API listens on `127.0.0.1:8787`. If Home Assistant runs on another host,
+set `listenAddress` to a trusted LAN IP and `allowRemote = true`. `openFirewall`
+is disabled by default; enable it only if the host's network is trusted, or add
+a firewall rule restricted to Home Assistant. The API has no authentication.
+
+### Declarative Home Assistant integration
+
+On a NixOS Home Assistant host, install the integration through its existing
+Home Assistant service:
+
+```nix
+services.home-assistant.customComponents = [
+  inputs.gafctl.packages.${pkgs.stdenv.hostPlatform.system}.home-assistant
+];
+```
+
+Rebuild the host, then add **Gafctl GAF Vent** in **Settings → Devices & services**.
+This package installs the integration; configure the server separately.
+
+There is no nix-darwin service module. On macOS, run the CLI or server natively
+and grant Bluetooth access when prompted.
