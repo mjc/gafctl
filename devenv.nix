@@ -26,6 +26,12 @@ in {
       mypy
       pkg-config
       mosquitto
+      podman
+      docker-compose
+      docker-client
+      actionlint
+      shellcheck
+      curl
     ]
     ++ lib.optionals linux [dbus];
 
@@ -54,6 +60,9 @@ in {
       ${registryPython}/bin/python tests/test_homeassistant_registry.py
     '';
   };
+  tasks."check:install".exec = "packaging/check.sh";
+  tasks."check:compose".exec = "packaging/check-compose.sh";
+  tasks."check:install-native".exec = "python3 packaging/check-native.py";
   tasks."build:service".exec = "cargo build --release --locked --no-default-features --features http,mqtt --bin gafctl-server";
   tasks."build:cli".exec = "cargo build --release --locked --no-default-features --features cli --bin gafctl";
   tasks."check:all".after =

@@ -134,3 +134,47 @@ GitHub `release` environment. Its publish job creates a GitHub Release with
 checksums and publishes `ghcr.io/mjc/gafctl:VERSION` as a multi-architecture
 image. Set the GHCR package visibility to public after its first publication.
 Do not document a registry tag as available before it has been published.
+
+## Installation checks
+
+Use a disposable Linux container runtime. `check:install` builds the Linux
+archive, Debian package, server image, and Home Assistant app image for the
+runtime's native architecture. It installs the package on Ubuntu 24.04 and
+Debian 12 with systemd as PID 1, then checks credentials, service permissions,
+archive startup, restart, reinstall, upgrade, and purge. Image checks cover
+HTTP startup, option mapping, private password files, restart, and shutdown.
+The privileged containers in this check have no Bluetooth devices or host
+D-Bus socket mounted.
+
+```sh
+devenv tasks run check:install
+```
+
+Podman is the default engine. To use a disposable Docker daemon, set
+`CONTAINER_ENGINE=docker` and `DOCKER_HOST` before running the task. Named test
+volumes carry the fixtures, so a remote daemon does not need the checkout
+mounted. The task removes its test containers and volumes when it exits.
+
+For Compose, point `DOCKER_HOST` at that same test runtime after the image
+build. `GAFCTL_CHECK_SECRET_DIR` is an empty directory on the daemon's Linux
+host; setting it also tests the QuickConnect password bind mount with a
+synthetic secret and no cloud requests.
+
+```sh
+GAFCTL_CHECK_SECRET_DIR=/var/lib/gafctl-compose-check devenv tasks run check:compose
+devenv tasks run check:install-native
+```
+
+The native check installs both executables with Cargo into `target/install-native`
+and starts `gafctl server` with an empty device inventory and a fresh identity
+store. It does not inherit device or cloud settings from the shell.
+
+For Home Assistant OS, add this repository to a disposable guest's app store
+and install Gafctl through Supervisor. Copy `packaging/check-haos.sh` onto the
+guest's writable data partition, then run it with the app slug shown by
+Supervisor. This checks startup, restart, watchdog recovery after a forced
+container stop, and cold backup/restore of the identity store and a private
+synthetic file. Install the separate integration, restart Home Assistant, and
+complete its config flow against a local API fixture to check entity loading.
+Run these checks on both `amd64` and `aarch64` guests. Use Nix-provided QEMU and
+mtools for guest setup, with native hardware acceleration.

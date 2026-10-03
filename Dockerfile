@@ -1,4 +1,4 @@
-FROM rust:1.98.1-slim-bookworm AS build
+FROM docker.io/library/rust:1.98.1-slim-bookworm AS build
 RUN apt-get update && apt-get install -y --no-install-recommends build-essential cmake pkg-config libdbus-1-dev dpkg-dev && rm -rf /var/lib/apt/lists/*
 WORKDIR /src
 COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
@@ -14,7 +14,7 @@ RUN packaging/package.sh "${PACKAGE_ARCH}"
 FROM scratch AS artifacts
 COPY --from=packages /src/dist/ /
 
-FROM debian:bookworm-slim AS runtime
+FROM docker.io/library/debian:bookworm-slim AS runtime
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates libdbus-1-3 jq curl tini && rm -rf /var/lib/apt/lists/*
 COPY --from=build /src/target/release/gafctl /src/target/release/gafctl-server /usr/local/bin/
 COPY home-assistant/run.sh /usr/local/bin/gafctl-entrypoint
