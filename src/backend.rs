@@ -5,10 +5,11 @@ use std::{
     path::{Path, PathBuf},
     sync::Arc,
     sync::atomic::{AtomicU64, Ordering},
-    time::{SystemTime, UNIX_EPOCH},
+    time::SystemTime,
 };
 
 use futures_util::StreamExt;
+use gafctl_api::unix_millis;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio::sync::{Mutex, OwnedMutexGuard, OwnedSemaphorePermit, RwLock, Semaphore, watch};
@@ -183,6 +184,15 @@ pub struct DeviceRuntimeSnapshot {
     pub last_error: Option<String>,
 }
 
+impl DeviceRuntimeSnapshot {
+    fn record_success(&mut self, state: DeviceState) {
+        self.state = Some(state.clone());
+        self.last_successful_state = Some(state);
+        self.inventory_status = DeviceInventoryStatus::Present;
+        self.last_error = None;
+    }
+}
+
 impl DeviceRuntime {
     fn new() -> Self {
         let (control_changed, _) = watch::channel(0);
@@ -249,10 +259,7 @@ impl DeviceRuntime {
     pub async fn set_state(&self, state: DeviceState) {
         let mut snapshot = self.snapshot.write().await;
         self.state_generation.fetch_add(1, Ordering::AcqRel);
-        snapshot.state = Some(state.clone());
-        snapshot.last_successful_state = Some(state);
-        snapshot.inventory_status = DeviceInventoryStatus::Present;
-        snapshot.last_error = None;
+        snapshot.record_success(state);
     }
 
     pub fn begin_state_read(&self) -> u64 {
@@ -266,10 +273,7 @@ impl DeviceRuntime {
         if self.state_generation.load(Ordering::Acquire) != generation {
             return false;
         }
-        snapshot.state = Some(state.clone());
-        snapshot.last_successful_state = Some(state);
-        snapshot.inventory_status = DeviceInventoryStatus::Present;
-        snapshot.last_error = None;
+        snapshot.record_success(state);
         true
     }
 
@@ -361,10 +365,7 @@ impl DeviceRuntime {
             return false;
         }
         self.state_generation.fetch_add(1, Ordering::AcqRel);
-        snapshot.state = Some(state.clone());
-        snapshot.last_successful_state = Some(state);
-        snapshot.inventory_status = DeviceInventoryStatus::Present;
-        snapshot.last_error = None;
+        snapshot.record_success(state);
         true
     }
 
@@ -395,12 +396,6 @@ fn state_is_fresh(state: &DeviceState, now_unix_ms: u64) -> bool {
         .fetched_at_unix_ms
         .and_then(|fetched_at| now_unix_ms.checked_sub(fetched_at))
         .is_some_and(|age| age <= DEVICE_STATE_FRESHNESS_LIMIT_MS)
-}
-
-fn unix_millis(time: SystemTime) -> Option<u64> {
-    time.duration_since(UNIX_EPOCH)
-        .ok()
-        .and_then(|duration| u64::try_from(duration.as_millis()).ok())
 }
 
 impl DeviceRegistry {

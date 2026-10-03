@@ -13,6 +13,7 @@ from ha_fixtures import (
     legacy_settings,
     quickconnect_settings,
     readings,
+    reported_state,
     state_data,
 )
 
@@ -26,44 +27,16 @@ ApiError = MODELS.ApiError
 COMMAND = {"kind": "legacy_preset", "preset": "timer_clear"}
 
 
-def reported_state(backend="legacy_ble", **overrides):
-    settings = (
-        legacy_settings(
-            mode="automatic",
-            controller_fan_on=False,
-            automatic_temperature_tenths_f=1050,
-            automatic_humidity_tenths_percent=300,
-            timer_remaining_minutes=0,
-            timer_original_minutes=0,
-        )
-        if backend == "legacy_ble"
-        else quickconnect_settings(
-            mode="automatic",
-            automatic_temperature_f=105,
-            automatic_humidity_percent=40,
-            timer_duration_minutes=60,
-            humidity_monitor=True,
-        )
-    )
-    return (
-        readings(
-            settings=settings,
-            temperature_f=98.6 if backend == "legacy_ble" else 101.4,
-            humidity_percent=42.1 if backend == "legacy_ble" else 37.0,
-            estimated_running=None if backend == "legacy_ble" else True,
-            diagnostics=diagnostics(
-                firmware_version="3.0.0" if backend == "legacy_ble" else "1.2.3",
-                signal_strength_raw=None if backend == "legacy_ble" else "-45",
-                verified_raw=None if backend == "legacy_ble" else "true",
-            ),
-            provenance={
-                "backend": backend,
-                "fetched_at_unix_ms": 2000,
-                "observed_at_unix_ms": 1234 if backend == "legacy_ble" else None,
-            },
-        )
-        | overrides
-    )
+class FixtureTests(unittest.TestCase):
+    def test_reported_states_have_independent_nested_records(self):
+        for backend in ("legacy_ble", "quick_connect"):
+            with self.subTest(backend=backend):
+                first = reported_state(backend)
+                second = reported_state(backend)
+                for section in ("settings", "diagnostics", "provenance"):
+                    self.assertIsNot(first[section], second[section])
+                    first[section].clear()
+                self.assertEqual(second, reported_state(backend))
 
 
 class FakeResponse:

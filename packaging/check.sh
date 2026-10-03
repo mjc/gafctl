@@ -52,7 +52,7 @@ case "$arch" in
     arm64) app_arch=aarch64 ;;
     *) echo "Unsupported runtime architecture: $arch" >&2; exit 1 ;;
 esac
-version=$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -n 1)
+version=$(packaging/version.sh)
 printf 'Checking Linux %s installation paths\n' "$arch"
 build --target packages -t localhost/gafctl-install-packages:check .
 build --target runtime -t gafctl:local .

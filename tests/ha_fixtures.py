@@ -68,6 +68,46 @@ def readings(*, settings=None, **overrides):
     } | overrides
 
 
+def reported_state(backend="legacy_ble", **overrides):
+    settings = (
+        legacy_settings(
+            mode="automatic",
+            controller_fan_on=False,
+            automatic_temperature_tenths_f=1050,
+            automatic_humidity_tenths_percent=300,
+            timer_remaining_minutes=0,
+            timer_original_minutes=0,
+        )
+        if backend == "legacy_ble"
+        else quickconnect_settings(
+            mode="automatic",
+            automatic_temperature_f=105,
+            automatic_humidity_percent=40,
+            timer_duration_minutes=60,
+            humidity_monitor=True,
+        )
+    )
+    return (
+        readings(
+            settings=settings,
+            temperature_f=98.6 if backend == "legacy_ble" else 101.4,
+            humidity_percent=42.1 if backend == "legacy_ble" else 37.0,
+            estimated_running=None if backend == "legacy_ble" else True,
+            diagnostics=diagnostics(
+                firmware_version="3.0.0" if backend == "legacy_ble" else "1.2.3",
+                signal_strength_raw=None if backend == "legacy_ble" else "-45",
+                verified_raw=None if backend == "legacy_ble" else "true",
+            ),
+            provenance={
+                "backend": backend,
+                "fetched_at_unix_ms": 2000,
+                "observed_at_unix_ms": 1234 if backend == "legacy_ble" else None,
+            },
+        )
+        | overrides
+    )
+
+
 def state_data(*, state=None, available=True, freshness="fresh", backend="legacy_ble"):
     return {
         "id": "configured",

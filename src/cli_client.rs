@@ -2,7 +2,10 @@ use std::{fmt::Display, num::NonZeroU64, process::ExitCode, str::FromStr, time::
 
 use anyhow::Result;
 use clap::{Args, Subcommand, ValueEnum};
-use gafctl_api::{CommandId, ControlPreset, DeviceCommand, DeviceId, QuickConnectMode};
+use gafctl_api::{
+    AutomaticHumidityPercent, AutomaticTemperatureF, CommandId, ControlPreset, DeviceCommand,
+    DeviceId, QuickConnectMode,
+};
 use gafctl_client::{Client, ClientError, ClientOptions, ServerUrl};
 use serde::Serialize;
 
@@ -220,28 +223,28 @@ impl From<Mode> for QuickConnectMode {
 }
 
 #[derive(Clone, Copy, Debug)]
-struct TargetTemperatureF(u16);
+struct TargetTemperatureF(AutomaticTemperatureF);
 impl FromStr for TargetTemperatureF {
     type Err = &'static str;
     fn from_str(value: &str) -> std::result::Result<Self, Self::Err> {
         value
             .parse::<u16>()
             .ok()
-            .filter(|value| (90..=120).contains(value))
+            .and_then(|value| AutomaticTemperatureF::try_from(value).ok())
             .map(Self)
             .ok_or("temperature must be an integer from 90 to 120 °F")
     }
 }
 
 #[derive(Clone, Copy, Debug)]
-struct TargetHumidityPercent(u16);
+struct TargetHumidityPercent(AutomaticHumidityPercent);
 impl FromStr for TargetHumidityPercent {
     type Err = &'static str;
     fn from_str(value: &str) -> std::result::Result<Self, Self::Err> {
         value
             .parse::<u16>()
             .ok()
-            .filter(|value| (30..=80).contains(value))
+            .and_then(|value| AutomaticHumidityPercent::try_from(value).ok())
             .map(Self)
             .ok_or("humidity must be an integer from 30 to 80 percent")
     }
@@ -295,8 +298,8 @@ impl From<ServiceControl> for DeviceCommand {
                 temperature_f,
                 humidity_percent,
             } => Self::QuickConnectTargets {
-                temperature_f: temperature_f.0,
-                humidity_percent: humidity_percent.0,
+                temperature_f: temperature_f.0.value(),
+                humidity_percent: humidity_percent.0.value(),
             },
             ServiceControl::TimerDuration { minutes } => {
                 Self::QuickConnectTimerDuration { minutes: minutes.0 }
@@ -700,6 +703,24 @@ mod tests {
         assert!(BleParser::try_parse_from(["gafctl", "state"]).is_ok());
         assert!("platform/id".parse::<PeripheralId>().is_ok());
         assert!("platform/id".parse::<DeviceId>().is_err());
+    }
+
+    #[test]
+    fn cli_targets_carry_validated_api_types() {
+        let temperature: gafctl_api::AutomaticTemperatureF =
+            "105".parse::<TargetTemperatureF>().unwrap().0;
+        let humidity: gafctl_api::AutomaticHumidityPercent =
+            "40".parse::<TargetHumidityPercent>().unwrap().0;
+        assert_eq!(temperature.value(), 105);
+        assert_eq!(humidity.value(), 40);
+        assert_eq!(
+            "121".parse::<TargetTemperatureF>().unwrap_err(),
+            "temperature must be an integer from 90 to 120 °F"
+        );
+        assert_eq!(
+            "81".parse::<TargetHumidityPercent>().unwrap_err(),
+            "humidity must be an integer from 30 to 80 percent"
+        );
     }
 
     #[test]

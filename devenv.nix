@@ -32,6 +32,7 @@ in {
       actionlint
       shellcheck
       curl
+      jq
       nixfmt
     ]
     ++ lib.optionals linux [dbus];

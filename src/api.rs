@@ -1034,13 +1034,11 @@ async fn execute_cloud_v2_control(
     let Some(command) = quickconnect_command(request.command) else {
         return V2ControlStatus::UnsupportedCommand;
     };
-    let Some(intent) = QuickConnectControlIntent::new(
-        request.request_id.as_str(),
+    let intent = QuickConnectControlIntent::new(
+        request.request_id.clone(),
         request.issued_at_unix_ms,
         command,
-    ) else {
-        return V2ControlStatus::InvalidRequestId;
-    };
+    );
     quickconnect_control_status(service.execute(id, intent).await.status())
 }
 

@@ -2,20 +2,24 @@
 set -eu
 arch=$1
 version=$2
+ready() {
+    curl --fail --silent --retry 5 --retry-connrefused --retry-delay 1 http://127.0.0.1:8787/health
+}
+check_binaries() {
+    test "$("$1" --version)" = "gafctl $version"
+    test "$("$2" --version)" = "gafctl-server $version"
+    "$1" server --help >/dev/null
+}
 mount --make-rshared /run
 artifacts=${3:-/artifacts}
 package="$artifacts/gafctl_${version}_${arch}.deb"
 mkdir -p /work/archive
 tar -xzf "$artifacts/gafctl_${version}_linux_${arch}.tar.gz" -C /work/archive
-test "$(/work/archive/gafctl --version)" = "gafctl $version"
-test "$(/work/archive/gafctl-server --version)" = "gafctl-server $version"
-/work/archive/gafctl server --help >/dev/null
+check_binaries /work/archive/gafctl /work/archive/gafctl-server
 apt-get update -qq
 DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "$package"
 test "$(dpkg-query -W -f '${Architecture}' gafctl)" = "$arch"
-test "$(gafctl --version)" = "gafctl $version"
-test "$(gafctl-server --version)" = "gafctl-server $version"
-gafctl server --help >/dev/null
+check_binaries gafctl gafctl-server
 test "$(stat -c '%a:%U:%G' /etc/gafctl/gafctl.env)" = 640:root:gafctl
 getent passwd gafctl >/dev/null
 test -f /etc/dbus-1/system.d/gafctl.conf
@@ -30,7 +34,7 @@ ExecStartPre=/usr/bin/test -r %d/check-password
 UNIT
 systemctl daemon-reload
 systemctl enable --now gafctl.service
-curl --fail --silent --retry 5 --retry-connrefused --retry-delay 1 http://127.0.0.1:8787/health
+ready
 systemctl is-active --quiet gafctl.service
 identity=$(sha256sum /var/lib/gafctl/identities.json)
 cat > /etc/systemd/system/gafctl.service.d/archive.conf <<'UNIT'
@@ -40,14 +44,14 @@ ExecStart=/work/archive/gafctl server --bind 127.0.0.1:8787
 UNIT
 systemctl daemon-reload
 systemctl restart gafctl.service
-curl --fail --silent --retry 5 --retry-connrefused --retry-delay 1 http://127.0.0.1:8787/health
+ready
 rm /etc/systemd/system/gafctl.service.d/archive.conf
 systemctl daemon-reload
 test "$(stat -c '%a:%U:%G' /var/lib/gafctl)" = 700:gafctl:gafctl
 printf 'identity fixture\n' > /var/lib/gafctl/install-check
 printf '# preserved configuration\n' >> /etc/gafctl/gafctl.env
 systemctl restart gafctl.service
-curl --fail --silent --retry 5 --retry-connrefused --retry-delay 1 http://127.0.0.1:8787/health
+ready
 test "$(sha256sum /var/lib/gafctl/identities.json)" = "$identity"
 dpkg -i "$package"
 grep -q 'preserved configuration' /etc/gafctl/gafctl.env
@@ -60,7 +64,7 @@ grep -q 'preserved configuration' /etc/gafctl/gafctl.env
 test -f /var/lib/gafctl/install-check
 test "$(sha256sum /var/lib/gafctl/identities.json)" = "$identity"
 systemctl restart gafctl.service
-curl --fail --silent --retry 5 --retry-connrefused --retry-delay 1 http://127.0.0.1:8787/health
+ready
 dpkg --purge gafctl
 if systemctl is-active --quiet gafctl.service; then exit 1; fi
 if systemctl is-enabled --quiet gafctl.service; then exit 1; fi

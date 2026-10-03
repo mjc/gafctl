@@ -8,6 +8,7 @@ use std::{
 };
 
 use futures_util::{StreamExt, stream};
+use gafctl_api::{CommandId, is_fresh_at};
 use gafctl_quickconnect::{
     ClientError, QuickConnectClient, QuickConnectCommand, QuickConnectSettings,
     QuickConnectSettingsBody,
@@ -40,22 +41,22 @@ pub enum QuickConnectControlStatus {
 
 #[derive(Clone, Debug)]
 pub struct QuickConnectControlOutcome {
-    request_id: Arc<str>,
+    request_id: CommandId,
     status: QuickConnectControlStatus,
 }
 
 impl QuickConnectControlOutcome {
     pub fn request_id(&self) -> &str {
-        &self.request_id
+        self.request_id.as_str()
     }
 
     pub const fn status(&self) -> QuickConnectControlStatus {
         self.status
     }
 
-    fn new(request_id: &Arc<str>, status: QuickConnectControlStatus) -> Self {
+    fn new(request_id: &CommandId, status: QuickConnectControlStatus) -> Self {
         Self {
-            request_id: Arc::clone(request_id),
+            request_id: request_id.clone(),
             status,
         }
     }
@@ -106,44 +107,31 @@ impl QuickConnectControlPolicy {
 
 #[derive(Clone, Debug)]
 pub struct QuickConnectControlIntent {
-    request_id: Arc<str>,
+    request_id: CommandId,
     issued_at_unix_ms: u64,
     command: QuickConnectCommand,
 }
 
 impl QuickConnectControlIntent {
     pub fn new(
-        request_id: &str,
+        request_id: CommandId,
         issued_at_unix_ms: u64,
         command: QuickConnectCommand,
-    ) -> Option<Self> {
-        let valid_id = !request_id.is_empty()
-            && request_id.len() <= 64
-            && request_id
-                .bytes()
-                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-');
-        valid_id.then(|| Self {
-            request_id: Arc::from(request_id),
+    ) -> Self {
+        Self {
+            request_id,
             issued_at_unix_ms,
             command,
-        })
+        }
     }
 
     fn is_fresh_at(&self, now_unix_ms: u64, policy: QuickConnectControlPolicy) -> bool {
-        let age = policy
-            .max_command_age
-            .as_millis()
-            .try_into()
-            .unwrap_or(u64::MAX);
-        let skew = policy
-            .max_future_skew
-            .as_millis()
-            .try_into()
-            .unwrap_or(u64::MAX);
-        match self.issued_at_unix_ms.checked_sub(now_unix_ms) {
-            Some(future_ms) => future_ms <= skew,
-            None => now_unix_ms - self.issued_at_unix_ms <= age,
-        }
+        is_fresh_at(
+            self.issued_at_unix_ms,
+            now_unix_ms,
+            policy.max_command_age,
+            policy.max_future_skew,
+        )
     }
 }
 
@@ -530,6 +518,24 @@ mod tests {
         AccountRole, Credentials, QuickConnectClient, QuickConnectCommand, QuickConnectConfig,
     };
 
+    #[test]
+    fn intent_and_outcome_preserve_the_validated_request_id_allocation() {
+        let request_id = gafctl_api::CommandId::parse("shared-request-id").unwrap();
+        let intent = QuickConnectControlIntent::new(
+            request_id.clone(),
+            1000,
+            QuickConnectCommand::SetMode {
+                mode: gafctl_quickconnect::QuickConnectCommandMode::Off,
+            },
+        );
+        let outcome = super::QuickConnectControlOutcome::new(
+            &intent.request_id,
+            QuickConnectControlStatus::Confirmed,
+        );
+        assert_eq!(outcome.request_id(), request_id.as_str());
+        assert_eq!(outcome.request_id().as_ptr(), request_id.as_str().as_ptr());
+    }
+
     #[derive(Clone)]
     struct MockState {
         detail_reads: Arc<AtomicUsize>,
@@ -641,7 +647,11 @@ mod tests {
                 .as_millis(),
         )
         .unwrap();
-        QuickConnectControlIntent::new(request_id, now_unix_ms, command).unwrap()
+        QuickConnectControlIntent::new(
+            gafctl_api::CommandId::parse(request_id).unwrap(),
+            now_unix_ms,
+            command,
+        )
     }
 
     fn automatic_target_change() -> QuickConnectCommand {

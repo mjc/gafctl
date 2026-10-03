@@ -14,7 +14,7 @@ from homeassistant.const import (
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
-from .controls import entity_keys
+from .controls import entity_keys, tenths
 from .coordinator import GafctlConfigEntry, GafctlCoordinator
 from .entity import GafctlReadingEntity
 
@@ -103,9 +103,9 @@ class GafctlSensor(GafctlReadingEntity, SensorEntity):
     @property
     def native_value(self) -> float | int | str | None:
         value = self.reading_value(self._path)
-        if value is not None and self._key in {
+        if self._key in {
             "automatic_temperature_threshold",
             "automatic_humidity_threshold",
         }:
-            return value / 10
+            return tenths(value)
         return value

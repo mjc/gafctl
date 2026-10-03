@@ -21,6 +21,7 @@ from ha_fixtures import (
     legacy_settings,
     quickconnect_settings,
     readings,
+    reported_state,
     state_data,
 )
 from homeassistant.components.mqtt import binary_sensor as mqtt_binary
@@ -849,18 +850,12 @@ class RegistryTests(unittest.IsolatedAsyncioTestCase):
     async def test_generated_mqtt_templates_accept_nullable_payloads(self) -> None:
         configs = await self.discovery_configs()
         normal = state_data(
-            state=readings(
-                temperature_f=98.6,
-                humidity_percent=42.1,
-                diagnostics=diagnostics(firmware_version="3.0.0"),
-                settings=legacy_settings(
-                    mode="automatic",
-                    controller_fan_on=False,
-                    automatic_temperature_tenths_f=1050,
-                    automatic_humidity_tenths_percent=300,
-                    timer_remaining_minutes=0,
-                    timer_original_minutes=0,
-                ),
+            state=reported_state(
+                provenance={
+                    "backend": "legacy_ble",
+                    "fetched_at_unix_ms": None,
+                    "observed_at_unix_ms": None,
+                },
             )
         )
         initial = state_data(available=False, freshness="unknown")
@@ -1057,8 +1052,27 @@ class RegistryTests(unittest.IsolatedAsyncioTestCase):
             (
                 gafctl_sensor,
                 "legacy_ble",
-                readings(settings=legacy_settings(timer_original_minutes=2)),
-                {"timer_original": 2},
+                readings(
+                    settings=legacy_settings(
+                        timer_original_minutes=2,
+                        automatic_temperature_tenths_f=1055,
+                        automatic_humidity_tenths_percent=333,
+                    )
+                ),
+                {
+                    "timer_original": 2,
+                    "automatic_temperature_threshold": 105.5,
+                    "automatic_humidity_threshold": 33.3,
+                },
+            ),
+            (
+                gafctl_sensor,
+                "legacy_ble",
+                readings(),
+                {
+                    "automatic_temperature_threshold": None,
+                    "automatic_humidity_threshold": None,
+                },
             ),
             (
                 gafctl_sensor,

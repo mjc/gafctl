@@ -13,6 +13,9 @@ YAML
 compose() {
     docker-compose -p gafctl-install-check -f compose.yaml -f "$work/compose.yaml" "$@"
 }
+ready() {
+    compose exec -T gafctl curl --fail --silent --retry 5 --retry-connrefused --retry-delay 1 http://127.0.0.1:8787/health
+}
 created_secret=false
 cleanup() {
     if [ "$created_secret" = true ]; then
@@ -26,14 +29,14 @@ compose up -d --no-build --pull never
 endpoint=$(compose port gafctl 8787)
 docker run --rm --network host --read-only --cap-drop ALL --entrypoint curl gafctl:local \
     --fail --silent --retry 5 --retry-connrefused --retry-delay 1 "http://$endpoint/health"
-compose exec -T gafctl curl --fail --silent --retry 5 --retry-connrefused --retry-delay 1 http://127.0.0.1:8787/health
+ready
 identity=$(compose exec -T gafctl sha256sum /data/identities.json)
 compose restart
-compose exec -T gafctl curl --fail --silent --retry 5 --retry-connrefused --retry-delay 1 http://127.0.0.1:8787/health
+ready
 test "$(compose exec -T gafctl sha256sum /data/identities.json)" = "$identity"
 compose stop --timeout 3
 compose start
-compose exec -T gafctl curl --fail --silent --retry 5 --retry-connrefused --retry-delay 1 http://127.0.0.1:8787/health
+ready
 test "$(compose exec -T gafctl sha256sum /data/identities.json)" = "$identity"
 printf '\nCompose start, HTTP, restart, stop/start, persistent identity: passed\n'
 if [ -n "${GAFCTL_CHECK_SECRET_DIR:-}" ]; then

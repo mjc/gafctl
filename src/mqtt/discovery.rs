@@ -564,9 +564,18 @@ fn number_controls(backend: DeviceBackend) -> impl Iterator<Item = NumberControl
 }
 
 fn command_template(command: &str) -> String {
-    format!(
-        "{{% set issued = (as_timestamp(now()) * 1000) | int %}}{{% set nonce = (range(0, 65536) | random) ~ '-' ~ (range(0, 65536) | random) %}}{{\"request_id\":\"{{{{ issued }}}}-{{{{ nonce }}}}\",\"issued_at_unix_ms\":{{{{ issued }}}},\"command\":{command}}}"
-    )
+    request_template(Some(command))
+}
+
+fn request_template(command: Option<&str>) -> String {
+    let prefix = r#"{% set issued = (as_timestamp(now()) * 1000) | int %}{% set nonce = (range(0, 65536) | random) ~ '-' ~ (range(0, 65536) | random) %}{"request_id":"{{ issued }}-{{ nonce }}","issued_at_unix_ms":{{ issued }}"#;
+    [
+        prefix,
+        command.map_or("", |_| r#","command":"#),
+        command.unwrap_or_default(),
+        "}",
+    ]
+    .concat()
 }
 
 fn button_configs(device: &DeviceDescriptor) -> impl Iterator<Item = (String, Value)> + '_ {
@@ -574,7 +583,7 @@ fn button_configs(device: &DeviceDescriptor) -> impl Iterator<Item = (String, Va
         let mut config = button_config(device, "refresh", "Refresh readings");
         config["availability"] = json!([{"topic":Topics(device.proxy_id).process_availability()}]);
         config["command_topic"] = json!(Topics(device.proxy_id).device(&device.id, "refresh/set"));
-        config["command_template"] = json!("{% set issued = (as_timestamp(now()) * 1000) | int %}{% set nonce = (range(0, 65536) | random) ~ '-' ~ (range(0, 65536) | random) %}{\"request_id\":\"{{ issued }}-{{ nonce }}\",\"issued_at_unix_ms\":{{ issued }}}");
+        config["command_template"] = json!(request_template(None));
         config["entity_category"] = json!("diagnostic");
         (topic(device, "button", "refresh"), config)
     });
@@ -619,4 +628,20 @@ fn switch_configs(device: &DeviceDescriptor) -> impl Iterator<Item = (String, Va
             config["command_template"] = json!(command_template(&format!("{{% if value == 'ON' %}}{{\"kind\":\"quick_connect_mode\",\"mode\":\"{mode}\"}}{{% elif value == 'OFF' %}}{{\"kind\":\"quick_connect_conditional_off\",\"only_if_current\":\"{mode}\"}}{{% else %}}null{{% endif %}}")));
             (topic(device, "switch", &key), config)
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::request_template;
+
+    #[test]
+    fn request_envelopes_preserve_control_and_refresh_payloads() {
+        let prefix = r#"{% set issued = (as_timestamp(now()) * 1000) | int %}{% set nonce = (range(0, 65536) | random) ~ '-' ~ (range(0, 65536) | random) %}{"request_id":"{{ issued }}-{{ nonce }}","issued_at_unix_ms":{{ issued }}"#;
+        let command = r#"{"kind":"quick_connect_mode","mode":"off"}"#;
+        assert_eq!(request_template(None), format!("{prefix}}}"));
+        assert_eq!(
+            request_template(Some(command)),
+            format!("{prefix},\"command\":{command}}}")
+        );
+    }
 }
