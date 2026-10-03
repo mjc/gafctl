@@ -5,7 +5,6 @@ use gafctl_api::{
     ControlStatus as V2ControlStatus, DeviceControlV2Request, DeviceControlV2Response,
 };
 use gafctl_api::{DeviceBackend, DeviceCommand, DeviceId};
-use gafctl_quickconnect::{QuickConnectCommand, QuickConnectCommandMode};
 use std::{
     collections::{HashMap, VecDeque},
     sync::Arc,
@@ -66,12 +65,7 @@ impl DeviceService {
             return V2ControlStatus::StaleRequest;
         }
 
-        let registered = self
-            .registry
-            .read()
-            .await
-            .descriptors()
-            .any(|descriptor| descriptor.id == id);
+        let registered = self.registry.read().await.descriptor(&id).is_some();
         if !registered {
             return V2ControlStatus::UnknownDevice;
         }
@@ -170,10 +164,10 @@ async fn execute_cloud_v2_control(
     let Some(service) = state.quickconnect.as_ref() else {
         return V2ControlStatus::BackendUnavailable;
     };
-    let Some(command) = quickconnect_command(request.command) else {
+    let Some(intent) = QuickConnectControlIntent::new(request.issued_at_unix_ms, request.command)
+    else {
         return V2ControlStatus::UnsupportedCommand;
     };
-    let intent = QuickConnectControlIntent::new(request.issued_at_unix_ms, command);
     quickconnect_control_status(service.execute(id, intent).await)
 }
 
@@ -272,56 +266,6 @@ pub(super) fn v2_request_is_fresh_at(issued_at_unix_ms: u64, now: Option<u64>) -
         V2_CONTROL_MAX_AGE,
         V2_CONTROL_MAX_FUTURE_SKEW,
     )
-}
-
-fn quickconnect_command(command: DeviceCommand) -> Option<QuickConnectCommand> {
-    match command {
-        DeviceCommand::QuickConnectMode { mode } => Some(QuickConnectCommand::SetMode {
-            mode: cloud_mode(mode),
-        }),
-        DeviceCommand::QuickConnectConditionalOff { only_if_current } => {
-            Some(QuickConnectCommand::ClearMode {
-                mode: cloud_mode(only_if_current),
-            })
-        }
-        DeviceCommand::QuickConnectTargets {
-            temperature_f,
-            humidity_percent,
-        } => Some(QuickConnectCommand::SetAutomaticTargets {
-            temperature_f: Some(temperature_f),
-            humidity_percent: Some(humidity_percent),
-        }),
-        DeviceCommand::QuickConnectAutomaticTemperature { temperature_f } => {
-            Some(QuickConnectCommand::SetAutomaticTargets {
-                temperature_f: Some(temperature_f.value()),
-                humidity_percent: None,
-            })
-        }
-        DeviceCommand::QuickConnectAutomaticHumidity { humidity_percent } => {
-            Some(QuickConnectCommand::SetAutomaticTargets {
-                temperature_f: None,
-                humidity_percent: Some(humidity_percent.value()),
-            })
-        }
-        DeviceCommand::QuickConnectTimerDuration { minutes } => {
-            Some(QuickConnectCommand::SetTimerDuration {
-                duration_minutes: minutes,
-            })
-        }
-        DeviceCommand::LegacyPreset { .. }
-        | DeviceCommand::LegacyAutomaticTemperature { .. }
-        | DeviceCommand::LegacyAutomaticHumidity { .. }
-        | DeviceCommand::LegacyTimer { .. } => None,
-    }
-}
-
-const fn cloud_mode(mode: gafctl_api::QuickConnectMode) -> QuickConnectCommandMode {
-    match mode {
-        gafctl_api::QuickConnectMode::Off => QuickConnectCommandMode::Off,
-        gafctl_api::QuickConnectMode::Automatic => QuickConnectCommandMode::Automatic,
-        gafctl_api::QuickConnectMode::Timer => QuickConnectCommandMode::Timer,
-        gafctl_api::QuickConnectMode::Manual => QuickConnectCommandMode::Manual,
-    }
 }
 
 fn quickconnect_control_status(status: QuickConnectControlStatus) -> V2ControlStatus {

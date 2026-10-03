@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import Literal, TypeGuard
 
 from .models import ApiError, Backend, Device, JsonObject, Readings
+from .readings import BINARY_FIELDS, MODE_LABELS, SENSORS
 
 CONTROL_HTTP_STATUSES = {
     "confirmed": 200,
@@ -24,35 +25,7 @@ CONTROL_HTTP_STATUSES = {
     "control_failed": 500,
     "invalid_request_id": 400,
 }
-MODE_LABELS = {
-    "off": "Off",
-    "automatic": "Automatic",
-    "timer": "Timer",
-    "manual": "Manual",
-}
 QUICKCONNECT_MODES = frozenset(MODE_LABELS)
-_COMMON_SENSORS = {"temperature", "humidity", "mode", "firmware_version"}
-_READING_KEYS: dict[Backend, dict[str, set[str]]] = {
-    "legacy_ble": {
-        "sensor": _COMMON_SENSORS
-        | {
-            "automatic_temperature_threshold",
-            "automatic_humidity_threshold",
-            "timer_remaining",
-            "timer_original",
-        },
-        "binary_sensor": {"controller_fan_flag"},
-    },
-    "quick_connect": {
-        "sensor": _COMMON_SENSORS | {"signal_strength_raw", "verified_raw"},
-        "binary_sensor": {
-            "running_estimate",
-            "ota_in_progress",
-            "humidity_monitor",
-            *(f"{mode}_mode" for mode in MODE_LABELS if mode != "off"),
-        },
-    },
-}
 
 
 @dataclass(frozen=True, slots=True)
@@ -217,9 +190,10 @@ def entity_keys(device: Device | None) -> dict[str, set[str]]:
     entities: dict[str, set[str]] = {}
     if device["capabilities"]["read_state"]:
         entities = {
-            platform: set(keys) for platform, keys in _READING_KEYS[backend].items()
+            "sensor": set(SENSORS[backend]),
+            "binary_sensor": set(BINARY_FIELDS[backend]),
+            "button": {"refresh"},
         }
-        entities["button"] = {"refresh"}
     if backend == "legacy_ble" and "legacy_preset" in commands:
         entities["select"] = {"automatic_thresholds", "timer"}
     if backend == "quick_connect" and "quick_connect_mode" in commands:

@@ -25,7 +25,7 @@ impl DeviceService {
         }
         let descriptor = {
             let mut registry = self.registry.write().await;
-            if registry.runtime(id).is_none() {
+            if registry.descriptor(id).is_none() {
                 return Err(ServiceError::UnknownDevice);
             }
             if sources.state_source == EntitySource::Mqtt && !mqtt_ownership_available(self) {
@@ -38,8 +38,7 @@ impl DeviceService {
                     ServiceError::Persistence
                 })?;
             registry
-                .descriptors()
-                .find(|descriptor| &descriptor.id == id)
+                .descriptor(id)
                 .cloned()
                 .ok_or(ServiceError::UnknownDevice)?
         };
@@ -53,10 +52,7 @@ async fn device_state_v2_data(
     id: &DeviceId,
 ) -> Result<DeviceStateV2Response, ServiceError> {
     let registry = state.registry.read().await;
-    let descriptor = registry
-        .descriptors()
-        .find(|descriptor| descriptor.id == *id)
-        .ok_or(ServiceError::UnknownDevice)?;
+    let descriptor = registry.descriptor(id).ok_or(ServiceError::UnknownDevice)?;
     let runtime = registry.runtime(id).ok_or(ServiceError::UnknownDevice)?;
     let snapshot = runtime.snapshot().await;
     let mut response = DeviceStateV2Response {

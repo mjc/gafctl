@@ -8,9 +8,10 @@ use std::{
 };
 
 use futures_util::{StreamExt, stream};
-use gafctl_api::{DeviceId, is_fresh_at, unix_millis};
+use gafctl_api::{DeviceCommand, DeviceId, is_fresh_at, unix_millis};
 use gafctl_quickconnect::{
-    ClientError, QuickConnectCommand, QuickConnectSettings, QuickConnectSettingsBody,
+    ClientError, QuickConnectCommand, QuickConnectCommandMode, QuickConnectSettings,
+    QuickConnectSettingsBody,
 };
 use tokio::time::{Instant, sleep, timeout};
 
@@ -80,15 +81,21 @@ impl QuickConnectControlPolicy {
 #[derive(Clone, Debug)]
 pub(in crate::service) struct QuickConnectControlIntent {
     issued_at_unix_ms: u64,
+    requested_command: DeviceCommand,
     command: QuickConnectCommand,
 }
 
 impl QuickConnectControlIntent {
-    pub(in crate::service) fn new(issued_at_unix_ms: u64, command: QuickConnectCommand) -> Self {
-        Self {
+    pub(in crate::service) fn new(
+        issued_at_unix_ms: u64,
+        requested_command: DeviceCommand,
+    ) -> Option<Self> {
+        let command = quickconnect_command(requested_command)?;
+        Some(Self {
             issued_at_unix_ms,
+            requested_command,
             command,
-        }
+        })
     }
 
     fn is_fresh_at(&self, now_unix_ms: u64, policy: QuickConnectControlPolicy) -> bool {
@@ -127,7 +134,7 @@ impl QuickConnectBackend {
         if !self.is_fresh(&intent) {
             return QuickConnectControlStatus::Rejected;
         }
-        let target = self.control_target(id, intent.command).await;
+        let target = self.control_target(id, intent.requested_command).await;
         let Ok((runtime, provider_id)) = target else {
             return QuickConnectControlStatus::Rejected;
         };
@@ -232,7 +239,7 @@ impl QuickConnectBackend {
     async fn control_target(
         &self,
         id: &DeviceId,
-        command: QuickConnectCommand,
+        command: DeviceCommand,
     ) -> Result<(Arc<DeviceRuntime>, String), ()> {
         self.registry
             .read()
@@ -266,7 +273,7 @@ impl QuickConnectBackend {
         generation: u64,
     ) -> bool {
         let matches_target = self
-            .control_target_matches(id, intent.command, runtime, provider_id)
+            .control_target_matches(id, intent.requested_command, runtime, provider_id)
             .await;
         matches_target && self.is_fresh(intent) && runtime.is_current_control_intent(generation)
     }
@@ -274,7 +281,7 @@ impl QuickConnectBackend {
     async fn control_target_matches(
         &self,
         id: &DeviceId,
-        command: QuickConnectCommand,
+        command: DeviceCommand,
         runtime: &Arc<DeviceRuntime>,
         provider_id: &str,
     ) -> bool {
@@ -408,6 +415,56 @@ struct ReadbackProgress {
     state: Option<gafctl_quickconnect::QuickConnectDeviceState>,
 }
 
+fn quickconnect_command(command: DeviceCommand) -> Option<QuickConnectCommand> {
+    match command {
+        DeviceCommand::QuickConnectMode { mode } => Some(QuickConnectCommand::SetMode {
+            mode: cloud_mode(mode),
+        }),
+        DeviceCommand::QuickConnectConditionalOff { only_if_current } => {
+            Some(QuickConnectCommand::ClearMode {
+                mode: cloud_mode(only_if_current),
+            })
+        }
+        DeviceCommand::QuickConnectTargets {
+            temperature_f,
+            humidity_percent,
+        } => Some(QuickConnectCommand::SetAutomaticTargets {
+            temperature_f: Some(temperature_f),
+            humidity_percent: Some(humidity_percent),
+        }),
+        DeviceCommand::QuickConnectAutomaticTemperature { temperature_f } => {
+            Some(QuickConnectCommand::SetAutomaticTargets {
+                temperature_f: Some(temperature_f.value()),
+                humidity_percent: None,
+            })
+        }
+        DeviceCommand::QuickConnectAutomaticHumidity { humidity_percent } => {
+            Some(QuickConnectCommand::SetAutomaticTargets {
+                temperature_f: None,
+                humidity_percent: Some(humidity_percent.value()),
+            })
+        }
+        DeviceCommand::QuickConnectTimerDuration { minutes } => {
+            Some(QuickConnectCommand::SetTimerDuration {
+                duration_minutes: minutes,
+            })
+        }
+        DeviceCommand::LegacyPreset { .. }
+        | DeviceCommand::LegacyAutomaticTemperature { .. }
+        | DeviceCommand::LegacyAutomaticHumidity { .. }
+        | DeviceCommand::LegacyTimer { .. } => None,
+    }
+}
+
+const fn cloud_mode(mode: gafctl_api::QuickConnectMode) -> QuickConnectCommandMode {
+    match mode {
+        gafctl_api::QuickConnectMode::Off => QuickConnectCommandMode::Off,
+        gafctl_api::QuickConnectMode::Automatic => QuickConnectCommandMode::Automatic,
+        gafctl_api::QuickConnectMode::Timer => QuickConnectCommandMode::Timer,
+        gafctl_api::QuickConnectMode::Manual => QuickConnectCommandMode::Manual,
+    }
+}
+
 fn fresh_state(state: &gafctl_quickconnect::QuickConnectDeviceState) -> bool {
     state.fetched_at_unix_ms.is_some_and(|fetched_at| {
         unix_millis(SystemTime::now())
@@ -449,7 +506,78 @@ mod tests {
     use super::*;
     use crate::backend::{CloudDeviceInput, DeviceRegistry};
     use gafctl_api::DeviceId;
-    use gafctl_quickconnect::QuickConnectCommand;
+
+    #[test]
+    fn control_intents_preserve_domain_commands_and_translate_cloud_payloads() {
+        let temperature_f = gafctl_api::AutomaticTemperatureF::try_from(110).unwrap();
+        let humidity_percent = gafctl_api::AutomaticHumidityPercent::try_from(42).unwrap();
+        let cases = [
+            (
+                DeviceCommand::QuickConnectMode {
+                    mode: gafctl_api::QuickConnectMode::Manual,
+                },
+                QuickConnectCommand::SetMode {
+                    mode: QuickConnectCommandMode::Manual,
+                },
+            ),
+            (
+                DeviceCommand::QuickConnectConditionalOff {
+                    only_if_current: gafctl_api::QuickConnectMode::Timer,
+                },
+                QuickConnectCommand::ClearMode {
+                    mode: QuickConnectCommandMode::Timer,
+                },
+            ),
+            (
+                DeviceCommand::QuickConnectTargets {
+                    temperature_f: 110,
+                    humidity_percent: 42,
+                },
+                QuickConnectCommand::SetAutomaticTargets {
+                    temperature_f: Some(110),
+                    humidity_percent: Some(42),
+                },
+            ),
+            (
+                DeviceCommand::QuickConnectAutomaticTemperature { temperature_f },
+                QuickConnectCommand::SetAutomaticTargets {
+                    temperature_f: Some(110),
+                    humidity_percent: None,
+                },
+            ),
+            (
+                DeviceCommand::QuickConnectAutomaticHumidity { humidity_percent },
+                QuickConnectCommand::SetAutomaticTargets {
+                    temperature_f: None,
+                    humidity_percent: Some(42),
+                },
+            ),
+            (
+                DeviceCommand::QuickConnectTimerDuration { minutes: 90 },
+                QuickConnectCommand::SetTimerDuration {
+                    duration_minutes: 90,
+                },
+            ),
+        ];
+        cases.into_iter().for_each(|(requested, translated)| {
+            let intent = QuickConnectControlIntent::new(123, requested).unwrap();
+            assert_eq!(intent.issued_at_unix_ms, 123);
+            assert_eq!(intent.requested_command, requested);
+            assert_eq!(intent.command, translated);
+        });
+        [
+            DeviceCommand::LegacyPreset {
+                preset: gafctl_api::ControlPreset::TimerClear,
+            },
+            DeviceCommand::LegacyAutomaticTemperature { temperature_f },
+            DeviceCommand::LegacyAutomaticHumidity { humidity_percent },
+            DeviceCommand::LegacyTimer {
+                minutes: gafctl_api::LegacyTimerMinutes::try_from(1).unwrap(),
+            },
+        ]
+        .into_iter()
+        .for_each(|command| assert!(QuickConnectControlIntent::new(123, command).is_none()));
+    }
 
     #[derive(Clone)]
     struct MockState {
@@ -542,7 +670,7 @@ mod tests {
         }
     }
 
-    fn fresh_intent(command: QuickConnectCommand) -> QuickConnectControlIntent {
+    fn fresh_intent(command: DeviceCommand) -> QuickConnectControlIntent {
         let now_unix_ms = u64::try_from(
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)
@@ -550,13 +678,12 @@ mod tests {
                 .as_millis(),
         )
         .unwrap();
-        QuickConnectControlIntent::new(now_unix_ms, command)
+        QuickConnectControlIntent::new(now_unix_ms, command).unwrap()
     }
 
-    fn automatic_target_change() -> QuickConnectCommand {
-        QuickConnectCommand::SetAutomaticTargets {
-            temperature_f: Some(110),
-            humidity_percent: None,
+    fn automatic_target_change() -> DeviceCommand {
+        DeviceCommand::QuickConnectAutomaticTemperature {
+            temperature_f: gafctl_api::AutomaticTemperatureF::try_from(110).unwrap(),
         }
     }
 
@@ -572,8 +699,8 @@ mod tests {
             .service
             .execute(
                 &fixture.device_id,
-                fresh_intent(QuickConnectCommand::ClearMode {
-                    mode: gafctl_quickconnect::QuickConnectCommandMode::Timer,
+                fresh_intent(DeviceCommand::QuickConnectConditionalOff {
+                    only_if_current: gafctl_api::QuickConnectMode::Timer,
                 }),
             )
             .await;
@@ -664,9 +791,7 @@ mod tests {
             .service
             .execute(
                 &fixture.device_id,
-                fresh_intent(QuickConnectCommand::SetTimerDuration {
-                    duration_minutes: 90,
-                }),
+                fresh_intent(DeviceCommand::QuickConnectTimerDuration { minutes: 90 }),
             )
             .await;
 
@@ -735,9 +860,9 @@ mod tests {
             second_service
                 .execute(
                     &second_device,
-                    fresh_intent(QuickConnectCommand::SetAutomaticTargets {
-                        temperature_f: Some(111),
-                        humidity_percent: Some(42),
+                    fresh_intent(DeviceCommand::QuickConnectTargets {
+                        temperature_f: 111,
+                        humidity_percent: 42,
                     }),
                 )
                 .await
@@ -796,9 +921,9 @@ mod tests {
             second_service
                 .execute(
                     &second_device,
-                    fresh_intent(QuickConnectCommand::SetAutomaticTargets {
-                        temperature_f: Some(111),
-                        humidity_percent: Some(42),
+                    fresh_intent(DeviceCommand::QuickConnectTargets {
+                        temperature_f: 111,
+                        humidity_percent: 42,
                     }),
                 )
                 .await
@@ -846,9 +971,9 @@ mod tests {
             second_service
                 .execute(
                     &second_device,
-                    fresh_intent(QuickConnectCommand::SetAutomaticTargets {
-                        temperature_f: Some(111),
-                        humidity_percent: Some(42),
+                    fresh_intent(DeviceCommand::QuickConnectTargets {
+                        temperature_f: 111,
+                        humidity_percent: 42,
                     }),
                 )
                 .await

@@ -36,10 +36,7 @@ impl DeviceService {
         id: &DeviceId,
     ) -> Result<(DeviceBackend, Arc<DeviceRuntime>), ServiceError> {
         let registry = self.registry.read().await;
-        let descriptor = registry
-            .descriptors()
-            .find(|device| &device.id == id)
-            .ok_or(ServiceError::UnknownDevice)?;
+        let descriptor = registry.descriptor(id).ok_or(ServiceError::UnknownDevice)?;
         if !descriptor.capabilities.read_state {
             return Err(ServiceError::UnsupportedRead);
         }

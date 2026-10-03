@@ -27,9 +27,12 @@ pub(super) fn candidates(
                 topics.discovery(id, "sensor", "controller_fan_flag"),
                 topics.discovery(id, "select", "automatic_thresholds"),
                 topics.discovery(id, "select", "timer"),
-                topics.discovery(id, "number", "automatic_temperature"),
-                topics.discovery(id, "number", "automatic_humidity"),
-                topics.discovery(id, "number", "timer_duration"),
+            ])
+            .chain(
+                number_controls(*backend)
+                    .map(move |control| topics.discovery(id, "number", control.key)),
+            )
+            .chain([
                 topics.discovery(id, "button", "refresh"),
                 topics.discovery(id, "button", "all_off"),
             ])
@@ -480,81 +483,64 @@ fn number_configs(device: &DeviceDescriptor) -> impl Iterator<Item = (String, Va
 }
 
 fn number_controls(backend: DeviceBackend) -> impl Iterator<Item = NumberControl> {
+    let temperature = NumberControl {
+        key: "automatic_temperature",
+        name: "Target temperature",
+        kind: "legacy_automatic_temperature",
+        field: "temperature_f",
+        reading: "state.settings.automatic_temperature_tenths_f / 10",
+        capability: CommandCapability::LegacyAutomaticTemperature,
+        minimum: 90,
+        maximum: 120,
+        step: 1,
+        unit: "°F",
+    };
+    let humidity = NumberControl {
+        key: "automatic_humidity",
+        name: "Target humidity",
+        kind: "legacy_automatic_humidity",
+        field: "humidity_percent",
+        reading: "state.settings.automatic_humidity_tenths_percent / 10",
+        capability: CommandCapability::LegacyAutomaticHumidity,
+        minimum: 30,
+        maximum: 80,
+        step: 1,
+        unit: "%",
+    };
+    let timer = NumberControl {
+        key: "timer_duration",
+        name: "Timer duration",
+        kind: "legacy_timer",
+        field: "minutes",
+        reading: "state.settings.timer_original_minutes",
+        capability: CommandCapability::LegacyTimer,
+        minimum: 0,
+        maximum: 360,
+        step: 1,
+        unit: "min",
+    };
     let controls = match backend {
-        DeviceBackend::LegacyBle => [
-            NumberControl {
-                key: "automatic_temperature",
-                name: "Target temperature",
-                kind: "legacy_automatic_temperature",
-                field: "temperature_f",
-                reading: "state.settings.automatic_temperature_tenths_f / 10",
-                capability: CommandCapability::LegacyAutomaticTemperature,
-                minimum: 90,
-                maximum: 120,
-                step: 1,
-                unit: "°F",
-            },
-            NumberControl {
-                key: "automatic_humidity",
-                name: "Target humidity",
-                kind: "legacy_automatic_humidity",
-                field: "humidity_percent",
-                reading: "state.settings.automatic_humidity_tenths_percent / 10",
-                capability: CommandCapability::LegacyAutomaticHumidity,
-                minimum: 30,
-                maximum: 80,
-                step: 1,
-                unit: "%",
-            },
-            NumberControl {
-                key: "timer_duration",
-                name: "Timer duration",
-                kind: "legacy_timer",
-                field: "minutes",
-                reading: "state.settings.timer_original_minutes",
-                capability: CommandCapability::LegacyTimer,
-                minimum: 0,
-                maximum: 360,
-                step: 1,
-                unit: "min",
-            },
-        ],
+        DeviceBackend::LegacyBle => [temperature, humidity, timer],
         DeviceBackend::QuickConnect => [
             NumberControl {
-                key: "automatic_temperature",
-                name: "Target temperature",
                 kind: "quick_connect_automatic_temperature",
-                field: "temperature_f",
                 reading: "state.settings.automatic_temperature_f",
                 capability: CommandCapability::QuickConnectTargets,
-                minimum: 90,
-                maximum: 120,
-                step: 1,
-                unit: "°F",
+                ..temperature
             },
             NumberControl {
-                key: "automatic_humidity",
-                name: "Target humidity",
                 kind: "quick_connect_automatic_humidity",
-                field: "humidity_percent",
                 reading: "state.settings.automatic_humidity_percent",
                 capability: CommandCapability::QuickConnectTargets,
-                minimum: 30,
-                maximum: 80,
-                step: 1,
-                unit: "%",
+                ..humidity
             },
             NumberControl {
-                key: "timer_duration",
-                name: "Timer duration",
                 kind: "quick_connect_timer_duration",
-                field: "minutes",
                 reading: "state.settings.timer_duration_minutes",
                 capability: CommandCapability::QuickConnectTimerDuration,
                 minimum: 30,
-                maximum: 360,
                 step: 30,
-                unit: "min",
+                ..timer
             },
         ],
     };
@@ -646,6 +632,128 @@ mod tests {
             request_template(Some(command)),
             format!("{prefix},\"command\":{command}}}")
         );
+    }
+
+    #[test]
+    fn generated_number_configs_preserve_backend_metadata_and_cleanup_topics() {
+        let mut ble = DeviceDescriptor::configured_ble();
+        ble.state_source = EntitySource::Mqtt;
+        ble.command_source = EntitySource::Mqtt;
+        let cloud = mqtt_device(ble.proxy_id, "cloud");
+        [
+            (ble, [
+                ("automatic_temperature", "legacy_automatic_temperature", "temperature_f", "state.settings.automatic_temperature_tenths_f / 10", 90, 120, 1, "°F"),
+                ("automatic_humidity", "legacy_automatic_humidity", "humidity_percent", "state.settings.automatic_humidity_tenths_percent / 10", 30, 80, 1, "%"),
+                ("timer_duration", "legacy_timer", "minutes", "state.settings.timer_original_minutes", 0, 360, 1, "min"),
+            ]),
+            (cloud, [
+                ("automatic_temperature", "quick_connect_automatic_temperature", "temperature_f", "state.settings.automatic_temperature_f", 90, 120, 1, "°F"),
+                ("automatic_humidity", "quick_connect_automatic_humidity", "humidity_percent", "state.settings.automatic_humidity_percent", 30, 80, 1, "%"),
+                ("timer_duration", "quick_connect_timer_duration", "minutes", "state.settings.timer_duration_minutes", 30, 360, 30, "min"),
+            ]),
+        ]
+        .into_iter()
+        .for_each(|(device, expected)| {
+            let topics = Topics(device.proxy_id);
+            let generated = configs(std::slice::from_ref(&device)).collect::<Vec<_>>();
+            let cleanup = candidates(topics, &[(device.id.clone(), device.backend)])
+                .collect::<HashSet<_>>();
+            assert_eq!(number_configs(&device).count(), expected.len());
+            expected.into_iter().for_each(|(key, kind, field, reading, min, max, step, unit)| {
+                let topic = topics.discovery(&device.id, "number", key);
+                let (_, config) = generated.iter().find(|(candidate, _)| candidate == &topic).unwrap();
+                assert!(cleanup.contains(&topic));
+                assert_eq!(config["min"], json!(min));
+                assert_eq!(config["max"], json!(max));
+                assert_eq!(config["step"], json!(step));
+                assert_eq!(config["unit_of_measurement"], unit);
+                assert_eq!(config["mode"], "box");
+                assert_eq!(config["optimistic"], false);
+                assert_eq!(config["command_topic"], topics.device(&device.id, "control/set"));
+                let command = format!(
+                    "{{\"kind\":\"{kind}\",\"{field}\":{{{{ (number | int if number is number and value is not boolean and number == number | int else none) | to_json }}}}}}"
+                );
+                assert_eq!(config["command_template"], format!(
+                    "{{% set number = value | float(default=none) %}}{}", command_template(&command)
+                ));
+                let expected_reading = if device.backend == DeviceBackend::LegacyBle && key == "timer_duration" {
+                    "{% set reading = ((value_json.state or {}).get('settings') or {}).get('timer_original_minutes') %}{{ reading if reading is number and 0 <= reading <= 360 else none }}".to_owned()
+                } else {
+                    nullable_template(reading)
+                };
+                assert_eq!(config["value_template"], expected_reading);
+            });
+            // Old discovery keys still need cleanup after an ownership change.
+            assert!(cleanup.contains(&topics.discovery(&device.id, "select", "preset")));
+            assert!(cleanup.contains(&topics.discovery(&device.id, "sensor", "controller_fan_flag")));
+        });
+    }
+
+    #[test]
+    fn generated_number_configs_filter_capabilities_without_losing_cleanup_topics() {
+        [
+            (
+                DeviceDescriptor::configured_ble(),
+                vec![
+                    (vec![], vec![]),
+                    (
+                        vec![CommandCapability::LegacyAutomaticTemperature],
+                        vec!["automatic_temperature"],
+                    ),
+                    (
+                        vec![CommandCapability::LegacyAutomaticHumidity],
+                        vec!["automatic_humidity"],
+                    ),
+                    (vec![CommandCapability::LegacyTimer], vec!["timer_duration"]),
+                    (vec![CommandCapability::QuickConnectTargets], vec![]),
+                ],
+            ),
+            (
+                mqtt_device(ProxyId::default(), "cloud"),
+                vec![
+                    (vec![], vec![]),
+                    (
+                        vec![CommandCapability::QuickConnectTargets],
+                        vec!["automatic_temperature", "automatic_humidity"],
+                    ),
+                    (
+                        vec![CommandCapability::QuickConnectTimerDuration],
+                        vec!["timer_duration"],
+                    ),
+                    (vec![CommandCapability::QuickConnectMode], vec![]),
+                    (vec![CommandCapability::LegacyTimer], vec![]),
+                ],
+            ),
+        ]
+        .into_iter()
+        .for_each(|(mut device, cases)| {
+            device.state_source = EntitySource::Mqtt;
+            device.command_source = EntitySource::Mqtt;
+            let topics = Topics(device.proxy_id);
+            let cleanup =
+                candidates(topics, &[(device.id.clone(), device.backend)]).collect::<HashSet<_>>();
+            cases.into_iter().for_each(|(commands, expected_keys)| {
+                device.capabilities.commands = commands;
+                let expected = expected_keys
+                    .into_iter()
+                    .map(|key| topics.discovery(&device.id, "number", key))
+                    .collect::<HashSet<_>>();
+                let actual = number_configs(&device)
+                    .map(|(topic, _)| topic)
+                    .collect::<HashSet<_>>();
+                assert_eq!(actual, expected);
+                assert!(actual.is_subset(&cleanup));
+            });
+            [
+                "automatic_temperature",
+                "automatic_humidity",
+                "timer_duration",
+            ]
+            .into_iter()
+            .for_each(|key| {
+                assert!(cleanup.contains(&topics.discovery(&device.id, "number", key)))
+            });
+        });
     }
 
     #[test]

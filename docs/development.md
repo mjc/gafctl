@@ -75,7 +75,11 @@ The client returns those dictionaries directly, checking device identity,
 backend agreement, ownership, availability and command confirmation.
 The server owns scalar types and bounds.
 
-`controls.py` defines entity eligibility, setting bounds and readback checks.
+`readings.py` defines sensor and binary-sensor metadata for each backend.
+Entity eligibility and construction use those same definitions. The metadata
+module has no Home Assistant dependency; platform modules apply HA enums and
+presentation behavior.
+`controls.py` defines control eligibility, setting bounds and readback checks.
 The coordinator validates HA input, checks current ownership and capabilities,
 sends once under a lock, and refreshes state after the response.
 Config entries store the server address and device identity; capabilities come
@@ -147,9 +151,17 @@ replacement and rejects snapshots with obsolete ownership descriptors.
 
 Each registry entry owns its descriptor and runtime. Re-registration updates
 the descriptor while retaining state, locks, and generation tracking.
+API commands define their required capability, and capabilities define their
+backend. Registry dispatch checks both before selecting a runtime. The configured
+QuickConnect backend translates API commands into provider writes and rechecks
+the original command's permission before sending.
 Control history stores command identities and outcomes; the service constructs
 correlated responses for callers. MQTT intake owns admission and reply tasks
 under one lock, which is released before shutdown awaits those tasks.
+
+MQTT number controls share setting bounds, units, and command fields, with
+explicit backend differences. Discovery publication and cleanup topics use
+those same definitions.
 
 Shared legacy snapshot normalization lives in `src/legacy_projection.rs`.
 Direct BLE output retains partial readings and field errors; the service

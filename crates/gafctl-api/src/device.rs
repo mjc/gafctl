@@ -140,6 +140,33 @@ pub enum DeviceCommand {
     },
 }
 
+impl DeviceCommand {
+    pub const fn required_capability(self) -> CommandCapability {
+        match self {
+            DeviceCommand::LegacyPreset { preset } => CommandCapability::LegacyPreset(preset),
+            DeviceCommand::LegacyAutomaticTemperature { .. } => {
+                CommandCapability::LegacyAutomaticTemperature
+            }
+            DeviceCommand::LegacyAutomaticHumidity { .. } => {
+                CommandCapability::LegacyAutomaticHumidity
+            }
+            DeviceCommand::LegacyTimer { .. } => CommandCapability::LegacyTimer,
+            DeviceCommand::QuickConnectMode { .. }
+            | DeviceCommand::QuickConnectConditionalOff { .. } => {
+                CommandCapability::QuickConnectMode
+            }
+            DeviceCommand::QuickConnectTargets { .. }
+            | DeviceCommand::QuickConnectAutomaticTemperature { .. }
+            | DeviceCommand::QuickConnectAutomaticHumidity { .. } => {
+                CommandCapability::QuickConnectTargets
+            }
+            DeviceCommand::QuickConnectTimerDuration { .. } => {
+                CommandCapability::QuickConnectTimerDuration
+            }
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum QuickConnectMode {
@@ -160,7 +187,7 @@ pub enum QuickConnectModeStatus {
     Conflicting,
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(tag = "kind", content = "value", rename_all = "snake_case")]
 pub enum CommandCapability {
     LegacyPreset(ControlPreset),
@@ -170,6 +197,20 @@ pub enum CommandCapability {
     QuickConnectMode,
     QuickConnectTargets,
     QuickConnectTimerDuration,
+}
+
+impl CommandCapability {
+    pub const fn backend(self) -> DeviceBackend {
+        match self {
+            Self::LegacyPreset(_)
+            | Self::LegacyAutomaticTemperature
+            | Self::LegacyAutomaticHumidity
+            | Self::LegacyTimer => DeviceBackend::LegacyBle,
+            Self::QuickConnectMode
+            | Self::QuickConnectTargets
+            | Self::QuickConnectTimerDuration => DeviceBackend::QuickConnect,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -218,29 +259,7 @@ impl DeviceCapabilities {
     }
 
     pub fn supports(&self, command: DeviceCommand) -> bool {
-        let capability = match command {
-            DeviceCommand::LegacyPreset { preset } => CommandCapability::LegacyPreset(preset),
-            DeviceCommand::LegacyAutomaticTemperature { .. } => {
-                CommandCapability::LegacyAutomaticTemperature
-            }
-            DeviceCommand::LegacyAutomaticHumidity { .. } => {
-                CommandCapability::LegacyAutomaticHumidity
-            }
-            DeviceCommand::LegacyTimer { .. } => CommandCapability::LegacyTimer,
-            DeviceCommand::QuickConnectMode { .. }
-            | DeviceCommand::QuickConnectConditionalOff { .. } => {
-                CommandCapability::QuickConnectMode
-            }
-            DeviceCommand::QuickConnectTargets { .. }
-            | DeviceCommand::QuickConnectAutomaticTemperature { .. }
-            | DeviceCommand::QuickConnectAutomaticHumidity { .. } => {
-                CommandCapability::QuickConnectTargets
-            }
-            DeviceCommand::QuickConnectTimerDuration { .. } => {
-                CommandCapability::QuickConnectTimerDuration
-            }
-        };
-        self.commands.contains(&capability)
+        self.commands.contains(&command.required_capability())
     }
 }
 
@@ -358,6 +377,125 @@ impl std::fmt::Display for DeviceId {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn command_capabilities_cover_every_command_family() {
+        let temperature = AutomaticTemperatureF::try_from(105).unwrap();
+        let humidity = AutomaticHumidityPercent::try_from(40).unwrap();
+        let cases = [
+            (
+                DeviceCommand::LegacyPreset {
+                    preset: ControlPreset::TimerClear,
+                },
+                CommandCapability::LegacyPreset(ControlPreset::TimerClear),
+                DeviceBackend::LegacyBle,
+            ),
+            (
+                DeviceCommand::LegacyAutomaticTemperature {
+                    temperature_f: temperature,
+                },
+                CommandCapability::LegacyAutomaticTemperature,
+                DeviceBackend::LegacyBle,
+            ),
+            (
+                DeviceCommand::LegacyAutomaticHumidity {
+                    humidity_percent: humidity,
+                },
+                CommandCapability::LegacyAutomaticHumidity,
+                DeviceBackend::LegacyBle,
+            ),
+            (
+                DeviceCommand::LegacyTimer {
+                    minutes: LegacyTimerMinutes::try_from(1).unwrap(),
+                },
+                CommandCapability::LegacyTimer,
+                DeviceBackend::LegacyBle,
+            ),
+            (
+                DeviceCommand::QuickConnectMode {
+                    mode: QuickConnectMode::Automatic,
+                },
+                CommandCapability::QuickConnectMode,
+                DeviceBackend::QuickConnect,
+            ),
+            (
+                DeviceCommand::QuickConnectConditionalOff {
+                    only_if_current: QuickConnectMode::Automatic,
+                },
+                CommandCapability::QuickConnectMode,
+                DeviceBackend::QuickConnect,
+            ),
+            (
+                DeviceCommand::QuickConnectTargets {
+                    temperature_f: 105,
+                    humidity_percent: 40,
+                },
+                CommandCapability::QuickConnectTargets,
+                DeviceBackend::QuickConnect,
+            ),
+            (
+                DeviceCommand::QuickConnectAutomaticTemperature {
+                    temperature_f: temperature,
+                },
+                CommandCapability::QuickConnectTargets,
+                DeviceBackend::QuickConnect,
+            ),
+            (
+                DeviceCommand::QuickConnectAutomaticHumidity {
+                    humidity_percent: humidity,
+                },
+                CommandCapability::QuickConnectTargets,
+                DeviceBackend::QuickConnect,
+            ),
+            (
+                DeviceCommand::QuickConnectTimerDuration { minutes: 1 },
+                CommandCapability::QuickConnectTimerDuration,
+                DeviceBackend::QuickConnect,
+            ),
+        ];
+        cases
+            .into_iter()
+            .for_each(|(command, capability, backend)| {
+                assert_eq!(command.required_capability(), capability);
+                assert_eq!(capability.backend(), backend);
+                let specific = DeviceCapabilities {
+                    read_state: true,
+                    commands: vec![capability],
+                };
+                assert!(specific.supports(command), "{command:?}");
+                assert_eq!(
+                    DeviceCapabilities::legacy_ble().supports(command),
+                    backend == DeviceBackend::LegacyBle
+                );
+                assert_eq!(
+                    DeviceCapabilities::quickconnect_with_controls().supports(command),
+                    backend == DeviceBackend::QuickConnect
+                );
+                assert!(!DeviceCapabilities::quickconnect_read_only().supports(command));
+            });
+    }
+
+    #[test]
+    fn legacy_presets_require_the_matching_preset_capability() {
+        let presets = [
+            ControlPreset::Automatic105F30Percent,
+            ControlPreset::Automatic105_1F30_1Percent,
+            ControlPreset::TimerClear,
+            ControlPreset::TimerOneMinute,
+        ];
+        presets.into_iter().for_each(|enabled| {
+            let capabilities = DeviceCapabilities {
+                read_state: true,
+                commands: vec![CommandCapability::LegacyPreset(enabled)],
+            };
+            presets.into_iter().for_each(|requested| {
+                assert_eq!(
+                    capabilities.supports(DeviceCommand::LegacyPreset { preset: requested }),
+                    enabled == requested
+                );
+            });
+        });
+    }
 
     #[test]
     fn capabilities_keep_legacy_presets_separate_from_cloud_commands() {

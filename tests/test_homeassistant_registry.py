@@ -31,7 +31,14 @@ from homeassistant.components.mqtt import number as mqtt_number
 from homeassistant.components.mqtt import select as mqtt_select
 from homeassistant.components.mqtt import sensor as mqtt_sensor
 from homeassistant.components.mqtt import switch as mqtt_switch
+from homeassistant.components.sensor import SensorDeviceClass, SensorStateClass
 from homeassistant.config_entries import ConfigEntries, ConfigEntry, ConfigEntryState
+from homeassistant.const import (
+    PERCENTAGE,
+    EntityCategory,
+    UnitOfTemperature,
+    UnitOfTime,
+)
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryNotReady, HomeAssistantError
 from homeassistant.helpers import device_registry as dr
@@ -1162,6 +1169,139 @@ class RegistryTests(unittest.IsolatedAsyncioTestCase):
                 with self.assertRaises(UpdateFailed):
                     await coordinator._async_update_data()
                 client.fetch_state.assert_not_called()
+
+    async def test_reading_entity_presentation_matches_each_backend(self):
+        common = {
+            "temperature": (
+                "Ambient temperature",
+                ("temperature_f",),
+                UnitOfTemperature.FAHRENHEIT,
+                SensorDeviceClass.TEMPERATURE,
+            ),
+            "humidity": (
+                "Relative humidity",
+                ("humidity_percent",),
+                PERCENTAGE,
+                SensorDeviceClass.HUMIDITY,
+            ),
+            "mode": ("Controller mode", ("settings", "mode"), None, None),
+            "firmware_version": (
+                "Firmware version",
+                ("diagnostics", "firmware_version"),
+                None,
+                None,
+            ),
+        }
+        sensors = {
+            "legacy_ble": common
+            | {
+                "automatic_temperature_threshold": (
+                    "Automatic temperature threshold",
+                    ("settings", "automatic_temperature_tenths_f"),
+                    UnitOfTemperature.FAHRENHEIT,
+                    SensorDeviceClass.TEMPERATURE,
+                ),
+                "automatic_humidity_threshold": (
+                    "Automatic humidity threshold",
+                    ("settings", "automatic_humidity_tenths_percent"),
+                    PERCENTAGE,
+                    None,
+                ),
+                "timer_remaining": (
+                    "Timer remaining",
+                    ("settings", "timer_remaining_minutes"),
+                    UnitOfTime.MINUTES,
+                    None,
+                ),
+                "timer_original": (
+                    "Original timer setting",
+                    ("settings", "timer_original_minutes"),
+                    UnitOfTime.MINUTES,
+                    None,
+                ),
+            },
+            "quick_connect": common
+            | {
+                "signal_strength_raw": (
+                    "Signal strength (reported)",
+                    ("diagnostics", "signal_strength_raw"),
+                    None,
+                    None,
+                ),
+                "verified_raw": (
+                    "Verification (reported)",
+                    ("diagnostics", "verified_raw"),
+                    None,
+                    None,
+                ),
+            },
+        }
+        binaries = {
+            "legacy_ble": {
+                "controller_fan_flag": (
+                    "Controller fan flag",
+                    ("settings", "controller_fan_on"),
+                    "controller",
+                ),
+            },
+            "quick_connect": {
+                "running_estimate": (
+                    "Running estimate",
+                    ("estimated_running",),
+                    "inferred",
+                ),
+                "ota_in_progress": (
+                    "OTA in progress",
+                    ("diagnostics", "ota_in_progress"),
+                    "reported",
+                ),
+                "automatic_mode": ("Automatic mode", ("settings", "mode"), "reported"),
+                "timer_mode": ("Timer mode", ("settings", "mode"), "reported"),
+                "manual_mode": ("Manual mode", ("settings", "mode"), "reported"),
+                "humidity_monitor": (
+                    "Humidity monitoring",
+                    ("settings", "humidity_monitor"),
+                    "reported",
+                ),
+            },
+        }
+        entry = await self.entry()
+        for backend in sensors:
+            coordinator = coordinator_for(
+                self.hass, AsyncMock(), device(backend=backend), entry
+            )
+            coordinator.async_set_updated_data(
+                state_data(backend=backend, state=reported_state(backend))
+            )
+            for platform, expected in (
+                (gafctl_sensor, sensors[backend]),
+                (gafctl_binary, binaries[backend]),
+            ):
+                with self.subTest(backend=backend, platform=platform.__name__):
+                    entities = await self.platform_entities(platform, coordinator)
+                    selected = {entity._key: entity for entity in entities}
+                    self.assertEqual(set(selected), set(expected))
+                    for key, (name, path, *details) in expected.items():
+                        entity = selected[key]
+                        self.assertEqual(entity.name, name)
+                        self.assertEqual(entity._path, path)
+                        measurement = key in {"temperature", "humidity"}
+                        self.assertEqual(
+                            entity.entity_category,
+                            None if measurement else EntityCategory.DIAGNOSTIC,
+                        )
+                        if platform is gafctl_sensor:
+                            unit, device_class = details
+                            self.assertEqual(entity.native_unit_of_measurement, unit)
+                            self.assertEqual(entity.device_class, device_class)
+                            self.assertEqual(
+                                entity.state_class,
+                                SensorStateClass.MEASUREMENT if measurement else None,
+                            )
+                        else:
+                            self.assertEqual(
+                                entity.extra_state_attributes["provenance"], details[0]
+                            )
 
     async def test_reading_entities_preserve_reported_and_unknown_values(self):
         entry = await self.entry()

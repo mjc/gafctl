@@ -10,7 +10,6 @@ use gafctl_api::ProxyId;
 use gafctl_api::{
     DeviceBackend, DeviceCapabilities, DeviceCommand, DeviceDescriptor, DeviceId, EntitySource,
 };
-use gafctl_quickconnect::QuickConnectCommand;
 use identity::IdentityStore;
 pub(crate) use runtime::{DeviceRuntime, RefreshReceiver, RefreshReservation};
 use std::{
@@ -170,29 +169,9 @@ impl DeviceRegistry {
         &self,
         account_id: &str,
         id: &DeviceId,
-        command: QuickConnectCommand,
+        command: DeviceCommand,
     ) -> Result<(Arc<DeviceRuntime>, String), DeviceRegistryError> {
-        let descriptor = self
-            .devices
-            .get(id)
-            .map(|device| &device.descriptor)
-            .ok_or(DeviceRegistryError::UnknownDevice)?;
-        let capability = match command {
-            QuickConnectCommand::SetMode { .. } | QuickConnectCommand::ClearMode { .. } => {
-                gafctl_api::CommandCapability::QuickConnectMode
-            }
-            QuickConnectCommand::SetAutomaticTargets { .. } => {
-                gafctl_api::CommandCapability::QuickConnectTargets
-            }
-            QuickConnectCommand::SetTimerDuration { .. } => {
-                gafctl_api::CommandCapability::QuickConnectTimerDuration
-            }
-        };
-        if descriptor.backend != DeviceBackend::QuickConnect
-            || !descriptor.capabilities.commands.contains(&capability)
-        {
-            return Err(DeviceRegistryError::UnsupportedCommand);
-        }
+        self.dispatch(id, command)?;
         self.quickconnect_read_target(account_id, id)
     }
 
@@ -330,6 +309,10 @@ impl DeviceRegistry {
             .await;
     }
 
+    pub(crate) fn descriptor(&self, id: &DeviceId) -> Option<&DeviceDescriptor> {
+        self.devices.get(id).map(|device| &device.descriptor)
+    }
+
     pub fn descriptors(&self) -> impl Iterator<Item = &DeviceDescriptor> {
         self.devices.values().map(|device| &device.descriptor)
     }
@@ -369,29 +352,14 @@ impl DeviceRegistry {
         command: DeviceCommand,
     ) -> Result<DeviceBackend, DeviceRegistryError> {
         let descriptor = self
-            .devices
-            .get(id)
-            .map(|device| &device.descriptor)
+            .descriptor(id)
             .ok_or(DeviceRegistryError::UnknownDevice)?;
-        match (descriptor.backend, command) {
-            (
-                DeviceBackend::LegacyBle,
-                DeviceCommand::LegacyPreset { .. }
-                | DeviceCommand::LegacyAutomaticTemperature { .. }
-                | DeviceCommand::LegacyAutomaticHumidity { .. }
-                | DeviceCommand::LegacyTimer { .. },
-            ) if descriptor.capabilities.supports(command) => Ok(DeviceBackend::LegacyBle),
-            (
-                DeviceBackend::QuickConnect,
-                DeviceCommand::QuickConnectMode { .. }
-                | DeviceCommand::QuickConnectConditionalOff { .. }
-                | DeviceCommand::QuickConnectTargets { .. }
-                | DeviceCommand::QuickConnectAutomaticTemperature { .. }
-                | DeviceCommand::QuickConnectAutomaticHumidity { .. }
-                | DeviceCommand::QuickConnectTimerDuration { .. },
-            ) if descriptor.capabilities.supports(command) => Ok(DeviceBackend::QuickConnect),
-            _ => Err(DeviceRegistryError::UnsupportedCommand),
+        if descriptor.backend != command.required_capability().backend()
+            || !descriptor.capabilities.supports(command)
+        {
+            return Err(DeviceRegistryError::UnsupportedCommand);
         }
+        Ok(descriptor.backend)
     }
 
     fn register(&mut self, mut descriptor: DeviceDescriptor) -> Arc<DeviceRuntime> {
@@ -434,6 +402,187 @@ mod tests {
     use super::*;
     use gafctl_api::{DeviceSettings, DeviceState, QuickConnectModeStatus, StateProvenance};
     use std::fs;
+
+    fn command_families() -> impl Iterator<Item = (DeviceCommand, DeviceBackend)> {
+        [
+            (
+                r#"{"kind":"legacy_preset","preset":"timer_clear"}"#,
+                DeviceBackend::LegacyBle,
+            ),
+            (
+                r#"{"kind":"legacy_automatic_temperature","temperature_f":105}"#,
+                DeviceBackend::LegacyBle,
+            ),
+            (
+                r#"{"kind":"legacy_automatic_humidity","humidity_percent":40}"#,
+                DeviceBackend::LegacyBle,
+            ),
+            (
+                r#"{"kind":"legacy_timer","minutes":1}"#,
+                DeviceBackend::LegacyBle,
+            ),
+            (
+                r#"{"kind":"quick_connect_mode","mode":"automatic"}"#,
+                DeviceBackend::QuickConnect,
+            ),
+            (
+                r#"{"kind":"quick_connect_conditional_off","only_if_current":"automatic"}"#,
+                DeviceBackend::QuickConnect,
+            ),
+            (
+                r#"{"kind":"quick_connect_targets","temperature_f":105,"humidity_percent":40}"#,
+                DeviceBackend::QuickConnect,
+            ),
+            (
+                r#"{"kind":"quick_connect_automatic_temperature","temperature_f":105}"#,
+                DeviceBackend::QuickConnect,
+            ),
+            (
+                r#"{"kind":"quick_connect_automatic_humidity","humidity_percent":40}"#,
+                DeviceBackend::QuickConnect,
+            ),
+            (
+                r#"{"kind":"quick_connect_timer_duration","minutes":1}"#,
+                DeviceBackend::QuickConnect,
+            ),
+        ]
+        .into_iter()
+        .map(|(payload, backend)| (serde_json::from_str(payload).unwrap(), backend))
+    }
+
+    #[test]
+    fn dispatch_checks_command_family_and_enabled_capabilities() {
+        let path = registry_path();
+        let mut registry = DeviceRegistry::load(&path).unwrap();
+        registry.register_configured_ble();
+        let ble = DeviceId::configured_ble();
+        let cloud = registry
+            .reconcile_quickconnect("account-a", &[cloud_device("provider-a", "Fan")])
+            .unwrap()
+            .pop()
+            .unwrap();
+        command_families().for_each(|(command, backend)| {
+            assert_eq!(
+                registry.dispatch(&ble, command).ok(),
+                (backend == DeviceBackend::LegacyBle).then_some(backend)
+            );
+            assert!(registry.dispatch(&cloud, command).is_err());
+        });
+        registry.set_quickconnect_writes_enabled(true);
+        command_families().for_each(|(command, backend)| {
+            assert_eq!(
+                registry.dispatch(&cloud, command).ok(),
+                (backend == DeviceBackend::QuickConnect).then_some(backend)
+            );
+        });
+
+        registry
+            .devices
+            .get_mut(&ble)
+            .unwrap()
+            .descriptor
+            .capabilities = DeviceCapabilities::quickconnect_with_controls();
+        registry
+            .devices
+            .get_mut(&cloud)
+            .unwrap()
+            .descriptor
+            .capabilities = DeviceCapabilities::legacy_ble();
+        command_families().for_each(|(command, _)| {
+            assert!(registry.dispatch(&ble, command).is_err(), "{command:?}");
+            assert!(registry.dispatch(&cloud, command).is_err(), "{command:?}");
+        });
+        fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn cloud_control_targets_require_account_read_and_write_permissions() {
+        let path = registry_path();
+        let mut registry = DeviceRegistry::load(&path).unwrap();
+        let id = registry
+            .reconcile_quickconnect("account-a", &[cloud_device("provider-a", "Fan")])
+            .unwrap()
+            .pop()
+            .unwrap();
+        let commands = command_families()
+            .filter(|(_, backend)| *backend == DeviceBackend::QuickConnect)
+            .map(|(command, _)| command)
+            .collect::<Vec<_>>();
+        commands.iter().copied().for_each(|command| {
+            assert!(
+                registry
+                    .quickconnect_control_target("account-a", &id, command)
+                    .is_err_and(|error| {
+                        std::mem::discriminant(&error)
+                            == std::mem::discriminant(&DeviceRegistryError::UnsupportedCommand)
+                    })
+            );
+        });
+        registry.set_quickconnect_writes_enabled(true);
+        commands.iter().copied().for_each(|command| {
+            let (runtime, provider) = registry
+                .quickconnect_control_target("account-a", &id, command)
+                .unwrap();
+            assert!(Arc::ptr_eq(&runtime, &registry.runtime(&id).unwrap()));
+            assert_eq!(provider, "provider-a");
+            assert!(
+                registry
+                    .quickconnect_control_target("account-b", &id, command)
+                    .is_err_and(|error| {
+                        std::mem::discriminant(&error)
+                            == std::mem::discriminant(&DeviceRegistryError::UnknownDevice)
+                    })
+            );
+        });
+        registry
+            .devices
+            .get_mut(&id)
+            .unwrap()
+            .descriptor
+            .capabilities
+            .read_state = false;
+        commands.iter().copied().for_each(|command| {
+            assert!(
+                registry
+                    .quickconnect_control_target("account-a", &id, command)
+                    .is_err_and(|error| {
+                        std::mem::discriminant(&error)
+                            == std::mem::discriminant(&DeviceRegistryError::UnsupportedCommand)
+                    })
+            );
+        });
+        fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn descriptors_resolve_registered_ids_and_follow_renames() {
+        let path = registry_path();
+        let mut registry = DeviceRegistry::load(&path).unwrap();
+        registry.register_configured_ble();
+        let id = registry
+            .reconcile_quickconnect("account-a", &[cloud_device("provider-a", "Original")])
+            .unwrap()
+            .pop()
+            .unwrap();
+        assert_eq!(
+            registry
+                .descriptor(&DeviceId::configured_ble())
+                .unwrap()
+                .backend,
+            DeviceBackend::LegacyBle
+        );
+        assert_eq!(registry.descriptor(&id).unwrap().name, "Original");
+        assert!(
+            registry
+                .descriptor(&DeviceId::parse("missing".to_owned()).unwrap())
+                .is_none()
+        );
+        registry
+            .reconcile_quickconnect("account-a", &[cloud_device("provider-a", "Renamed")])
+            .unwrap();
+        assert_eq!(registry.descriptor(&id).unwrap().name, "Renamed");
+        fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    }
 
     #[tokio::test]
     async fn reregistering_a_device_updates_its_descriptor_and_preserves_its_runtime() {

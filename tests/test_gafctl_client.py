@@ -28,6 +28,51 @@ COMMAND = {"kind": "legacy_preset", "preset": "timer_clear"}
 
 
 class FixtureTests(unittest.TestCase):
+    def test_reading_entity_sets_match_each_backend_and_http_ownership(self):
+        common = {"temperature", "humidity", "mode", "firmware_version"}
+        cases = {
+            "legacy_ble": {
+                "sensor": common
+                | {
+                    "automatic_temperature_threshold",
+                    "automatic_humidity_threshold",
+                    "timer_remaining",
+                    "timer_original",
+                },
+                "binary_sensor": {"controller_fan_flag"},
+                "button": {"refresh"},
+            },
+            "quick_connect": {
+                "sensor": common | {"signal_strength_raw", "verified_raw"},
+                "binary_sensor": {
+                    "running_estimate",
+                    "ota_in_progress",
+                    "humidity_monitor",
+                    "automatic_mode",
+                    "timer_mode",
+                    "manual_mode",
+                },
+                "button": {"refresh"},
+            },
+        }
+        for backend, expected in cases.items():
+            with self.subTest(backend=backend):
+                self.assertEqual(
+                    CONTROLS.entity_keys(device(backend=backend, commands=[])), expected
+                )
+                self.assertEqual(
+                    CONTROLS.entity_keys(
+                        device(backend=backend, commands=[], read_state=False)
+                    ),
+                    {},
+                )
+                self.assertEqual(
+                    CONTROLS.entity_keys(
+                        device(backend=backend, commands=[], owner="mqtt")
+                    ),
+                    {},
+                )
+
     def test_reported_states_have_independent_nested_records(self):
         for backend in ("legacy_ble", "quick_connect"):
             with self.subTest(backend=backend):
