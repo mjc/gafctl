@@ -145,6 +145,12 @@ account identity, registry, and readback policy. Its read and control operations
 share that configuration. State publication serializes snapshot collection and
 replacement and rejects snapshots with obsolete ownership descriptors.
 
+Each registry entry owns its descriptor and runtime. Re-registration updates
+the descriptor while retaining state, locks, and generation tracking.
+Control history stores command identities and outcomes; the service constructs
+correlated responses for callers. MQTT intake owns admission and reply tasks
+under one lock, which is released before shutdown awaits those tasks.
+
 Shared legacy snapshot normalization lives in `src/legacy_projection.rs`.
 Direct BLE output retains partial readings and field errors; the service
 accepts complete decoded snapshots before publishing current state. Each

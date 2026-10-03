@@ -1,4 +1,7 @@
-use std::{sync::Arc, time::Duration};
+use std::{
+    sync::{Arc, Mutex},
+    time::Duration,
+};
 
 use futures_util::{StreamExt, stream};
 use gafctl_api::{CommandId, DeviceControlV2Request, DeviceControlV2Response};
@@ -68,13 +71,19 @@ impl MqttRequest {
 
 fn parse_request(kind: RequestKind, payload: &[u8]) -> Option<MqttRequest> {
     if payload.len() > MAX_CONTROL_REQUEST_BYTES {
+        tracing::warn!(?kind, "rejected oversized MQTT request");
         return None;
     }
-    match kind {
-        RequestKind::Control => parse_control_request(payload).map(MqttRequest::Control),
-        RequestKind::Refresh => serde_json::from_slice(payload)
-            .ok()
-            .map(MqttRequest::Refresh),
+    let result = match kind {
+        RequestKind::Control => serde_json::from_slice(payload).map(MqttRequest::Control),
+        RequestKind::Refresh => serde_json::from_slice(payload).map(MqttRequest::Refresh),
+    };
+    match result {
+        Ok(request) => Some(request),
+        Err(error) => {
+            tracing::warn!(?kind, %error, "rejected malformed MQTT request");
+            None
+        }
     }
 }
 
@@ -113,28 +122,37 @@ pub(crate) struct MqttDeviceWork {
 /// Closing intake drops the sole channel sender while preserving queued work.
 #[derive(Clone)]
 pub(crate) struct MqttRequestIntake {
-    sender: Arc<std::sync::Mutex<Option<mpsc::Sender<MqttDeviceWork>>>>,
-    replies: Arc<std::sync::Mutex<Vec<tokio::task::JoinHandle<()>>>>,
+    state: Arc<Mutex<IntakeState>>,
+}
+
+struct IntakeState {
+    sender: Option<mpsc::Sender<MqttDeviceWork>>,
+    replies: Vec<tokio::task::JoinHandle<()>>,
 }
 
 impl MqttRequestIntake {
     pub(crate) fn new(sender: mpsc::Sender<MqttDeviceWork>) -> Self {
         Self {
-            sender: Arc::new(std::sync::Mutex::new(Some(sender))),
-            replies: Arc::default(),
+            state: Arc::new(Mutex::new(IntakeState {
+                sender: Some(sender),
+                replies: Vec::new(),
+            })),
         }
     }
 
     pub(crate) fn close(&self) {
-        self.sender
+        self.state
             .lock()
             .expect("MQTT intake lock poisoned")
+            .sender
             .take();
     }
 
     pub(crate) async fn drain_replies(&self, deadline: tokio::time::Instant) {
-        let replies =
-            std::mem::take(&mut *self.replies.lock().expect("MQTT replies lock poisoned"));
+        let replies = {
+            let mut state = self.state.lock().expect("MQTT intake lock poisoned");
+            std::mem::take(&mut state.replies)
+        };
         stream::iter(replies)
             .for_each(|mut reply| async move {
                 if tokio::time::timeout_at(deadline, &mut reply).await.is_err() {
@@ -151,17 +169,16 @@ impl MqttRequestIntake {
         work: MqttDeviceWork,
         spawn_reply: impl FnOnce() -> tokio::task::JoinHandle<()>,
     ) -> Result<(), mpsc::error::TrySendError<MqttDeviceWork>> {
-        let intake = self.sender.lock().expect("MQTT intake lock poisoned");
-        let Some(sender) = intake.as_ref() else {
+        let mut state = self.state.lock().expect("MQTT intake lock poisoned");
+        let Some(sender) = state.sender.as_ref() else {
             return Err(mpsc::error::TrySendError::Closed(work));
         };
         sender.try_send(work)?;
         // Keep admission locked until the accepted request's publisher is owned.
         // close() therefore fences both work admission and reply registration.
         let reply = spawn_reply();
-        let mut replies = self.replies.lock().expect("MQTT replies lock poisoned");
-        replies.retain(|task| !task.is_finished());
-        replies.push(reply);
+        state.replies.retain(|task| !task.is_finished());
+        state.replies.push(reply);
         Ok(())
     }
 
@@ -170,24 +187,10 @@ impl MqttRequestIntake {
         &self,
         work: MqttDeviceWork,
     ) -> Result<(), mpsc::error::TrySendError<MqttDeviceWork>> {
-        let intake = self.sender.lock().expect("MQTT intake lock poisoned");
-        match intake.as_ref() {
+        let state = self.state.lock().expect("MQTT intake lock poisoned");
+        match state.sender.as_ref() {
             Some(sender) => sender.try_send(work),
             None => Err(mpsc::error::TrySendError::Closed(work)),
-        }
-    }
-}
-
-fn parse_control_request(payload: &[u8]) -> Option<DeviceControlV2Request> {
-    if payload.len() > MAX_CONTROL_REQUEST_BYTES {
-        tracing::warn!("rejected oversized MQTT control request");
-        return None;
-    }
-    match serde_json::from_slice(payload) {
-        Ok(request) => Some(request),
-        Err(error) => {
-            tracing::warn!(%error, "rejected malformed MQTT control request");
-            None
         }
     }
 }
@@ -340,13 +343,74 @@ mod tests {
     }
 
     #[test]
+    fn mqtt_request_parser_enforces_payload_boundary_for_both_kinds() {
+        [
+            (RequestKind::Control, request("bounded-request")),
+            (
+                RequestKind::Refresh,
+                serde_json::to_vec(&json!({
+                    "request_id": "bounded-request", "issued_at_unix_ms": 1
+                }))
+                .unwrap(),
+            ),
+        ]
+        .into_iter()
+        .for_each(|(kind, mut payload)| {
+            let issued_at = serde_json::from_slice::<Value>(&payload).unwrap()["issued_at_unix_ms"]
+                .as_u64()
+                .unwrap();
+            payload.resize(MAX_CONTROL_REQUEST_BYTES, b' ');
+            let parsed = parse_request(kind, &payload).unwrap();
+            assert_eq!(parsed.kind(), kind);
+            assert_eq!(parsed.request_id().as_str(), "bounded-request");
+            assert_eq!(parsed.issued_at_unix_ms(), issued_at);
+            payload.push(b' ');
+            assert!(parse_request(kind, &payload).is_none());
+        });
+    }
+
+    #[test]
+    fn mqtt_request_parser_rejects_malformed_and_unknown_fields_for_both_kinds() {
+        [
+            (RequestKind::Control, request("strict-request")),
+            (
+                RequestKind::Refresh,
+                serde_json::to_vec(&json!({
+                    "request_id": "strict-request", "issued_at_unix_ms": 1
+                }))
+                .unwrap(),
+            ),
+        ]
+        .into_iter()
+        .for_each(|(kind, payload)| {
+            assert!(parse_request(kind, b"not json").is_none());
+            let valid: Value = serde_json::from_slice(&payload).unwrap();
+            let mut unknown = valid.clone();
+            unknown["unknown_field"] = json!(true);
+            assert!(parse_request(kind, &serde_json::to_vec(&unknown).unwrap()).is_none());
+            let mut missing = valid.clone();
+            missing.as_object_mut().unwrap().remove("issued_at_unix_ms");
+            assert!(parse_request(kind, &serde_json::to_vec(&missing).unwrap()).is_none());
+            let mut invalid_id = valid;
+            invalid_id["request_id"] = json!("invalid id");
+            assert!(parse_request(kind, &serde_json::to_vec(&invalid_id).unwrap()).is_none());
+        });
+    }
+
+    #[test]
     fn controls_require_bounded_typed_correlated_requests() {
-        let parsed = parse_control_request(&request("command-1")).unwrap();
-        assert_eq!(parsed.request_id.as_str(), "command-1");
+        let parsed = parse_request(RequestKind::Control, &request("command-1")).unwrap();
+        assert_eq!(parsed.request_id().as_str(), "command-1");
         for payload in [b"not json".as_slice(), br#"{"request_id":"invalid id","issued_at_unix_ms":1,"command":{"kind":"quick_connect_mode","mode":"automatic"}}"#.as_slice(), br#"{"request_id":"id","command":{"kind":"quick_connect_mode","mode":"automatic"}}"#.as_slice(), br#"{"request_id":"id","issued_at_unix_ms":1,"preset":"timer_clear"}"#.as_slice()] {
-            assert!(parse_control_request(payload).is_none());
+            assert!(parse_request(RequestKind::Control, payload).is_none());
         }
-        assert!(parse_control_request(&vec![b' '; MAX_CONTROL_REQUEST_BYTES + 1]).is_none());
+        assert!(
+            parse_request(
+                RequestKind::Control,
+                &vec![b' '; MAX_CONTROL_REQUEST_BYTES + 1]
+            )
+            .is_none()
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -357,9 +421,7 @@ mod tests {
         let (reply, _response) = oneshot::channel();
         let work = MqttDeviceWork {
             device_id: DeviceId::configured_ble(),
-            request: MqttRequest::Control(
-                parse_control_request(&request("atomic-admission")).unwrap(),
-            ),
+            request: parse_request(RequestKind::Control, &request("atomic-admission")).unwrap(),
             reply,
         };
         let (entered, entering) = oneshot::channel();
@@ -380,7 +442,7 @@ mod tests {
         });
         entering.await.unwrap();
         assert!(
-            intake.sender.try_lock().is_err(),
+            intake.state.try_lock().is_err(),
             "admission must hold the closure lock through registration"
         );
         let closing = intake.clone();

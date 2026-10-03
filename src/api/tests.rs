@@ -420,6 +420,9 @@ async fn v2_control_replay_returns_the_same_result_and_rejects_command_reuse() {
     )
     .await;
     let first_body = first.into_body().collect().await.unwrap().to_bytes();
+    let first_response: serde_json::Value = serde_json::from_slice(&first_body).unwrap();
+    assert_eq!(first_response["request_id"], "replay-id");
+    assert_eq!(first_response["status"], "unsupported_command");
     let replay = send(
         app.clone(),
         request(serde_json::json!({
@@ -441,6 +444,7 @@ async fn v2_control_replay_returns_the_same_result_and_rejects_command_reuse() {
     let bytes = reused.into_body().collect().await.unwrap().to_bytes();
     let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
     assert_eq!(body["status"], "request_id_reused");
+    assert_eq!(body["request_id"], "replay-id");
 }
 
 #[tokio::test]

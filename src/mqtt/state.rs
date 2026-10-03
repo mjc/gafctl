@@ -153,7 +153,7 @@ mod tests {
     };
     use super::*;
     use gafctl_api::{DeviceDescriptor, EntitySource, ProxyId};
-    use rumqttc::v5::mqttbytes::{QoS, v5::Filter};
+    use rumqttc::v5::mqttbytes::QoS;
     use serde_json::Value;
     use std::time::Duration;
     use tokio::time::{sleep, timeout};
@@ -229,14 +229,10 @@ mod tests {
         assert_eq!(online.payload.as_ref(), b"online");
         let discovery_topic = topics.discovery(&device.id, "sensor", "temperature");
         observer
-            .subscribe_many([Filter {
-                preserve_retain: true,
-                ..Filter::new(&discovery_topic, QoS::AtLeastOnce)
-            }])
+            .subscribe(&discovery_topic, QoS::AtLeastOnce)
             .await
             .unwrap();
         let discovered = receive_topic(&mut received, &discovery_topic).await;
-        assert!(discovered.retain);
         let config: Value = serde_json::from_slice(&discovered.payload).unwrap();
         assert_eq!(
             config["device"]["identifiers"][0],
@@ -247,7 +243,28 @@ mod tests {
             .await
             .unwrap();
         let state = receive_topic(&mut received, &topics.device(&device.id, "state")).await;
-        assert!(state.retain);
+        // Receiving state fences the initial discovery and state publications.
+        // A separate ordinary subscriber must now receive both from broker storage.
+        let (late_observer, mut replayed) = observed_client("late-observer", broker.port);
+        late_observer
+            .subscribe(&discovery_topic, QoS::AtLeastOnce)
+            .await
+            .unwrap();
+        let retained_discovery = receive_topic(&mut replayed, &discovery_topic).await;
+        assert!(retained_discovery.retain);
+        assert_eq!(retained_discovery.payload, discovered.payload);
+        late_observer
+            .subscribe(topics.device(&device.id, "state"), QoS::AtLeastOnce)
+            .await
+            .unwrap();
+        let retained_state =
+            receive_topic(&mut replayed, &topics.device(&device.id, "state")).await;
+        assert!(retained_state.retain);
+        assert_eq!(retained_state.payload, state.payload);
+        assert_eq!(
+            serde_json::from_slice::<DeviceStateV2Response>(&retained_state.payload).unwrap(),
+            snapshot(device.clone()).publications[0]
+        );
         let mut changed = device;
         changed.state_source = EntitySource::Http;
         changed.command_source = EntitySource::Http;

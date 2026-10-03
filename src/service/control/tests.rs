@@ -10,27 +10,53 @@ fn reservation_is_wait(reservation: V2ControlReservation) -> bool {
 
 fn reservation_is_reused(reservation: V2ControlReservation) -> bool {
     match reservation {
-        V2ControlReservation::Completed(response) => {
-            response.response.status.as_str() == "request_id_reused"
-        }
+        V2ControlReservation::Completed(response) => response.as_str() == "request_id_reused",
         V2ControlReservation::Execute(_) | V2ControlReservation::Wait(_) => false,
     }
 }
 
 fn reservation_has_status(reservation: V2ControlReservation, status: &str) -> bool {
     match reservation {
-        V2ControlReservation::Completed(response) => response.response.status == status,
+        V2ControlReservation::Completed(response) => response == status,
         V2ControlReservation::Execute(_) | V2ControlReservation::Wait(_) => false,
     }
 }
 
 fn reservation_is_execute(
     reservation: V2ControlReservation,
-) -> Option<tokio::sync::watch::Sender<Option<CachedV2ControlResult>>> {
+) -> Option<tokio::sync::watch::Sender<Option<V2ControlStatus>>> {
     match reservation {
         V2ControlReservation::Execute(sender) => Some(sender),
         V2ControlReservation::Wait(_) | V2ControlReservation::Completed(_) => None,
     }
+}
+
+#[test]
+fn control_replay_keeps_only_the_latest_completed_requests() {
+    let mut history = V2DeviceControlHistory::default();
+    let command = DeviceCommand::LegacyPreset {
+        preset: ControlPreset::TimerClear,
+    };
+    (0..=V2_REPLAY_CAPACITY).for_each(|index| {
+        let id = CommandId::parse(&format!("completed-{index}")).unwrap();
+        history.remember(id, command, V2ControlStatus::Unconfirmed);
+    });
+    assert_eq!(history.completed.len(), V2_REPLAY_CAPACITY);
+    assert!(reservation_has_status(
+        history.reserve(&CommandId::parse("completed-1").unwrap(), command),
+        "unconfirmed"
+    ));
+    assert!(reservation_has_status(
+        history.reserve(
+            &CommandId::parse(&format!("completed-{V2_REPLAY_CAPACITY}")).unwrap(),
+            command,
+        ),
+        "unconfirmed"
+    ));
+    assert!(
+        reservation_is_execute(history.reserve(&CommandId::parse("completed-0").unwrap(), command))
+            .is_some()
+    );
 }
 
 #[test]
@@ -42,20 +68,18 @@ fn v2_control_admission_bounds_distinct_requests_and_keeps_duplicate_joining() {
     let senders = (0..8)
         .map(|index| {
             let id = CommandId::parse(&format!("pending-{index}")).unwrap();
-            reservation_is_execute(reserve_v2_control(&mut history, &id, command)).unwrap()
+            reservation_is_execute(history.reserve(&id, command)).unwrap()
         })
         .collect::<Vec<_>>();
     let extra = CommandId::parse("excess-request").unwrap();
     assert!(reservation_has_status(
-        reserve_v2_control(&mut history, &extra, command),
+        history.reserve(&extra, command),
         "busy"
     ));
     assert_eq!(history.in_flight.len(), 8);
-    assert!(reservation_is_wait(reserve_v2_control(
-        &mut history,
-        &CommandId::parse("pending-0").unwrap(),
-        command
-    )));
+    assert!(reservation_is_wait(
+        history.reserve(&CommandId::parse("pending-0").unwrap(), command)
+    ));
     drop(senders);
 }
 
@@ -68,24 +92,19 @@ fn abandoned_control_reservations_release_capacity_without_replaying_writes() {
     let senders = (0..V2_IN_FLIGHT_CAPACITY)
         .map(|index| {
             let id = CommandId::parse(&format!("abandoned-{index}")).unwrap();
-            reservation_is_execute(reserve_v2_control(&mut history, &id, command)).unwrap()
+            reservation_is_execute(history.reserve(&id, command)).unwrap()
         })
         .collect::<Vec<_>>();
     drop(senders);
     let new_id = CommandId::parse("new-after-abandoned").unwrap();
-    let sender = reservation_is_execute(reserve_v2_control(&mut history, &new_id, command));
+    let sender = reservation_is_execute(history.reserve(&new_id, command));
     assert!(sender.is_some());
     assert_eq!(history.in_flight.len(), 1);
     assert!(reservation_has_status(
-        reserve_v2_control(
-            &mut history,
-            &CommandId::parse("abandoned-0").unwrap(),
-            command
-        ),
+        history.reserve(&CommandId::parse("abandoned-0").unwrap(), command),
         "control_failed"
     ));
-    assert!(reservation_is_reused(reserve_v2_control(
-        &mut history,
+    assert!(reservation_is_reused(history.reserve(
         &CommandId::parse("abandoned-0").unwrap(),
         DeviceCommand::LegacyPreset {
             preset: ControlPreset::TimerOneMinute
@@ -102,24 +121,18 @@ fn control_admission_prunes_only_abandoned_reservations() {
     let mut senders = (0..V2_IN_FLIGHT_CAPACITY)
         .map(|index| {
             let id = CommandId::parse(&format!("mixed-{index}")).unwrap();
-            reservation_is_execute(reserve_v2_control(&mut history, &id, command)).unwrap()
+            reservation_is_execute(history.reserve(&id, command)).unwrap()
         })
         .collect::<Vec<_>>();
     drop(senders.pop());
     let new_id = CommandId::parse("replacement").unwrap();
-    let replacement = reservation_is_execute(reserve_v2_control(&mut history, &new_id, command));
+    let replacement = reservation_is_execute(history.reserve(&new_id, command));
     assert!(replacement.is_some());
-    assert!(reservation_is_wait(reserve_v2_control(
-        &mut history,
-        &CommandId::parse("mixed-0").unwrap(),
-        command
-    )));
+    assert!(reservation_is_wait(
+        history.reserve(&CommandId::parse("mixed-0").unwrap(), command)
+    ));
     assert!(reservation_has_status(
-        reserve_v2_control(
-            &mut history,
-            &CommandId::parse("still-full").unwrap(),
-            command
-        ),
+        history.reserve(&CommandId::parse("still-full").unwrap(), command),
         "busy"
     ));
 }
@@ -135,17 +148,17 @@ async fn completed_execution_frees_capacity_for_a_previously_busy_id() {
         (0..V2_IN_FLIGHT_CAPACITY)
             .map(|index| {
                 let id = CommandId::parse(&format!("complete-{index}")).unwrap();
-                reservation_is_execute(reserve_v2_control(&mut history, &id, command)).unwrap()
+                reservation_is_execute(history.reserve(&id, command)).unwrap()
             })
             .collect::<Vec<_>>()
     };
     let extra = CommandId::parse("try-after-completion").unwrap();
     assert!(reservation_has_status(
-        reserve_v2_control(&mut *history.lock().await, &extra, command),
+        history.lock().await.reserve(&extra, command),
         "busy"
     ));
     let id = CommandId::parse(&format!("complete-{}", V2_IN_FLIGHT_CAPACITY - 1)).unwrap();
-    let response = cached_v2_result(id.clone(), V2ControlStatus::Confirmed);
+    let response = V2ControlStatus::Confirmed;
     spawn_v2_control_execution(
         Arc::clone(&history),
         id.clone(),
@@ -156,10 +169,10 @@ async fn completed_execution_frees_capacity_for_a_previously_busy_id() {
     .await
     .unwrap();
     let mut history = history.lock().await;
-    let sender = reservation_is_execute(reserve_v2_control(&mut history, &extra, command));
+    let sender = reservation_is_execute(history.reserve(&extra, command));
     assert!(sender.is_some());
     assert!(reservation_has_status(
-        reserve_v2_control(&mut history, &id, command),
+        history.reserve(&id, command),
         "confirmed"
     ));
 }
@@ -172,30 +185,22 @@ fn v2_control_reservations_deduplicate_without_serializing_distinct_commands() {
     let command = DeviceCommand::QuickConnectMode {
         mode: gafctl_api::QuickConnectMode::Automatic,
     };
-    let sender = reservation_is_execute(reserve_v2_control(&mut history, &request_id, command));
+    let sender = reservation_is_execute(history.reserve(&request_id, command));
     assert!(sender.is_some());
     let Some(sender) = sender else {
         return;
     };
-    assert!(reservation_is_wait(reserve_v2_control(
-        &mut history,
-        &request_id,
-        command
-    ),));
-    assert!(reservation_is_reused(reserve_v2_control(
-        &mut history,
+    assert!(reservation_is_wait(history.reserve(&request_id, command),));
+    assert!(reservation_is_reused(history.reserve(
         &request_id,
         DeviceCommand::LegacyPreset {
             preset: ControlPreset::TimerClear
         }
     )));
-    assert!(
-        reservation_is_execute(reserve_v2_control(&mut history, &other_request_id, command))
-            .is_some()
-    );
+    assert!(reservation_is_execute(history.reserve(&other_request_id, command)).is_some());
     drop(sender);
     assert!(reservation_has_status(
-        reserve_v2_control(&mut history, &request_id, command),
+        history.reserve(&request_id, command),
         "control_failed"
     ));
 }
@@ -219,19 +224,9 @@ async fn v2_replay_reservations_are_scoped_to_each_local_device_id() {
             Arc::new(tokio::sync::Mutex::new(V2DeviceControlHistory::default()))
         }));
     let mut first_history = first.lock().await;
-    assert!(
-        reservation_is_execute(reserve_v2_control(&mut first_history, &request_id, command,))
-            .is_some()
-    );
+    assert!(reservation_is_execute(first_history.reserve(&request_id, command)).is_some());
     let mut second_history = second.lock().await;
-    assert!(
-        reservation_is_execute(reserve_v2_control(
-            &mut second_history,
-            &request_id,
-            command,
-        ))
-        .is_some()
-    );
+    assert!(reservation_is_execute(second_history.reserve(&request_id, command)).is_some());
 }
 
 #[tokio::test]
@@ -241,7 +236,7 @@ async fn v2_control_execution_survives_waiter_cancellation_and_records_result() 
         preset: ControlPreset::TimerClear,
     };
     let history = Arc::new(tokio::sync::Mutex::new(V2DeviceControlHistory::default()));
-    let reservation = reserve_v2_control(&mut *history.lock().await, &request_id, command);
+    let reservation = history.lock().await.reserve(&request_id, command);
     let sender = reservation_is_execute(reservation);
     assert!(sender.is_some());
     let Some(sender) = sender else {
@@ -251,12 +246,7 @@ async fn v2_control_execution_survives_waiter_cancellation_and_records_result() 
     drop(cancelled_waiter);
     let (started_sender, started_receiver) = tokio::sync::oneshot::channel();
     let (finish_sender, finish_receiver) = tokio::sync::oneshot::channel();
-    let response = CachedV2ControlResult {
-        response: DeviceControlV2Response {
-            request_id: request_id.as_str().to_owned(),
-            status: "unconfirmed".into(),
-        },
-    };
+    let response = V2ControlStatus::Unconfirmed;
     let execution = spawn_v2_control_execution(
         Arc::clone(&history),
         request_id.clone(),
@@ -274,8 +264,5 @@ async fn v2_control_execution_survives_waiter_cancellation_and_records_result() 
     assert!(execution.await.is_ok());
     let history = history.lock().await;
     assert!(!history.in_flight.contains_key(&request_id));
-    assert_eq!(
-        history.completed.front().unwrap().2.response.status,
-        "unconfirmed"
-    );
+    assert_eq!(history.completed.front().unwrap().2, "unconfirmed");
 }

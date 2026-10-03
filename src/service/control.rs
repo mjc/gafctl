@@ -12,11 +12,6 @@ use std::{
     time::{Duration, SystemTime},
 };
 
-#[derive(Clone)]
-struct CachedV2ControlResult {
-    response: DeviceControlV2Response,
-}
-
 pub(super) const V2_CONTROL_MAX_AGE: Duration = Duration::from_secs(30);
 
 const V2_CONTROL_MAX_FUTURE_SKEW: Duration = Duration::from_secs(5);
@@ -32,20 +27,20 @@ pub(super) struct RecentV2ControlResults(
 
 #[derive(Default)]
 struct V2DeviceControlHistory {
-    completed: VecDeque<(CommandId, DeviceCommand, CachedV2ControlResult)>,
+    completed: VecDeque<(CommandId, DeviceCommand, V2ControlStatus)>,
     in_flight: HashMap<
         CommandId,
         (
             DeviceCommand,
-            tokio::sync::watch::Receiver<Option<CachedV2ControlResult>>,
+            tokio::sync::watch::Receiver<Option<V2ControlStatus>>,
         ),
     >,
 }
 
 enum V2ControlReservation {
-    Execute(tokio::sync::watch::Sender<Option<CachedV2ControlResult>>),
-    Wait(tokio::sync::watch::Receiver<Option<CachedV2ControlResult>>),
-    Completed(CachedV2ControlResult),
+    Execute(tokio::sync::watch::Sender<Option<V2ControlStatus>>),
+    Wait(tokio::sync::watch::Receiver<Option<V2ControlStatus>>),
+    Completed(V2ControlStatus),
 }
 
 impl DeviceService {
@@ -54,23 +49,34 @@ impl DeviceService {
         id: DeviceId,
         request: DeviceControlV2Request,
     ) -> DeviceControlV2Response {
-        let state = self;
+        let request_id = request.request_id.clone();
+        let status = self.control_status(id, request).await;
+        DeviceControlV2Response {
+            request_id: request_id.as_str().to_owned(),
+            status,
+        }
+    }
+
+    async fn control_status(
+        &self,
+        id: DeviceId,
+        request: DeviceControlV2Request,
+    ) -> V2ControlStatus {
         if !v2_request_is_fresh(request.issued_at_unix_ms) {
-            return cached_v2_result(request.request_id, V2ControlStatus::StaleRequest).response;
+            return V2ControlStatus::StaleRequest;
         }
 
-        let registered = state
+        let registered = self
             .registry
             .read()
             .await
             .descriptors()
             .any(|descriptor| descriptor.id == id);
         if !registered {
-            return cached_v2_result(request.request_id, V2ControlStatus::UnknownDevice).response;
+            return V2ControlStatus::UnknownDevice;
         }
         let history = Arc::clone(
-            state
-                .v2_control_results
+            self.v2_control_results
                 .lock()
                 .await
                 .0
@@ -81,22 +87,20 @@ impl DeviceService {
         );
         let reservation = {
             let mut history = history.lock().await;
-            reserve_v2_control(&mut history, &request.request_id, request.command)
+            history.reserve(&request.request_id, request.command)
         };
         let mut receiver = match reservation {
-            V2ControlReservation::Completed(result) => return result.response,
+            V2ControlReservation::Completed(status) => return status,
             V2ControlReservation::Wait(receiver) => receiver,
             V2ControlReservation::Execute(sender) => {
                 let receiver = sender.subscribe();
-                let task_state = state.clone();
-                let task_id = id.clone();
-                let task_request = request.clone();
+                let task_state = self.clone();
                 drop(spawn_v2_control_execution(
                     history,
                     request.request_id.clone(),
                     request.command,
                     sender,
-                    async move { execute_v2_control(&task_state, &task_id, &task_request).await },
+                    async move { execute_v2_control(&task_state, &id, &request).await },
                 ));
                 receiver
             }
@@ -106,8 +110,7 @@ impl DeviceService {
             .await
             .ok()
             .and_then(|response| response.clone())
-            .unwrap_or_else(|| cached_v2_result(request.request_id, V2ControlStatus::ControlFailed))
-            .response
+            .unwrap_or(V2ControlStatus::ControlFailed)
     }
 
     async fn execute_control(
@@ -129,9 +132,9 @@ async fn execute_v2_control(
     state: &DeviceService,
     id: &DeviceId,
     request: &DeviceControlV2Request,
-) -> CachedV2ControlResult {
+) -> V2ControlStatus {
     let backend = state.registry.read().await.dispatch(id, request.command);
-    let outcome = match backend {
+    match backend {
         Ok(DeviceBackend::LegacyBle) => execute_ble_v2_control(state, request).await,
         Ok(DeviceBackend::QuickConnect) => execute_cloud_v2_control(state, id, request).await,
         Err(crate::backend::DeviceRegistryError::UnknownDevice) => V2ControlStatus::UnknownDevice,
@@ -139,12 +142,6 @@ async fn execute_v2_control(
             V2ControlStatus::UnsupportedCommand
         }
         Err(_) => V2ControlStatus::ControlFailed,
-    };
-    CachedV2ControlResult {
-        response: DeviceControlV2Response {
-            request_id: request.request_id.as_str().to_owned(),
-            status: outcome,
-        },
     }
 }
 
@@ -184,104 +181,82 @@ fn spawn_v2_control_execution(
     history: Arc<tokio::sync::Mutex<V2DeviceControlHistory>>,
     request_id: CommandId,
     command: DeviceCommand,
-    sender: tokio::sync::watch::Sender<Option<CachedV2ControlResult>>,
-    execution: impl std::future::Future<Output = CachedV2ControlResult> + Send + 'static,
+    sender: tokio::sync::watch::Sender<Option<V2ControlStatus>>,
+    execution: impl std::future::Future<Output = V2ControlStatus> + Send + 'static,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
-        let response = execution.await;
+        let status = execution.await;
         {
             let mut history = history.lock().await;
             history.in_flight.remove(&request_id);
-            remember_v2_control_result(
-                &mut history.completed,
-                request_id,
-                command,
-                response.clone(),
-            );
+            history.remember(request_id, command, status.clone());
         }
-        sender.send_replace(Some(response));
+        sender.send_replace(Some(status));
     })
 }
 
-fn reserve_v2_control(
-    history: &mut V2DeviceControlHistory,
-    request_id: &CommandId,
-    command: DeviceCommand,
-) -> V2ControlReservation {
-    reap_abandoned_v2_controls(history);
-    if let Some((_, previous_command, response)) = history
-        .completed
-        .iter()
-        .find(|(previous_id, _, _)| previous_id == request_id)
-    {
-        return V2ControlReservation::Completed(if *previous_command == command {
-            response.clone()
-        } else {
-            cached_v2_result(request_id.clone(), V2ControlStatus::RequestIdReused)
-        });
-    }
-    if let Some((previous_command, receiver)) = history.in_flight.get(request_id) {
-        if *previous_command != command {
-            return V2ControlReservation::Completed(cached_v2_result(
-                request_id.clone(),
-                V2ControlStatus::RequestIdReused,
-            ));
+impl V2DeviceControlHistory {
+    fn reserve(&mut self, request_id: &CommandId, command: DeviceCommand) -> V2ControlReservation {
+        self.reap_abandoned();
+        if let Some((_, previous_command, status)) = self
+            .completed
+            .iter()
+            .find(|(previous_id, _, _)| previous_id == request_id)
+        {
+            return V2ControlReservation::Completed(if *previous_command == command {
+                status.clone()
+            } else {
+                V2ControlStatus::RequestIdReused
+            });
         }
-        if receiver.has_changed().is_ok() {
-            return V2ControlReservation::Wait(receiver.clone());
+        if let Some((previous_command, receiver)) = self.in_flight.get(request_id) {
+            if *previous_command != command {
+                return V2ControlReservation::Completed(V2ControlStatus::RequestIdReused);
+            }
+            if receiver.has_changed().is_ok() {
+                return V2ControlReservation::Wait(receiver.clone());
+            }
+            self.in_flight.remove(request_id);
+            self.remember(request_id.clone(), command, V2ControlStatus::ControlFailed);
+            return V2ControlReservation::Completed(V2ControlStatus::ControlFailed);
         }
-        history.in_flight.remove(request_id);
-        let result = cached_v2_result(request_id.clone(), V2ControlStatus::ControlFailed);
-        remember_v2_control_result(
-            &mut history.completed,
-            request_id.clone(),
-            command,
-            result.clone(),
-        );
-        return V2ControlReservation::Completed(result);
+        if self.in_flight.len() >= V2_IN_FLIGHT_CAPACITY {
+            return V2ControlReservation::Completed(V2ControlStatus::Busy);
+        }
+        let (sender, receiver) = tokio::sync::watch::channel(None);
+        self.in_flight
+            .insert(request_id.clone(), (command, receiver));
+        V2ControlReservation::Execute(sender)
     }
 
-    if history.in_flight.len() >= V2_IN_FLIGHT_CAPACITY {
-        return V2ControlReservation::Completed(cached_v2_result(
-            request_id.clone(),
-            V2ControlStatus::Busy,
-        ));
+    fn reap_abandoned(&mut self) {
+        let completed = &mut self.completed;
+        self.in_flight
+            .extract_if(|_, (_, receiver)| receiver.has_changed().is_err())
+            .for_each(|(request_id, (command, _))| {
+                remember_control_status(
+                    completed,
+                    request_id,
+                    command,
+                    V2ControlStatus::ControlFailed,
+                );
+            });
     }
-    let (sender, receiver) = tokio::sync::watch::channel(None);
-    history
-        .in_flight
-        .insert(request_id.clone(), (command, receiver));
-    V2ControlReservation::Execute(sender)
+
+    fn remember(&mut self, request_id: CommandId, command: DeviceCommand, status: V2ControlStatus) {
+        remember_control_status(&mut self.completed, request_id, command, status);
+    }
 }
 
-fn reap_abandoned_v2_controls(history: &mut V2DeviceControlHistory) {
-    history
-        .in_flight
-        .extract_if(|_, (_, receiver)| receiver.has_changed().is_err())
-        .for_each(|(request_id, (command, _))| {
-            let result = cached_v2_result(request_id.clone(), V2ControlStatus::ControlFailed);
-            remember_v2_control_result(&mut history.completed, request_id, command, result);
-        });
-}
-
-fn remember_v2_control_result(
-    completed: &mut VecDeque<(CommandId, DeviceCommand, CachedV2ControlResult)>,
+fn remember_control_status(
+    completed: &mut VecDeque<(CommandId, DeviceCommand, V2ControlStatus)>,
     request_id: CommandId,
     command: DeviceCommand,
-    response: CachedV2ControlResult,
+    status: V2ControlStatus,
 ) {
-    completed.push_back((request_id, command, response));
+    completed.push_back((request_id, command, status));
     if completed.len() > V2_REPLAY_CAPACITY {
         completed.pop_front();
-    }
-}
-
-fn cached_v2_result(request_id: CommandId, status: V2ControlStatus) -> CachedV2ControlResult {
-    CachedV2ControlResult {
-        response: DeviceControlV2Response {
-            request_id: request_id.as_str().to_owned(),
-            status,
-        },
     }
 }
 

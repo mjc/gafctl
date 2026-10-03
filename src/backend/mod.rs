@@ -14,7 +14,7 @@ use gafctl_quickconnect::QuickConnectCommand;
 use identity::IdentityStore;
 pub(crate) use runtime::{DeviceRuntime, RefreshReceiver, RefreshReservation};
 use std::{
-    collections::{BTreeMap, HashSet},
+    collections::{BTreeMap, HashSet, btree_map::Entry},
     io,
     path::PathBuf,
     sync::Arc,
@@ -62,10 +62,14 @@ pub enum DeviceRegistryError {
     Encoding(#[source] serde_json::Error),
 }
 
+struct RegisteredDevice {
+    descriptor: DeviceDescriptor,
+    runtime: Arc<DeviceRuntime>,
+}
+
 pub struct DeviceRegistry {
     identities: IdentityStore,
-    devices: BTreeMap<DeviceId, DeviceDescriptor>,
-    runtimes: BTreeMap<DeviceId, Arc<DeviceRuntime>>,
+    devices: BTreeMap<DeviceId, RegisteredDevice>,
     quickconnect_writes_enabled: bool,
 }
 
@@ -80,7 +84,6 @@ impl DeviceRegistry {
         Self {
             identities: IdentityStore::in_memory(),
             devices: BTreeMap::new(),
-            runtimes: BTreeMap::new(),
             quickconnect_writes_enabled: false,
         }
     }
@@ -93,7 +96,6 @@ impl DeviceRegistry {
         Ok(Self {
             identities: IdentityStore::load(path.into())?,
             devices: BTreeMap::new(),
-            runtimes: BTreeMap::new(),
             quickconnect_writes_enabled: false,
         })
     }
@@ -153,6 +155,7 @@ impl DeviceRegistry {
         self.quickconnect_writes_enabled = enabled;
         self.devices
             .values_mut()
+            .map(|device| &mut device.descriptor)
             .filter(|descriptor| descriptor.backend == DeviceBackend::QuickConnect)
             .for_each(|descriptor| {
                 descriptor.capabilities = if enabled {
@@ -172,6 +175,7 @@ impl DeviceRegistry {
         let descriptor = self
             .devices
             .get(id)
+            .map(|device| &device.descriptor)
             .ok_or(DeviceRegistryError::UnknownDevice)?;
         let capability = match command {
             QuickConnectCommand::SetMode { .. } | QuickConnectCommand::ClearMode { .. } => {
@@ -197,10 +201,11 @@ impl DeviceRegistry {
         account_id: &str,
         id: &DeviceId,
     ) -> Result<(Arc<DeviceRuntime>, String), DeviceRegistryError> {
-        let descriptor = self
+        let device = self
             .devices
             .get(id)
             .ok_or(DeviceRegistryError::UnknownDevice)?;
+        let descriptor = &device.descriptor;
         if descriptor.backend != DeviceBackend::QuickConnect || !descriptor.capabilities.read_state
         {
             return Err(DeviceRegistryError::UnsupportedCommand);
@@ -212,12 +217,7 @@ impl DeviceRegistry {
             .find(|binding| binding.local_id == *id && binding.identity.account_id == account_id)
             .map(|binding| binding.identity.provider_id.clone())
             .ok_or(DeviceRegistryError::UnknownDevice)?;
-        let runtime = self
-            .runtimes
-            .get(id)
-            .cloned()
-            .ok_or(DeviceRegistryError::UnknownDevice)?;
-        Ok((runtime, provider_id))
+        Ok((Arc::clone(&device.runtime), provider_id))
     }
 
     pub fn begin_quickconnect_poll(&self, account_id: &str) -> BTreeMap<DeviceId, u64> {
@@ -291,11 +291,11 @@ impl DeviceRegistry {
                 binding.identity.account_id == account_id && !present.contains(&binding.local_id)
             })
             .filter_map(|binding| {
-                self.runtimes
+                self.devices
                     .get(&binding.local_id)
                     .zip(generations.get(&binding.local_id))
             })
-            .map(|(runtime, generation)| (Arc::clone(runtime), *generation))
+            .map(|(device, generation)| (Arc::clone(&device.runtime), *generation))
             .collect::<Vec<_>>();
         futures_util::stream::iter(missing)
             .for_each(|(runtime, generation)| async move {
@@ -315,10 +315,10 @@ impl DeviceRegistry {
             .iter()
             .filter(|binding| binding.identity.account_id == account_id)
             .filter_map(|binding| {
-                self.runtimes
+                self.devices
                     .get(&binding.local_id)
                     .zip(generations.get(&binding.local_id))
-                    .map(|(runtime, generation)| (Arc::clone(runtime), *generation))
+                    .map(|(device, generation)| (Arc::clone(&device.runtime), *generation))
             })
             .collect::<Vec<_>>();
         futures_util::stream::iter(unavailable)
@@ -331,11 +331,13 @@ impl DeviceRegistry {
     }
 
     pub fn descriptors(&self) -> impl Iterator<Item = &DeviceDescriptor> {
-        self.devices.values()
+        self.devices.values().map(|device| &device.descriptor)
     }
 
     pub fn runtime(&self, id: &DeviceId) -> Option<Arc<DeviceRuntime>> {
-        self.runtimes.get(id).cloned()
+        self.devices
+            .get(id)
+            .map(|device| Arc::clone(&device.runtime))
     }
 
     pub fn set_entity_sources(
@@ -354,6 +356,7 @@ impl DeviceRegistry {
         let descriptor = self
             .devices
             .get_mut(id)
+            .map(|device| &mut device.descriptor)
             .ok_or(DeviceRegistryError::UnknownDevice)?;
         descriptor.state_source = state;
         descriptor.command_source = command;
@@ -368,6 +371,7 @@ impl DeviceRegistry {
         let descriptor = self
             .devices
             .get(id)
+            .map(|device| &device.descriptor)
             .ok_or(DeviceRegistryError::UnknownDevice)?;
         match (descriptor.backend, command) {
             (
@@ -404,12 +408,18 @@ impl DeviceRegistry {
             .unwrap_or(EntitySource::Http);
         descriptor.state_source = source;
         descriptor.command_source = source;
-        self.devices.insert(id.clone(), descriptor);
-        Arc::clone(
-            self.runtimes
-                .entry(id)
-                .or_insert_with(|| Arc::new(DeviceRuntime::new())),
-        )
+        let device = match self.devices.entry(id) {
+            Entry::Occupied(entry) => {
+                let device = entry.into_mut();
+                device.descriptor = descriptor;
+                device
+            }
+            Entry::Vacant(entry) => entry.insert(RegisteredDevice {
+                descriptor,
+                runtime: Arc::new(DeviceRuntime::new()),
+            }),
+        };
+        Arc::clone(&device.runtime)
     }
 
     #[cfg(test)]
@@ -422,7 +432,58 @@ impl DeviceRegistry {
 mod tests {
     use super::test_support::*;
     use super::*;
+    use gafctl_api::{DeviceSettings, DeviceState, QuickConnectModeStatus, StateProvenance};
     use std::fs;
+
+    #[tokio::test]
+    async fn reregistering_a_device_updates_its_descriptor_and_preserves_its_runtime() {
+        let path = registry_path();
+        let mut registry = DeviceRegistry::load(&path).unwrap();
+        let id = registry
+            .reconcile_quickconnect("account-a", &[cloud_device("provider-a", "Original")])
+            .unwrap()
+            .pop()
+            .unwrap();
+        let runtime = registry.runtime(&id).unwrap();
+        let state = DeviceState {
+            temperature_f: Some(91.0),
+            humidity_percent: None,
+            settings: DeviceSettings::QuickConnect {
+                mode: QuickConnectModeStatus::Automatic,
+                automatic_temperature_f: None,
+                automatic_humidity_percent: None,
+                timer_duration_minutes: None,
+                humidity_monitor: None,
+            },
+            estimated_running: None,
+            diagnostics: None,
+            provenance: StateProvenance {
+                backend: DeviceBackend::QuickConnect,
+                fetched_at_unix_ms: Some(1_000),
+                observed_at_unix_ms: None,
+            },
+        };
+        runtime.set_state(state.clone()).await;
+        let transaction = runtime.acquire_transaction().await;
+
+        let updated = registry
+            .reconcile_quickconnect("account-a", &[cloud_device("provider-a", "Renamed")])
+            .unwrap();
+        assert_eq!(updated, vec![id.clone()]);
+        let current = registry.runtime(&id).unwrap();
+        assert!(Arc::ptr_eq(&runtime, &current));
+        assert_eq!(current.snapshot_at(1_000).await.state, Some(state));
+        assert!(current.try_acquire_transaction().is_none());
+        let descriptor = registry.descriptors().next().unwrap();
+        assert_eq!(descriptor.id, id);
+        assert_eq!(descriptor.name, "Renamed");
+        assert_eq!(registry.descriptors().count(), 1);
+
+        drop(transaction);
+        assert!(current.try_acquire_transaction().is_some());
+        fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    }
+
     #[test]
     fn inactive_backend_ownership_does_not_require_mqtt() {
         let path = registry_path();
