@@ -28,6 +28,8 @@ pub struct ProbeOptions {
     /// Maximum time for GATT setup, each command write, and each response.
     /// Manager setup, scanning, connection, and cleanup allow at least 40 seconds.
     pub response_timeout: Duration,
+    /// Latest instant a control may be written; reads and CLI controls have no deadline.
+    pub control_deadline: Option<tokio::time::Instant>,
     /// Action to take after scanning.
     pub mode: ProbeMode,
 }
@@ -51,6 +53,7 @@ impl Default for ProbeOptions {
         Self {
             scan_duration: Duration::from_secs(6),
             response_timeout: Duration::from_secs(3),
+            control_deadline: None,
             mode: ProbeMode::Query {
                 device_id: None,
                 control_command: None,

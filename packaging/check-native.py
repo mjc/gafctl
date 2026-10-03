@@ -61,5 +61,6 @@ with subprocess.Popen(
             assert json.load(response) == {"devices": []}
     finally:
         server.terminate()
-        server.wait(timeout=5)
+        returncode = server.wait(timeout=5)
+        assert returncode == 0, f"installed server exited with status {returncode}"
 print("Installed binaries, sibling server launch, HTTP, graceful shutdown: passed")

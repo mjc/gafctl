@@ -94,10 +94,11 @@ for image in gafctl:local localhost/gafctl-install-app:check; do
     engine exec gafctl-check-runtime curl --fail --silent http://127.0.0.1:8787/api/v2/devices
     engine exec gafctl-check-runtime gafctl server --help >/dev/null
     engine stop --time 3 gafctl-check-runtime >/dev/null
-    test "$(engine inspect --format '{{.State.ExitCode}}' gafctl-check-runtime)" != 137
+    test "$(engine inspect --format '{{.State.ExitCode}}' gafctl-check-runtime)" = 0
     engine start gafctl-check-runtime >/dev/null
     engine exec gafctl-check-runtime curl --fail --silent --retry 5 --retry-connrefused --retry-delay 1 http://127.0.0.1:8787/health
     engine stop --time 3 gafctl-check-runtime >/dev/null
+    test "$(engine inspect --format '{{.State.ExitCode}}' gafctl-check-runtime)" = 0
     engine rm gafctl-check-runtime >/dev/null
     printf '\n%s default options, HTTP, restart, shutdown: passed\n' "$image"
 done

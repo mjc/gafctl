@@ -46,7 +46,8 @@ class GafctlCoordinator(DataUpdateCoordinator[DeviceState]):
         self.entry = entry
         self.loaded_entity_keys: dict[str, set[str]] = {}
         self.command_lock = asyncio.Lock()
-        self._reload_scheduled = False
+        self._reload_task: asyncio.Task[None] | None = None
+        self._unloaded = False
         self._entities_loaded = False
         super().__init__(
             hass,
@@ -104,20 +105,29 @@ class GafctlCoordinator(DataUpdateCoordinator[DeviceState]):
     def _reload_changed_entities(self) -> None:
         if (
             self._entities_loaded
+            and not self._unloaded
             and entity_keys(self.device) != self.loaded_entity_keys
-            and not self._reload_scheduled
+            and (self._reload_task is None or self._reload_task.done())
         ):
-            self._reload_scheduled = True
-            self.hass.async_create_task(self._reload_entry())
+            self._reload_task = self.hass.async_create_task(self._reload_entry())
+
+    async def async_unload(self) -> None:
+        """Invalidate pending work without cancelling our own reload's unload."""
+        self._unloaded = True
+        if (
+            self._reload_task is not None
+            and self._reload_task is not asyncio.current_task()
+        ):
+            self._reload_task.cancel()
+            await asyncio.gather(self._reload_task, return_exceptions=True)
 
     async def _reload_entry(self) -> None:
+        if self._unloaded or self.entry.runtime_data is not self:
+            return
         try:
             async_cleanup_registry(self.hass, self.entry, self.device)
-            reloaded = await self.hass.config_entries.async_reload(self.entry.entry_id)
-            if not reloaded:
-                self._reload_scheduled = False
+            await self.hass.config_entries.async_reload(self.entry.entry_id)
         except Exception:
-            self._reload_scheduled = False
             LOGGER.exception("Could not reload changed Gafctl entities")
 
     async def async_set_mode(

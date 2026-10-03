@@ -465,6 +465,7 @@ impl BleCommand {
         let options = ProbeOptions {
             scan_duration: Duration::from_secs(settings.scan_seconds.get()),
             response_timeout: Duration::from_secs(settings.timeout_seconds.get()),
+            control_deadline: None,
             mode,
         };
         (intent, settings, options)

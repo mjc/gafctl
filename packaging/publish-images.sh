@@ -25,8 +25,14 @@ done
 members=()
 for artifact in "${artifacts[@]}"; do
     arch=${artifact##*/image-}
+    if docker image inspect gafctl:local >/dev/null 2>&1; then
+        docker image rm --force gafctl:local >/dev/null
+    fi
     docker load --input "$artifact/gafctl-image.tar"
-    actual_arch=$(docker image inspect --format '{{.Architecture}}' gafctl:local)
+    if ! actual_arch=$(docker image inspect --format '{{.Architecture}}' gafctl:local); then
+        printf 'Image artifact did not load gafctl:local: %s\n' "$artifact" >&2
+        exit 1
+    fi
     if [[ $actual_arch != "$arch" ]]; then
         printf 'Image architecture mismatch: artifact=%s, image=%s\n' "$arch" "$actual_arch" >&2
         exit 1

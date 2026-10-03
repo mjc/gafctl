@@ -22,4 +22,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: GafctlConfigEntry) -> bo
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: GafctlConfigEntry) -> bool:
-    return await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
+    unloaded = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
+    if unloaded:
+        await entry.runtime_data.async_unload()
+    return unloaded

@@ -33,6 +33,7 @@ pub async fn query_peripheral(
     peripheral: &Peripheral,
     response_timeout: Duration,
     control_command: Option<ControlCommand>,
+    control_deadline: Option<tokio::time::Instant>,
 ) -> Result<QueryResult> {
     let connected = retry_connection(|| {
         ConnectedPeripheral::connect(peripheral, platform_timeout(response_timeout))
@@ -41,7 +42,7 @@ pub async fn query_peripheral(
     let query = async {
         request_session(&connected, response_timeout)
             .await?
-            .query(control_command)
+            .query(control_command, control_deadline)
             .await
     }
     .await;

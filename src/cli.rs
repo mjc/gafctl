@@ -180,6 +180,7 @@ impl BleOptions {
         ProbeOptions {
             scan_duration: Duration::from_secs(self.scan_seconds),
             response_timeout: Duration::from_secs(self.response_timeout_seconds),
+            control_deadline: None,
             mode,
         }
     }

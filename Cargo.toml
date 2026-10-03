@@ -89,7 +89,7 @@ clap = { workspace = true, optional = true }
 clap_complete = { workspace = true, optional = true }
 serde = { workspace = true, optional = true }
 serde_json = { workspace = true, optional = true }
-tokio = { workspace = true, features = ["macros", "rt-multi-thread", "net", "sync", "time"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "net", "signal", "sync", "time"] }
 tracing.workspace = true
 tracing-subscriber.workspace = true
 rumqttc = { workspace = true, optional = true }

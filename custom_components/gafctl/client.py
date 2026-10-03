@@ -23,6 +23,8 @@ def normalize_api_url(value: str) -> str:
     """Validate a proxy URL and return it without a trailing slash."""
     try:
         parsed = urlparse(value.strip())
+        # Accessing port validates its syntax and range. Omitted ports are valid.
+        _ = parsed.port
         valid = (
             parsed.scheme in {"http", "https"}
             and parsed.hostname is not None

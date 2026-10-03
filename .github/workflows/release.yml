@@ -54,7 +54,7 @@ jobs:
         with:
           name: image-${{ matrix.arch }}
           path: gafctl-image.tar
-          retention-days: 1
+          retention-days: 7
   publish:
     if: github.ref_type == 'tag'
     needs: build

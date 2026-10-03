@@ -54,6 +54,7 @@ use crate::quickconnect_control::{
 const DEVICE_ID: &str = "configured";
 const DEFAULT_POLL_INTERVAL: Duration = Duration::from_secs(30);
 const DEVICE_REFRESH_TIMEOUT: Duration = Duration::from_secs(270);
+const SHUTDOWN_CLEANUP_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Clone)]
 struct ApiState {
@@ -68,6 +69,35 @@ struct ApiState {
     quickconnect_control: Option<QuickConnectControlService>,
     quickconnect_runtime: Option<QuickConnectRuntime>,
     v2_control_results: Arc<tokio::sync::Mutex<RecentV2ControlResults>>,
+}
+
+#[cfg(feature = "mqtt")]
+struct MqttRuntime {
+    intake: crate::mqtt::MqttRequestIntake,
+    requests: tokio::task::JoinHandle<()>,
+    tasks: Option<crate::mqtt::MqttTasks>,
+}
+
+#[cfg(feature = "mqtt")]
+impl MqttRuntime {
+    async fn drain(&mut self, deadline: tokio::time::Instant) {
+        self.intake.close();
+        match tokio::time::timeout_at(deadline, &mut self.requests).await {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => tracing::warn!(%error, "MQTT request worker failed during shutdown"),
+            Err(_) => {
+                self.requests.abort();
+                let _ = (&mut self.requests).await;
+                tracing::warn!(
+                    "MQTT shutdown drain deadline exceeded; unfinished command outcomes are unknown"
+                );
+            }
+        }
+        self.intake.drain_replies(deadline).await;
+        if let Some(tasks) = self.tasks.take() {
+            tasks.stop(deadline).await;
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -366,13 +396,17 @@ impl ApiState {
     }
 
     #[cfg(feature = "mqtt")]
-    async fn start_mqtt(&mut self, config: crate::mqtt::MqttConfig) -> Result<()> {
+    async fn start_mqtt(&mut self, config: crate::mqtt::MqttConfig) -> Result<MqttRuntime> {
         self.mqtt_discovery_enabled = config.discovery_enabled;
         let initial_state = self.mqtt_state_snapshot().await?;
         let bridge = crate::mqtt::start(config, initial_state);
         self.mqtt_updates = Some(bridge.state_updates);
-        tokio::spawn(process_mqtt_requests(self.clone(), bridge.device_requests));
-        Ok(())
+        let requests = tokio::spawn(process_mqtt_requests(self.clone(), bridge.device_requests));
+        Ok(MqttRuntime {
+            intake: bridge.request_intake,
+            requests,
+            tasks: Some(bridge.tasks),
+        })
     }
 
     #[cfg(feature = "mqtt")]
@@ -467,7 +501,12 @@ impl LegacyBleRuntime {
         if !v2_request_is_fresh_at(issued_at_unix_ms, unix_millis(SystemTime::now())) {
             return Err(ControlAdmissionError::StaleRequest);
         }
-        Ok(self.execute_control_locked(state, prepared).await)
+        let now = unix_millis(SystemTime::now()).ok_or(ControlAdmissionError::StaleRequest)?;
+        let remaining = issued_at_unix_ms
+            .saturating_add(u64::try_from(V2_CONTROL_MAX_AGE.as_millis()).unwrap_or(u64::MAX))
+            .saturating_sub(now);
+        let deadline = tokio::time::Instant::now() + Duration::from_millis(remaining);
+        self.execute_control_locked(state, prepared, deadline).await
     }
 
     async fn prepare_control_locked(
@@ -499,15 +538,25 @@ impl LegacyBleRuntime {
         &self,
         state: &ApiState,
         command: gafctl_protocol::ControlCommand,
-    ) -> bool {
+        deadline: tokio::time::Instant,
+    ) -> Result<bool, ControlAdmissionError> {
         let poll_id = self.reconciler.write().await.begin_poll();
-        let outcome = control_outcome(self.probe(Some(command)).await);
+        let mut options = self.probe_options(Some(command));
+        options.control_deadline = Some(deadline);
+        let result = self.ble_client.probe(options).await;
+        if result
+            .as_ref()
+            .is_err_and(|error| error.kind() == ProbeErrorKind::StaleControl)
+        {
+            return Err(ControlAdmissionError::StaleRequest);
+        }
+        let outcome = control_outcome(result);
         outcome.log_warnings();
         let (success, message, snapshot) = outcome.into_response_parts();
         self.reconcile_control_snapshot(poll_id, snapshot, message)
             .await;
         state.publish_state().await;
-        success
+        Ok(success)
     }
 
     async fn probe(
@@ -521,6 +570,7 @@ impl LegacyBleRuntime {
         ProbeOptions {
             scan_duration: Duration::from_secs(6),
             response_timeout: Duration::from_secs(3),
+            control_deadline: None,
             mode: ProbeMode::Query {
                 device_id: Some(self.peripheral_id.to_string()),
                 control_command: command,
@@ -713,23 +763,94 @@ pub(crate) async fn serve(
         state.start_quickconnect(config).await?;
     }
     #[cfg(feature = "mqtt")]
-    if let Some(config) = mqtt_config {
-        state.start_mqtt(config).await?;
-    }
+    let mut mqtt = match mqtt_config {
+        Some(config) => Some(state.start_mqtt(config).await?),
+        None => None,
+    };
     let app = router(state.clone());
     let poll_state = state_polling_enabled(&state);
     let poll_quickconnect = quickconnect_polling_enabled(&state);
+    let mut polls = Vec::new();
     if poll_state {
-        tokio::spawn(poll_device(state.clone(), DEFAULT_POLL_INTERVAL));
+        polls.push(tokio::spawn(poll_device(
+            state.clone(),
+            DEFAULT_POLL_INTERVAL,
+        )));
     }
     if poll_quickconnect {
-        tokio::spawn(poll_quickconnect_device(state, DEFAULT_POLL_INTERVAL));
+        polls.push(tokio::spawn(poll_quickconnect_device(
+            state.clone(),
+            DEFAULT_POLL_INTERVAL,
+        )));
     }
 
     tracing::info!(%address, "Gafctl API listening");
+    let stop_polls = polls
+        .iter()
+        .map(tokio::task::JoinHandle::abort_handle)
+        .collect::<Vec<_>>();
+    #[cfg(feature = "mqtt")]
+    let mqtt_intake = mqtt.as_ref().map(|runtime| runtime.intake.clone());
+    let result = serve_http_until_shutdown(listener, app, async move {
+        shutdown_signal().await;
+        #[cfg(feature = "mqtt")]
+        if let Some(intake) = mqtt_intake {
+            intake.close();
+        }
+        stop_polls.iter().for_each(tokio::task::AbortHandle::abort);
+    })
+    .await;
+    polls.iter().for_each(|poll| poll.abort());
+    let cleanup_deadline = tokio::time::Instant::now() + SHUTDOWN_CLEANUP_TIMEOUT;
+    #[cfg(feature = "mqtt")]
+    if let Some(mqtt) = &mut mqtt {
+        mqtt.drain(cleanup_deadline).await;
+    }
+    // Cancelling a poll waiter leaves its BLE worker owning the backend until
+    // disconnect cleanup completes. Give it a short grace after HTTP draining.
+    if let Some(ble) = &state.ble_device
+        && tokio::time::timeout_at(cleanup_deadline, ble.ble_client.wait_until_idle())
+            .await
+            .is_err()
+    {
+        tracing::warn!("BLE shutdown cleanup deadline exceeded");
+    }
+    result
+}
+
+async fn serve_http_until_shutdown(
+    listener: TcpListener,
+    app: Router,
+    shutdown: impl std::future::Future<Output = ()> + Send + 'static,
+) -> Result<()> {
     axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown)
         .await
         .context("HTTP server failed")
+}
+
+async fn shutdown_signal() {
+    let interrupt = async {
+        if let Err(error) = tokio::signal::ctrl_c().await {
+            tracing::error!(%error, "could not receive Ctrl-C");
+        }
+    };
+    #[cfg(unix)]
+    let terminate = async {
+        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+            Ok(mut signal) => {
+                signal.recv().await;
+            }
+            Err(error) => tracing::error!(%error, "could not receive SIGTERM"),
+        }
+    };
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+    tokio::select! {
+        _ = interrupt => {},
+        _ = terminate => {},
+    }
+    tracing::info!("HTTP shutdown requested");
 }
 
 fn state_polling_enabled(state: &ApiState) -> bool {
@@ -1463,6 +1584,7 @@ fn record_query_result(reconciler: &mut StateReconciler, poll_id: u64, result: Q
 
 fn probe_error_message(error: &ProbeError) -> &'static str {
     match error.kind() {
+        ProbeErrorKind::StaleControl => "BLE control expired before writing",
         ProbeErrorKind::Unavailable => "BLE unavailable",
         ProbeErrorKind::Authentication => "BLE permission or authentication failed",
         ProbeErrorKind::Protocol => "GAF protocol error",
@@ -1475,6 +1597,53 @@ fn tenths_to_decimal(value: u16) -> f64 {
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn graceful_http_shutdown_drains_an_active_request() {
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let app = Router::new().route(
+            "/blocked",
+            get({
+                let entered = Arc::clone(&entered);
+                let release = Arc::clone(&release);
+                move || {
+                    let entered = Arc::clone(&entered);
+                    let release = Arc::clone(&release);
+                    async move {
+                        entered.notify_one();
+                        release.notified().await;
+                        "finished"
+                    }
+                }
+            }),
+        );
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let (stop, shutdown) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(serve_http_until_shutdown(listener, app, async move {
+            shutdown.await.unwrap();
+        }));
+        let request = tokio::spawn(async move {
+            reqwest::get(format!("http://{address}/blocked"))
+                .await
+                .unwrap()
+                .text()
+                .await
+                .unwrap()
+        });
+        entered.notified().await;
+        stop.send(()).unwrap();
+        tokio::task::yield_now().await;
+        assert!(!server.is_finished());
+        release.notify_one();
+        assert_eq!(request.await.unwrap(), "finished");
+        tokio::time::timeout(Duration::from_secs(2), server)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+    }
+
     use std::{
         fs,
         path::PathBuf,
@@ -1859,6 +2028,71 @@ mod tests {
             wait_for_device_refresh(receiver).await.unwrap_err(),
             StatusCode::INTERNAL_SERVER_ERROR
         );
+    }
+
+    #[cfg(feature = "mqtt")]
+    #[tokio::test(start_paused = true)]
+    async fn mqtt_shutdown_drain_respects_the_cleanup_deadline() {
+        let (sender, _receiver) = mpsc::channel(1);
+        let intake = crate::mqtt::MqttRequestIntake::new(sender);
+        let requests = tokio::spawn(std::future::pending::<()>());
+        let mut runtime = MqttRuntime {
+            intake,
+            requests,
+            tasks: None,
+        };
+        let started = tokio::time::Instant::now();
+        runtime.drain(started + SHUTDOWN_CLEANUP_TIMEOUT).await;
+        assert!(runtime.requests.is_finished());
+        assert_eq!(started.elapsed(), SHUTDOWN_CLEANUP_TIMEOUT);
+    }
+
+    #[cfg(feature = "mqtt")]
+    #[tokio::test]
+    async fn mqtt_shutdown_closes_intake_and_drains_an_accepted_request() {
+        let (state, id, fixture, server, path) = refresh_fixture().await;
+        let (sender, receiver) = mpsc::channel(2);
+        let intake = crate::mqtt::MqttRequestIntake::new(sender);
+        let requests = tokio::spawn(process_mqtt_requests(state, receiver));
+        let work = |request_id: &str| {
+            let (reply, response) = tokio::sync::oneshot::channel();
+            (
+                crate::mqtt::MqttDeviceWork {
+                    device_id: id.clone(),
+                    request: crate::mqtt::MqttRequest::Refresh(crate::mqtt::MqttRefreshRequest {
+                        request_id: CommandId::parse(request_id).unwrap(),
+                        issued_at_unix_ms: unix_millis(SystemTime::now()).unwrap(),
+                    }),
+                    reply,
+                },
+                response,
+            )
+        };
+        let (accepted, response) = work("accepted-before-shutdown");
+        assert!(intake.try_send(accepted).is_ok());
+        fixture.entered.notified().await;
+        let mut runtime = MqttRuntime {
+            intake,
+            requests,
+            tasks: None,
+        };
+        runtime.intake.close();
+        let (late, _) = work("after-shutdown");
+        let Err(mpsc::error::TrySendError::Closed(_)) = runtime.intake.try_send(late) else {
+            unreachable!("closed MQTT intake must reject later work");
+        };
+        assert!(!runtime.requests.is_finished());
+        fixture.release.notify_one();
+        runtime
+            .drain(tokio::time::Instant::now() + SHUTDOWN_CLEANUP_TIMEOUT)
+            .await;
+        let crate::mqtt::MqttReply::Refresh { status, .. } = response.await.unwrap() else {
+            unreachable!("refresh request must return a refresh reply");
+        };
+        assert_eq!(status, DeviceRefreshStatus::Fresh);
+        assert!(runtime.requests.is_finished());
+        server.abort();
+        fs::remove_file(path).unwrap();
     }
 
     #[derive(Default)]

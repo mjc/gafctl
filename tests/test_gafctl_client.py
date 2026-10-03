@@ -420,6 +420,10 @@ class ApiClientTests(unittest.IsolatedAsyncioTestCase):
         )
         with self.assertRaises(ApiError):
             CLIENT.normalize_api_url("http://user:secret@127.0.0.1:8787")
+        for address in ("http://proxy:bad", "http://proxy:65536", "http://proxy:-1"):
+            with self.subTest(address=address), self.assertRaises(ApiError):
+                CLIENT.normalize_api_url(address)
+        self.assertEqual(CLIENT.normalize_api_url("http://proxy"), "http://proxy")
         client, _ = self.client({})
         with self.assertRaisesRegex(ApiError, "invalid configured device"):
             await client.fetch_state("../other")

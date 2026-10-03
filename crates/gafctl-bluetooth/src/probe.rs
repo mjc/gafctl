@@ -45,6 +45,11 @@ impl ProbeClient {
         }
     }
 
+    /// Wait for the current operation and its cleanup, including a detached query.
+    pub async fn wait_until_idle(&self) {
+        drop(self.backend.lock().await);
+    }
+
     /// Discover GAF BLE peripherals and, when selected, query or control one.
     pub async fn probe(&self, options: ProbeOptions) -> Result<ProbeResult, ProbeError> {
         let mut backend = Arc::clone(&self.backend).lock_owned().await;
@@ -167,6 +172,7 @@ async fn probe_with_adapter(
                 device_id.as_deref(),
                 control_command,
                 options.response_timeout,
+                options.control_deadline,
                 pending_disconnect,
             )
             .await
@@ -179,6 +185,7 @@ async fn query_selected_device(
     device_id: Option<&str>,
     control_command: Option<ControlCommand>,
     response_timeout: Duration,
+    control_deadline: Option<tokio::time::Instant>,
     pending_disconnect: &mut Option<Peripheral>,
 ) -> AnyhowResult<ProbeResult> {
     if !can_query_with_report(&discovery, device_id) {
@@ -191,8 +198,13 @@ async fn query_selected_device(
         CandidateSelection::Ambiguous(devices) => Ok(ProbeResult::Ambiguous { devices }),
         CandidateSelection::Chosen { device, peripheral } => {
             *pending_disconnect = Some(peripheral.clone());
-            let mut result =
-                query_peripheral(&peripheral, response_timeout, control_command).await?;
+            let mut result = query_peripheral(
+                &peripheral,
+                response_timeout,
+                control_command,
+                control_deadline,
+            )
+            .await?;
             if result.disconnect == crate::DisconnectOutcome::Disconnected {
                 *pending_disconnect = None;
             }
@@ -210,6 +222,31 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use super::get_or_init;
+
+    #[tokio::test]
+    async fn idle_wait_drains_cleanup_after_the_caller_is_cancelled() {
+        let client = std::sync::Arc::new(super::ProbeClient::new());
+        let guard = std::sync::Arc::clone(&client.backend).lock_owned().await;
+        let (started, did_start) = tokio::sync::oneshot::channel();
+        let (finish, can_finish) = tokio::sync::oneshot::channel();
+        let caller = tokio::spawn(super::finish_without_cancelling(async move {
+            let _guard = guard;
+            started.send(()).unwrap();
+            can_finish.await.unwrap();
+            Ok(())
+        }));
+        did_start.await.unwrap();
+        caller.abort();
+        assert!(caller.await.unwrap_err().is_cancelled());
+        let idle = tokio::spawn(async move { client.wait_until_idle().await });
+        tokio::task::yield_now().await;
+        assert!(!idle.is_finished());
+        finish.send(()).unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(1), idle)
+            .await
+            .unwrap()
+            .unwrap();
+    }
 
     #[tokio::test]
     async fn cancelled_caller_keeps_backend_locked_until_operation_finishes() {

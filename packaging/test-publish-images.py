@@ -30,8 +30,14 @@ class PublishImagesTests(unittest.TestCase):
             "    log.write(json.dumps(args) + '\\n')\n"
             "state = Path(os.environ['DOCKER_STUB_STATE'])\n"
             "if args[0] == 'load':\n"
-            "    state.write_text(Path(args[2]).read_text())\n"
+            "    architecture = Path(args[2]).read_text()\n"
+            "    if architecture != 'untagged':\n"
+            "        state.write_text(architecture)\n"
+            "elif args[:2] == ['image', 'rm']:\n"
+            "    state.unlink()\n"
             "elif args[:2] == ['image', 'inspect']:\n"
+            "    if not state.exists():\n"
+            "        sys.exit(1)\n"
             "    print(state.read_text().strip())\n"
         )
         stub.chmod(0o755)
@@ -145,7 +151,18 @@ class PublishImagesTests(unittest.TestCase):
         result = self.publish()
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("Image architecture mismatch", result.stderr)
-        self.assertEqual([call[0] for call in self.calls()], ["load", "image"])
+        self.assertEqual([call[0] for call in self.calls()], ["image", "load", "image"])
+
+    def test_untagged_archive_cannot_publish_preexisting_staging_image(self):
+        self.artifact("amd64", "untagged")
+        Path(self.environment["DOCKER_STUB_STATE"]).write_text("amd64")
+        result = self.publish()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("did not load gafctl:local", result.stderr)
+        self.assertFalse(
+            any(call[0] in ("tag", "push", "manifest") for call in self.calls())
+        )
+        self.assertIn(["image", "rm", "--force", "gafctl:local"], self.calls())
 
     def test_later_architecture_mismatch_does_not_push_earlier_image(self):
         self.artifact("amd64")

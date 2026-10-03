@@ -6,6 +6,7 @@ use thiserror::Error as ThisError;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ProbeErrorKind {
+    StaleControl,
     Unavailable,
     Authentication,
     Protocol,
@@ -13,6 +14,8 @@ pub enum ProbeErrorKind {
 
 #[derive(Debug, ThisError)]
 pub enum ProbeError {
+    #[error("BLE control expired before writing: {0:#}")]
+    StaleControl(#[source] Error),
     #[error("BLE unavailable: {0:#}")]
     Unavailable(#[source] Error),
     #[error("BLE authentication or permission failure: {0:#}")]
@@ -24,6 +27,7 @@ pub enum ProbeError {
 impl ProbeError {
     pub fn classify(source: Error) -> Self {
         match Self::kind_for(&source) {
+            ProbeErrorKind::StaleControl => Self::StaleControl(source),
             ProbeErrorKind::Unavailable => Self::Unavailable(source),
             ProbeErrorKind::Authentication => Self::Authentication(source),
             ProbeErrorKind::Protocol => Self::Protocol(source),
@@ -32,6 +36,7 @@ impl ProbeError {
 
     pub fn kind(&self) -> ProbeErrorKind {
         match self {
+            Self::StaleControl(_) => ProbeErrorKind::StaleControl,
             Self::Unavailable(_) => ProbeErrorKind::Unavailable,
             Self::Authentication(_) => ProbeErrorKind::Authentication,
             Self::Protocol(_) => ProbeErrorKind::Protocol,
@@ -39,7 +44,12 @@ impl ProbeError {
     }
 
     pub(super) fn kind_for(source: &Error) -> ProbeErrorKind {
-        if source.chain().any(is_authentication_error) {
+        if source
+            .chain()
+            .any(|cause| cause.downcast_ref::<ControlExpired>().is_some())
+        {
+            ProbeErrorKind::StaleControl
+        } else if source.chain().any(is_authentication_error) {
             ProbeErrorKind::Authentication
         } else if source.chain().any(is_protocol_error) {
             ProbeErrorKind::Protocol
@@ -144,6 +154,10 @@ impl StdError for CleanupFailed {
         self.operation.chain().next()
     }
 }
+
+#[derive(Debug, ThisError)]
+#[error("control deadline passed before writing")]
+pub(super) struct ControlExpired;
 
 #[derive(Debug, ThisError)]
 #[error("device did not return a GAF identity response")]

@@ -78,6 +78,7 @@ def coordinator_for(hass, client, selected, entry):
     )
     coordinator = GafctlCoordinator(hass, client, entry)
     coordinator.device = selected
+    entry.runtime_data = coordinator
     coordinator.loaded_entity_keys = gafctl_integration.entity_keys(selected)
     return coordinator
 
@@ -869,6 +870,90 @@ class RegistryTests(unittest.IsolatedAsyncioTestCase):
             device_id=registered_device.id,
         )
         return (entity, registered_device)
+
+    async def test_queued_reload_is_invalidated_on_unload_or_replacement(self) -> None:
+        for replace in (False, True):
+            with self.subTest(replace=replace):
+                entry = await self.entry()
+                sensor, _ = self.registered_sensor(entry)
+                coordinator = coordinator_for(self.hass, AsyncMock(), device(), entry)
+                coordinator._entities_loaded = True
+                coordinator.device = device(owner="mqtt")
+                entered = asyncio.Event()
+                release = asyncio.Event()
+                reload_entry = coordinator._reload_entry
+
+                async def blocked_reload(
+                    entered=entered, release=release, reload_entry=reload_entry
+                ):
+                    entered.set()
+                    await release.wait()
+                    await reload_entry()
+
+                with (
+                    patch.object(coordinator, "_reload_entry", blocked_reload),
+                    patch.object(ConfigEntries, "async_reload", AsyncMock()) as reload,
+                    patch.object(
+                        ConfigEntries,
+                        "async_unload_platforms",
+                        AsyncMock(return_value=True),
+                    ),
+                ):
+                    coordinator._reload_changed_entities()
+                    await entered.wait()
+                    if replace:
+                        coordinator_for(self.hass, AsyncMock(), device(), entry)
+                    else:
+                        self.assertTrue(
+                            await gafctl_integration.async_unload_entry(
+                                self.hass, entry
+                            )
+                        )
+                    release.set()
+                    await asyncio.gather(
+                        coordinator._reload_task, return_exceptions=True
+                    )
+                    reload.assert_not_awaited()
+                self.assertIsNotNone(self.entities.async_get(sensor.entity_id))
+
+    async def test_reload_can_unload_its_own_coordinator(self) -> None:
+        entry = await self.entry()
+        coordinator = coordinator_for(self.hass, AsyncMock(), device(), entry)
+        coordinator._entities_loaded = True
+        coordinator.device = device(owner="mqtt")
+
+        async def reload(entry_id):
+            return await gafctl_integration.async_unload_entry(self.hass, entry)
+
+        with (
+            patch.object(
+                ConfigEntries, "async_reload", AsyncMock(side_effect=reload)
+            ) as reload_mock,
+            patch.object(
+                ConfigEntries, "async_unload_platforms", AsyncMock(return_value=True)
+            ),
+        ):
+            coordinator._reload_changed_entities()
+            await coordinator._reload_task
+            reload_mock.assert_awaited_once_with(entry.entry_id)
+            self.assertFalse(coordinator._reload_task.cancelled())
+
+    async def test_invalid_ports_never_fetch_inventory(self) -> None:
+        entry = await self.entry()
+        for source in ("user", "reconfigure"):
+            for address in (
+                "http://proxy:bad",
+                "http://proxy:65536",
+                "http://proxy:-1",
+            ):
+                with self.subTest(source=source, address=address):
+                    flow = self.flow({"source": source, "entry_id": entry.entry_id})
+                    with patch.object(flow, "_fetch_devices", AsyncMock()) as fetch:
+                        result = await getattr(flow, f"async_step_{source}")(
+                            {"api_url": address}
+                        )
+                    self.assertEqual(result["errors"]["base"], "invalid_url")
+                    fetch.assert_not_awaited()
 
     async def test_handoff_preserves_another_proxy_and_mqtt_registry(self) -> None:
         entry = await self.entry()

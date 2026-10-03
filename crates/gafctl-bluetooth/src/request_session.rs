@@ -40,10 +40,14 @@ impl<T: GattTransport> RequestSession<T> {
     pub(super) async fn query(
         mut self,
         control_command: Option<ControlCommand>,
+        control_deadline: Option<tokio::time::Instant>,
     ) -> Result<QueryResult> {
         let identity = self.exchange(ReadCommand::Identity.into()).await?;
         if let Some(command) = control_command {
             validate_gaf_identity(&identity)?;
+            if control_deadline.is_some_and(|deadline| tokio::time::Instant::now() > deadline) {
+                return Err(anyhow::Error::new(crate::error::ControlExpired));
+            }
             let response = self
                 .exchange(command.into())
                 .await
@@ -187,11 +191,37 @@ mod tests {
         (session, transport)
     }
 
+    #[tokio::test(start_paused = true)]
+    async fn control_expiring_during_identity_read_is_never_written() {
+        let transport = RecordingTransport::default();
+        let responses = stream::once(async {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            b"#idr030000x\n".to_vec()
+        });
+        let session = RequestSession::new(
+            transport.clone(),
+            Box::pin(responses),
+            Duration::from_secs(1),
+        );
+        let result = session
+            .query(
+                Some(ControlCommand::SetTimer(Minutes::new(1))),
+                Some(tokio::time::Instant::now() + Duration::from_millis(100)),
+            )
+            .await;
+        let error = crate::ProbeError::classify(result.unwrap_err());
+        assert_eq!(error.kind(), crate::ProbeErrorKind::StaleControl);
+        assert_eq!(
+            transport.0.lock().unwrap().as_slice(),
+            &[b"#idg\n".to_vec()]
+        );
+    }
+
     #[tokio::test]
     async fn acknowledged_timer_is_retained_when_later_state_read_fails() {
         let (session, transport) = session(&[b"#idr030000x\n", b"#tmr0\n"]);
         let result = session
-            .query(Some(ControlCommand::SetTimer(Minutes::new(1))))
+            .query(Some(ControlCommand::SetTimer(Minutes::new(1))), None)
             .await
             .unwrap();
 
@@ -227,7 +257,7 @@ mod tests {
         let (session, transport) = session(&[b"#idrnot-gaf\n"]);
         assert!(
             session
-                .query(Some(ControlCommand::SetTimer(Minutes::new(1))))
+                .query(Some(ControlCommand::SetTimer(Minutes::new(1))), None)
                 .await
                 .is_err()
         );
