@@ -1,8 +1,7 @@
 use self::control::QuickConnectControlPolicy;
 pub(super) use self::control::{QuickConnectControlIntent, QuickConnectControlStatus};
 use super::{DeviceService, ServiceError};
-use crate::backend::DeviceRegistry;
-use crate::backend::{DeviceRuntime, QuickConnectReadTarget};
+use crate::backend::{CloudDeviceInput, DeviceRegistry, DeviceRegistryError, DeviceRuntime};
 use tokio::sync::RwLock;
 mod control;
 use anyhow::{Context, Result};
@@ -13,9 +12,16 @@ use gafctl_api::{
     QuickConnectModeStatus, StateProvenance,
 };
 use gafctl_quickconnect::{Credentials, QuickConnectClient, QuickConnectConfig};
-use std::{sync::Arc, time::Duration};
+use std::{collections::BTreeMap, sync::Arc, time::Duration};
 
 const QUICKCONNECT_DETAIL_TIMEOUT: Duration = Duration::from_secs(270);
+const QUICKCONNECT_POLL_CONCURRENCY: usize = 4;
+
+struct QuickConnectReadTarget {
+    provider_id: String,
+    runtime: Arc<DeviceRuntime>,
+    generation: u64,
+}
 
 pub(crate) struct QuickConnectRuntimeConfig {
     pub(crate) credentials: Credentials,
@@ -56,28 +62,49 @@ impl QuickConnectBackend {
             .quickconnect_read_target(&self.account_id, id)
             .map_err(|_| ServiceError::UnknownDevice)?;
         let generation = runtime.begin_state_read();
-        match self.client.read_device_state(&provider_id).await {
-            Ok(state) => Ok(
-                if runtime
-                    .set_state_if_current(generation, common_state(state))
-                    .await
-                {
-                    DeviceRefreshStatus::Fresh
-                } else {
-                    DeviceRefreshStatus::Superseded
-                },
-            ),
+        let state = match self.client.read_device_state(&provider_id).await {
+            Ok(state) => Some(state),
             Err(error) => {
                 tracing::warn!(%error, "QuickConnect device refresh failed");
-                Ok(
-                    if runtime.mark_detail_unavailable_if_current(generation).await {
-                        DeviceRefreshStatus::Failed
-                    } else {
-                        DeviceRefreshStatus::Superseded
-                    },
-                )
+                None
             }
-        }
+        };
+        Ok(commit_detail_read(runtime, generation, state).await)
+    }
+
+    async fn reconcile_inventory(
+        &self,
+        inventory: Vec<gafctl_quickconnect::InventoryDevice>,
+        generations: &BTreeMap<DeviceId, u64>,
+    ) -> Result<Vec<QuickConnectReadTarget>, DeviceRegistryError> {
+        let inputs = inventory
+            .into_iter()
+            .map(|device| {
+                let name = device.name().unwrap_or("QuickConnect device").to_owned();
+                CloudDeviceInput::new(device.into_provider_id(), name)
+            })
+            .collect::<Vec<_>>();
+        let mut registry = self.registry.write().await;
+        let ids = registry
+            .reconcile_quickconnect_inventory(&self.account_id, &inputs, generations)
+            .await?;
+        Ok(ids
+            .into_iter()
+            .zip(inputs)
+            .filter_map(|(id, device)| {
+                registry.runtime(&id).map(|runtime| {
+                    let generation = generations
+                        .get(&id)
+                        .copied()
+                        .unwrap_or_else(|| runtime.begin_state_read());
+                    QuickConnectReadTarget {
+                        provider_id: device.into_provider_id(),
+                        runtime,
+                        generation,
+                    }
+                })
+            })
+            .collect())
     }
 }
 
@@ -110,11 +137,8 @@ impl DeviceService {
             .await
             .begin_quickconnect_poll(&cloud.account_id);
         let targets: Result<_, anyhow::Error> = match cloud.client.read_inventory().await {
-            Ok(inventory) => self
-                .registry
-                .write()
-                .await
-                .reconcile_quickconnect_inventory(&cloud.account_id, inventory, &generations)
+            Ok(inventory) => cloud
+                .reconcile_inventory(inventory, &generations)
                 .await
                 .map_err(Into::into),
             Err(error) => {
@@ -130,13 +154,10 @@ impl DeviceService {
         match targets {
             Ok(targets) => {
                 stream::iter(targets)
-                    .for_each_concurrent(
-                        Some(crate::backend::QUICKCONNECT_POLL_CONCURRENCY),
-                        |target| async move {
-                            target.read(&cloud.client).await;
-                            self.publish_state().await;
-                        },
-                    )
+                    .for_each_concurrent(Some(QUICKCONNECT_POLL_CONCURRENCY), |target| async move {
+                        target.read(&cloud.client).await;
+                        self.publish_state().await;
+                    })
                     .await
             }
             Err(error) => tracing::warn!(%error, "QuickConnect inventory polling failed"),
@@ -144,7 +165,7 @@ impl DeviceService {
     }
 }
 impl QuickConnectReadTarget {
-    pub(crate) async fn read(&self, client: &gafctl_quickconnect::QuickConnectClient) {
+    async fn read(&self, client: &gafctl_quickconnect::QuickConnectClient) {
         if tokio::time::timeout(QUICKCONNECT_DETAIL_TIMEOUT, self.read_locked(client))
             .await
             .is_err()
@@ -160,18 +181,32 @@ impl QuickConnectReadTarget {
         if !self.runtime.is_current_state_read(self.generation) {
             return;
         }
-        match client.read_device_state(&self.provider_id).await {
-            Ok(state) => {
-                self.runtime
-                    .set_state_if_current(self.generation, common_state(state))
-                    .await;
-            }
-            Err(_) => {
-                self.runtime
-                    .mark_detail_unavailable_if_current(self.generation)
-                    .await;
-            }
-        }
+        let state = client.read_device_state(&self.provider_id).await.ok();
+        commit_detail_read(&self.runtime, self.generation, state).await;
+    }
+}
+
+async fn commit_detail_read(
+    runtime: &DeviceRuntime,
+    generation: u64,
+    state: Option<gafctl_quickconnect::QuickConnectDeviceState>,
+) -> DeviceRefreshStatus {
+    let (committed, status) = match state {
+        Some(state) => (
+            runtime
+                .set_state_if_current(generation, common_state(state))
+                .await,
+            DeviceRefreshStatus::Fresh,
+        ),
+        None => (
+            runtime.mark_detail_unavailable_if_current(generation).await,
+            DeviceRefreshStatus::Failed,
+        ),
+    };
+    if committed {
+        status
+    } else {
+        DeviceRefreshStatus::Superseded
     }
 }
 

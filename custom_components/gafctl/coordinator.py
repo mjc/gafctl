@@ -236,7 +236,7 @@ class GafctlCoordinator(DataUpdateCoordinator[DeviceState]):
         if (
             self.device is None
             or self.device["backend"] != backend
-            or not self.supports(capability)
+            or capability not in command_kinds(self.device)
         ):
             return None
         return self.current_readings
@@ -248,13 +248,6 @@ class GafctlCoordinator(DataUpdateCoordinator[DeviceState]):
     def number_control_available(self, control: NumberControl) -> bool:
         state = self.control_readings(control.capability, control.backend)
         return state is not None and control.current_supported(state)
-
-    def supports(self, command_kind: str) -> bool:
-        return (
-            self.device is not None
-            and self.http_owned
-            and command_kind in command_kinds(self.device)
-        )
 
     @property
     def http_owned(self) -> bool:

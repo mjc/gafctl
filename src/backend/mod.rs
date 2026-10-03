@@ -20,14 +20,6 @@ use std::{
 };
 use thiserror::Error;
 
-pub(crate) const QUICKCONNECT_POLL_CONCURRENCY: usize = 4;
-
-pub(crate) struct QuickConnectReadTarget {
-    pub(crate) provider_id: String,
-    pub(crate) runtime: Arc<DeviceRuntime>,
-    pub(crate) generation: u64,
-}
-
 pub struct CloudDeviceInput {
     provider_id: String,
     name: String,
@@ -36,6 +28,10 @@ pub struct CloudDeviceInput {
 impl CloudDeviceInput {
     pub fn new(provider_id: String, name: String) -> Self {
         Self { provider_id, name }
+    }
+
+    pub(crate) fn into_provider_id(self) -> String {
+        self.provider_id
     }
 }
 
@@ -214,19 +210,10 @@ impl DeviceRegistry {
     pub async fn reconcile_quickconnect_inventory(
         &mut self,
         account_id: &str,
-        inventory: Vec<gafctl_quickconnect::InventoryDevice>,
+        devices: &[CloudDeviceInput],
         generations: &BTreeMap<DeviceId, u64>,
-    ) -> Result<Vec<QuickConnectReadTarget>, DeviceRegistryError> {
-        let inputs = inventory
-            .iter()
-            .map(|device| {
-                CloudDeviceInput::new(
-                    device.provider_id().to_owned(),
-                    device.name().unwrap_or("QuickConnect device").to_owned(),
-                )
-            })
-            .collect::<Vec<_>>();
-        let ids = match self.reconcile_quickconnect(account_id, &inputs) {
+    ) -> Result<Vec<DeviceId>, DeviceRegistryError> {
+        let ids = match self.reconcile_quickconnect(account_id, devices) {
             Ok(ids) => ids,
             Err(error) => {
                 self.mark_quickconnect_inventory_unavailable(account_id, generations)
@@ -236,23 +223,7 @@ impl DeviceRegistry {
         };
         self.mark_missing_quickconnect_devices(account_id, &ids, generations)
             .await;
-        Ok(ids
-            .into_iter()
-            .zip(inventory)
-            .filter_map(|(id, device)| {
-                self.runtime(&id).map(|runtime| {
-                    let generation = generations
-                        .get(&id)
-                        .copied()
-                        .unwrap_or_else(|| runtime.begin_state_read());
-                    QuickConnectReadTarget {
-                        provider_id: device.into_provider_id(),
-                        runtime,
-                        generation,
-                    }
-                })
-            })
-            .collect())
+        Ok(ids)
     }
 
     async fn mark_missing_quickconnect_devices(

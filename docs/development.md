@@ -146,7 +146,11 @@ ownership. `src/service/refresh.rs` owns detached reads and overlapping refresh
 coordination; the rendezvous channel remains on each device runtime.
 `src/service/quickconnect/` owns one configured cloud backend with its client,
 account identity, registry, and readback policy. Its read and control operations
-share that configuration. State publication serializes snapshot collection and
+share that configuration. It normalizes provider inventory and constructs detail
+read targets. The registry receives normalized identities and owns persistence,
+missing-device status, and read generations. Polling and manual refresh share
+generation-checked detail commits; control readback uses control generations.
+State publication serializes snapshot collection and
 replacement and rejects snapshots with obsolete ownership descriptors.
 
 Each registry entry owns its descriptor and runtime. Re-registration updates
