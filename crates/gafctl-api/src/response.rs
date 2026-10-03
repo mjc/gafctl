@@ -43,6 +43,16 @@ pub enum DeviceRefreshStatus {
     Superseded,
 }
 
+impl DeviceRefreshStatus {
+    pub const fn http_status(self) -> u16 {
+        match self {
+            Self::Fresh => 200,
+            Self::Failed => 502,
+            Self::Superseded => 409,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct DeviceRefreshV2Response {
     pub status: DeviceRefreshStatus,
@@ -249,6 +259,18 @@ impl std::fmt::Display for ControlStatus {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn refresh_status_has_one_http_contract() {
+        use super::DeviceRefreshStatus;
+        for (status, expected) in [
+            (DeviceRefreshStatus::Fresh, 200),
+            (DeviceRefreshStatus::Failed, 502),
+            (DeviceRefreshStatus::Superseded, 409),
+        ] {
+            assert_eq!(status.http_status(), expected);
+        }
+    }
+
     use super::*;
     use crate::EntitySource;
 

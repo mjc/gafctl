@@ -258,5 +258,13 @@ def command_kinds(device: Device) -> set[str]:
     return {command["kind"] for command in device["capabilities"]["commands"]}
 
 
+def mode_is(reported: object, expected: str) -> bool | None:
+    return (
+        reported == expected
+        if isinstance(reported, str) and reported in QUICKCONNECT_MODES
+        else None
+    )
+
+
 def tenths(value: int | None) -> float | None:
     return value / 10 if value is not None else None

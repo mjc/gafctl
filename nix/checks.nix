@@ -54,18 +54,31 @@ let
       openFirewall = true;
     }
   );
+  serviceFixture = {
+    fixtureDirectory = "/run/gafctl-nix-check";
+    stateDirectory = "/var/lib/gafctl-nix-check";
+    unit = "gafctl-nix-check.service";
+    broker = "gafctl-nix-check-broker.service";
+    username = "test-account";
+    httpPort = 19787;
+    mqttPort = 19883;
+  };
   service = enabled {
-    port = 19787;
+    port = serviceFixture.httpPort;
     mqtt = mqttSettings.mqtt // {
       host = "127.0.0.1";
-      port = 19883;
-      passwordFile = "/run/gafctl-nix-check/password";
+      port = serviceFixture.mqttPort;
+      username = serviceFixture.username;
+      passwordFile = "${serviceFixture.fixtureDirectory}/password";
     };
   };
   serviceText =
     lib.replaceStrings
       [ "/var/lib/gafctl/" "StateDirectory=gafctl\n" ]
-      [ "/var/lib/gafctl-nix-check/" "StateDirectory=gafctl-nix-check\n" ]
+      [
+        "${serviceFixture.stateDirectory}/"
+        "StateDirectory=${baseNameOf serviceFixture.stateDirectory}\n"
+      ]
       service.systemd.units."gafctl.service".text;
   checks = {
     homeAssistant =
@@ -135,5 +148,19 @@ assert lib.assertMsg (builtins.all (value: value) (
   builtins.attrValues checks
 )) "gafctl NixOS configuration checks failed: ${builtins.toJSON checks}";
 (pkgs.writeText "gafctl-module-checks.json" (builtins.toJSON checks)).overrideAttrs (_: {
-  passthru.service = pkgs.writeTextDir "gafctl-nix-check.service" serviceText;
+  passthru.service =
+    pkgs.runCommandLocal "gafctl-nix-check"
+      {
+        unit = pkgs.writeText serviceFixture.unit serviceText;
+        fixture = pkgs.writeText "gafctl-nix-check-fixture.json" (builtins.toJSON serviceFixture);
+      }
+      ''
+        mkdir -p "$out"
+        cp "$unit" "$out/${serviceFixture.unit}"
+        cp "$fixture" "$out/fixture.json"
+        for file in "$out/${serviceFixture.unit}" "$out/fixture.json"; do
+          test -f "$file"
+          test ! -L "$file"
+        done
+      '';
 })

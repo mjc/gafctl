@@ -70,27 +70,26 @@ jobs:
           pattern: packages-*
           path: dist
           merge-multiple: true
+      - name: Create image artifact directory
+        id: image-artifacts
+        run: echo "path=$(mktemp -d "$RUNNER_TEMP/gafctl-images.XXXXXX")" >> "$GITHUB_OUTPUT"
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           pattern: image-*
-          path: images
+          path: ${{ steps.image-artifacts.outputs.path }}
       - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
       - name: Publish multi-architecture image
+        env:
+          IMAGE_ARTIFACT_DIRECTORY: ${{ steps.image-artifacts.outputs.path }}
         shell: bash
         run: |
           image="ghcr.io/${GITHUB_REPOSITORY,,}"
           version="${GITHUB_REF_NAME#v}"
-          for arch in amd64 arm64; do
-            docker load --input "images/image-$arch/gafctl-image.tar"
-            docker tag gafctl:local "$image:$version-$arch"
-            docker push "$image:$version-$arch"
-          done
-          docker manifest create "$image:$version" "$image:$version-amd64" "$image:$version-arm64"
-          docker manifest push "$image:$version"
+          packaging/publish-images.sh "$image" "$version" "$IMAGE_ARTIFACT_DIRECTORY"
       - name: Publish packages and checksums
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

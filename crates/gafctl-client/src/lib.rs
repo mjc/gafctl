@@ -24,7 +24,7 @@ use std::{
 
 use gafctl_api::{
     CommandId, ContractError, DeviceCommand, DeviceControlV2Request, DeviceControlV2Response,
-    DeviceDescriptor, DeviceId, DeviceListV2Response, DeviceRefreshStatus, DeviceRefreshV2Response,
+    DeviceDescriptor, DeviceId, DeviceListV2Response, DeviceRefreshV2Response,
     DeviceStateV2Response, unix_millis,
 };
 use reqwest::{RequestBuilder, Url, redirect::Policy};
@@ -280,11 +280,7 @@ impl Client {
         if &response.device.id != id || response.device.backend != descriptor.backend {
             return Err(response_error(status, ClientError::Identity));
         }
-        let expected_status = match response.status {
-            DeviceRefreshStatus::Fresh => 200,
-            DeviceRefreshStatus::Failed => 502,
-            DeviceRefreshStatus::Superseded => 409,
-        };
+        let expected_status = response.status.http_status();
         if status != expected_status {
             return Err(response_error(status, ClientError::RefreshStatus));
         }

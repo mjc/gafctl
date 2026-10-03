@@ -5,7 +5,7 @@ from homeassistant.const import EntityCategory
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
-from .controls import MODE_LABELS, entity_keys
+from .controls import MODE_LABELS, entity_keys, mode_is
 from .coordinator import GafctlConfigEntry, GafctlCoordinator
 from .entity import GafctlReadingEntity
 from .models import JsonObject
@@ -58,11 +58,7 @@ class GafctlBinarySensor(GafctlReadingEntity, BinarySensorEntity):
     def is_on(self) -> bool | None:
         value = self.reading_value(self._path)
         if self._key.endswith("_mode"):
-            return (
-                value == self._key.removesuffix("_mode")
-                if value in MODE_LABELS
-                else None
-            )
+            return mode_is(value, self._key.removesuffix("_mode"))
         return value
 
     @property

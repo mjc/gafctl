@@ -37,7 +37,10 @@ This runs Nix evaluation and formatting, Clippy with warnings denied for all fea
 and HTTP-only configurations, workspace tests with all features, CLI-only and
 HTTP-only tests, Rust doctests, Ruff formatting and lint checks, strict typing of the Python
 client, models and controls, and the Python
-Home Assistant client tests.
+Home Assistant client tests and release image publication tests.
+
+`check:release` uses a local Docker stub to check artifact validation,
+architecture agreement, image tags and manifest members. It does not publish images.
 
 On native Linux, `check:all` also runs `check:ha-registry`. That task uses Home
 Assistant and MQTT dependencies pinned by `devenv.lock`, generates discovery
@@ -195,9 +198,9 @@ devenv shell -- python3 packaging/check-native.py --package ./result
 
 On a disposable NixOS test host with an existing `gafctl` system account and
 BlueZ policy, run `packaging/check-nix-service.sh` inside the devenv shell.
-It builds the module's generated test unit, starts a private MQTT broker,
-checks credential loading, HTTP, service permissions, and identity persistence
-across restart, then removes its units and fixtures. It uses ports 19787/19883
-and never configures a fan or cloud account. Set `GAFCTL_CHECK_SUDO=doas` if
-that is the host's privilege tool. The check reads BlueZ's object list as the
+It builds the module's generated test unit, reads its fixture metadata, starts a
+private MQTT broker, and checks credential loading, HTTP, service permissions and identity persistence
+across restart, then removes its units and fixtures. The artifact defines the
+test ports, paths and unit names. It never configures a fan or cloud account.
+Set `GAFCTL_CHECK_SUDO=doas` if that is the host's privilege tool. The check reads BlueZ's object list as the
 service account without scanning or connecting to a device.

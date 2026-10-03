@@ -825,11 +825,8 @@ async fn refresh_device_v2(
 ) -> Result<Response, StatusCode> {
     let id = DeviceId::parse(id).ok_or(StatusCode::NOT_FOUND)?;
     let response = state.refresh_device(&id).await?;
-    let status = match response.status {
-        DeviceRefreshStatus::Fresh => StatusCode::OK,
-        DeviceRefreshStatus::Failed => StatusCode::BAD_GATEWAY,
-        DeviceRefreshStatus::Superseded => StatusCode::CONFLICT,
-    };
+    let status = StatusCode::from_u16(response.status.http_status())
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     Ok((status, Json(response.as_ref())).into_response())
 }
 

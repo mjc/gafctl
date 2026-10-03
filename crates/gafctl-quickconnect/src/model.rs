@@ -48,6 +48,22 @@ pub enum DeviceModeStatus {
     Conflicting,
 }
 
+impl DeviceModeStatus {
+    pub(crate) fn from_flags(flags: [Option<bool>; 3]) -> Self {
+        let enabled = flags.iter().filter(|flag| **flag == Some(true)).count();
+        if enabled > 1 {
+            return Self::Conflicting;
+        }
+        match flags {
+            [Some(false), Some(false), Some(false)] => Self::Off,
+            [Some(true), Some(false), Some(false)] => Self::Automatic,
+            [Some(false), Some(true), Some(false)] => Self::Timer,
+            [Some(false), Some(false), Some(true)] => Self::Manual,
+            _ => Self::Unknown,
+        }
+    }
+}
+
 /// QuickConnect settings decoded without filling missing fields with defaults.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct QuickConnectSettings {
@@ -185,17 +201,7 @@ fn decode_mode(settings: Option<&serde_json::Map<String, Value>>) -> DeviceModeS
     };
     let flags = ["automaticMode", "timerMode", "fanMode"]
         .map(|field| settings.get(field).and_then(Value::as_bool));
-    let enabled = flags.iter().filter(|flag| **flag == Some(true)).count();
-    if enabled > 1 {
-        return DeviceModeStatus::Conflicting;
-    }
-    match flags {
-        [Some(false), Some(false), Some(false)] => DeviceModeStatus::Off,
-        [Some(true), Some(false), Some(false)] => DeviceModeStatus::Automatic,
-        [Some(false), Some(true), Some(false)] => DeviceModeStatus::Timer,
-        [Some(false), Some(false), Some(true)] => DeviceModeStatus::Manual,
-        _ => DeviceModeStatus::Unknown,
-    }
+    DeviceModeStatus::from_flags(flags)
 }
 
 fn estimate_running(
@@ -248,6 +254,23 @@ fn diagnostic_string(value: Option<&Value>) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn optional_mode_flags_preserve_unknown_and_conflicting_values() {
+        use super::DeviceModeStatus;
+        assert_eq!(
+            DeviceModeStatus::from_flags([Some(true), None, Some(false)]),
+            DeviceModeStatus::Unknown
+        );
+        assert_eq!(
+            DeviceModeStatus::from_flags([Some(true), Some(true), None]),
+            DeviceModeStatus::Conflicting
+        );
+        assert_eq!(
+            DeviceModeStatus::from_flags([None; 3]),
+            DeviceModeStatus::Unknown
+        );
+    }
+
     use super::*;
     use serde_json::json;
 

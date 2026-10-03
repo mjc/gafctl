@@ -102,13 +102,9 @@ pub struct SetModeBody {
 
 impl SetModeBody {
     fn mode(&self) -> DeviceModeStatus {
-        match (self.automatic_mode, self.timer_mode, self.fan_mode) {
-            (false, false, false) => DeviceModeStatus::Off,
-            (true, false, false) => DeviceModeStatus::Automatic,
-            (false, true, false) => DeviceModeStatus::Timer,
-            (false, false, true) => DeviceModeStatus::Manual,
-            _ => DeviceModeStatus::Conflicting,
-        }
+        DeviceModeStatus::from_flags(
+            [self.automatic_mode, self.timer_mode, self.fan_mode].map(Some),
+        )
     }
 }
 

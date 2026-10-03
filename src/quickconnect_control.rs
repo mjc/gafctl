@@ -362,23 +362,8 @@ impl QuickConnectControlService {
         } else {
             QuickConnectControlStatus::ReadbackUnavailable
         };
-        match result.state {
-            Some(state) => {
-                if !runtime
-                    .set_control_state_if_current(generation, crate::backend::common_state(state))
-                    .await
-                {
-                    return QuickConnectControlStatus::SubmittedUnconfirmed;
-                }
-            }
-            None => {
-                if !runtime
-                    .mark_control_state_unavailable_if_current(generation)
-                    .await
-                {
-                    return QuickConnectControlStatus::SubmittedUnconfirmed;
-                }
-            }
+        if !Self::publish_readback(runtime, generation, result.state).await {
+            return QuickConnectControlStatus::SubmittedUnconfirmed;
         }
         status
     }
@@ -447,16 +432,24 @@ impl QuickConnectControlService {
             _ = runtime.wait_for_control_change(generation) => return,
             result = read => result,
         };
-        match result {
-            Ok(Ok(state)) => {
+        Self::publish_readback(runtime, generation, result.ok().and_then(Result::ok)).await;
+    }
+
+    async fn publish_readback(
+        runtime: &DeviceRuntime,
+        generation: u64,
+        state: Option<gafctl_quickconnect::QuickConnectDeviceState>,
+    ) -> bool {
+        match state {
+            Some(state) => {
                 runtime
                     .set_control_state_if_current(generation, crate::backend::common_state(state))
-                    .await;
+                    .await
             }
-            Ok(Err(_)) | Err(_) => {
+            None => {
                 runtime
                     .mark_control_state_unavailable_if_current(generation)
-                    .await;
+                    .await
             }
         }
     }

@@ -300,8 +300,7 @@ fn select_config(
     field: &str,
 ) -> (String, Value) {
     let mut config = base(device, key, name, "state.settings.mode");
-    config["command_topic"] = json!(Topics(device.proxy_id).device(&device.id, "control/set"));
-    config["qos"] = json!(1);
+    set_command_topic(&mut config, device, "control/set");
     config["options"] = json!(options);
     config["entity_category"] = json!("config");
     config["command_template"] = json!(command_template(&format!(
@@ -457,8 +456,7 @@ impl NumberControl {
         config["unit_of_measurement"] = json!(self.unit);
         config["mode"] = json!("box");
         config["optimistic"] = json!(false);
-        config["command_topic"] = json!(Topics(device.proxy_id).device(&device.id, "control/set"));
-        config["qos"] = json!(1);
+        set_command_topic(&mut config, device, "control/set");
         config["command_template"] = json!(format!(
             "{{% set number = value | float(default=none) %}}{}",
             command_template(&format!(
@@ -580,9 +578,8 @@ fn request_template(command: Option<&str>) -> String {
 
 fn button_configs(device: &DeviceDescriptor) -> impl Iterator<Item = (String, Value)> + '_ {
     let refresh = device.capabilities.read_state.then(|| {
-        let mut config = button_config(device, "refresh", "Refresh readings");
+        let mut config = button_config(device, "refresh", "Refresh readings", "refresh/set");
         config["availability"] = json!([{"topic":Topics(device.proxy_id).process_availability()}]);
-        config["command_topic"] = json!(Topics(device.proxy_id).device(&device.id, "refresh/set"));
         config["command_template"] = json!(request_template(None));
         config["entity_category"] = json!("diagnostic");
         (topic(device, "button", "refresh"), config)
@@ -592,7 +589,7 @@ fn button_configs(device: &DeviceDescriptor) -> impl Iterator<Item = (String, Va
         .commands
         .contains(&CommandCapability::QuickConnectMode)
         .then(|| {
-            let mut config = button_config(device, "all_off", "All off");
+            let mut config = button_config(device, "all_off", "All off", "control/set");
             config["command_template"] = json!(command_template(
                 "{\"kind\":\"quick_connect_mode\",\"mode\":\"off\"}"
             ));
@@ -601,13 +598,17 @@ fn button_configs(device: &DeviceDescriptor) -> impl Iterator<Item = (String, Va
     refresh.into_iter().chain(off)
 }
 
-fn button_config(device: &DeviceDescriptor, key: &str, name: &str) -> Value {
+fn set_command_topic(config: &mut Value, device: &DeviceDescriptor, suffix: &str) {
+    config["command_topic"] = json!(Topics(device.proxy_id).device(&device.id, suffix));
+    config["qos"] = json!(1);
+}
+
+fn button_config(device: &DeviceDescriptor, key: &str, name: &str, suffix: &str) -> Value {
     let mut config = base(device, key, name, "");
     let object = config.as_object_mut().expect("base discovery is an object");
     object.remove("state_topic");
     object.remove("value_template");
-    config["command_topic"] = json!(Topics(device.proxy_id).device(&device.id, "control/set"));
-    config["qos"] = json!(1);
+    set_command_topic(&mut config, device, suffix);
     config
 }
 
@@ -622,8 +623,7 @@ fn switch_configs(device: &DeviceDescriptor) -> impl Iterator<Item = (String, Va
             config["state_on"] = json!(mode);
             config["state_off"] = json!("inactive");
             config["value_template"] = json!(format!("{{% set mode = ((value_json.state or {{}}).get('settings') or {{}}).get('mode') %}}{{{{ '{mode}' if mode == '{mode}' else ('inactive' if mode in ['off','automatic','timer','manual'] else none) }}}}"));
-            config["command_topic"] = json!(Topics(device.proxy_id).device(&device.id, "control/set"));
-            config["qos"] = json!(1);
+            set_command_topic(&mut config, device, "control/set");
             config["optimistic"] = json!(false);
             config["command_template"] = json!(command_template(&format!("{{% if value == 'ON' %}}{{\"kind\":\"quick_connect_mode\",\"mode\":\"{mode}\"}}{{% elif value == 'OFF' %}}{{\"kind\":\"quick_connect_conditional_off\",\"only_if_current\":\"{mode}\"}}{{% else %}}null{{% endif %}}")));
             (topic(device, "switch", &key), config)

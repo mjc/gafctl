@@ -12,7 +12,7 @@ from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
 from .client import ApiClient
-from .const import CONF_DEVICE_ID, CONF_PROXY_ID, UPDATE_INTERVAL
+from .const import CONF_DEVICE_ID, UPDATE_INTERVAL
 from .controls import (
     CONTROL_PRESETS,
     QUICKCONNECT_MODES,
@@ -28,6 +28,7 @@ from .models import (
     DeviceState,
     JsonObject,
     Readings,
+    configured_identity,
     device_identity,
 )
 
@@ -41,11 +42,7 @@ class GafctlCoordinator(DataUpdateCoordinator[DeviceState]):
         self.client = client
         self.device: Device | None = None
         self.device_id = entry.data[CONF_DEVICE_ID]
-        self._identity = (
-            entry.data[CONF_PROXY_ID],
-            self.device_id,
-            entry.data["backend"],
-        )
+        self._identity = configured_identity(entry.data)
         self.entry = entry
         self.loaded_entity_keys: dict[str, set[str]] = {}
         self.command_lock = asyncio.Lock()

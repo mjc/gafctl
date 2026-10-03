@@ -4,7 +4,7 @@ from homeassistant.components.switch import SwitchEntity
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
-from .controls import MODE_LABELS, QUICKCONNECT_MODES, entity_keys
+from .controls import MODE_LABELS, entity_keys, mode_is
 from .coordinator import GafctlConfigEntry, GafctlCoordinator
 from .entity import GafctlEntity, translate_api_errors
 
@@ -33,7 +33,7 @@ class GafctlModeSwitch(GafctlEntity, SwitchEntity):
     def is_on(self) -> bool | None:
         state = self.state_values
         mode = state["settings"]["mode"] if state else None
-        return mode == self._mode if mode in QUICKCONNECT_MODES else None
+        return mode_is(mode, self._mode)
 
     @property
     def available(self) -> bool:

@@ -15,6 +15,7 @@ from unittest.mock import AsyncMock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from ha_fixtures import (
+    PROXY_ID,
     changed_device,
     device,
     diagnostics,
@@ -51,7 +52,6 @@ from custom_components.gafctl.controls import NUMBER_CONTROLS
 from custom_components.gafctl.models import ApiError, ControlOutcomeUnknown
 
 COMPONENT_DIR = Path(__file__).resolve().parents[1] / "custom_components/gafctl"
-PROXY_ID = "550e8400-e29b-41d4-a716-446655440000"
 
 
 @contextmanager
@@ -285,6 +285,63 @@ class RegistryTests(unittest.IsolatedAsyncioTestCase):
                 else:
                     result = await flow.async_step_import(requested)
                     self.assertEqual(result["reason"], "device_unavailable")
+
+    async def test_import_rejects_missing_identity_fields(self) -> None:
+        requested = {
+            "api_url": "http://proxy:8787",
+            "device_id": "configured",
+            "proxy_id": PROXY_ID,
+            "backend": "legacy_ble",
+        }
+        for missing in ("proxy_id", "device_id", "backend"):
+            with self.subTest(missing=missing):
+                flow = self.flow({"source": "import"})
+                with patch.object(
+                    flow, "_fetch_devices", AsyncMock(return_value=[device()])
+                ):
+                    result = await flow.async_step_import(
+                        {
+                            key: value
+                            for key, value in requested.items()
+                            if key != missing
+                        }
+                    )
+                self.assertEqual(result["reason"], "device_unavailable")
+
+    async def test_mode_entities_preserve_known_and_unknown_projections(self) -> None:
+        entry = await self.entry()
+        selected = device(backend="quick_connect", commands=["quick_connect_mode"])
+        coordinator = coordinator_for(self.hass, AsyncMock(), selected, entry)
+        entry.runtime_data = coordinator
+        switches = await self.platform_entities(gafctl_switch, coordinator)
+        sensors = await self.platform_entities(gafctl_binary, coordinator)
+        sensors = [entity for entity in sensors if entity.unique_id.endswith("_mode")]
+        self.assertEqual(len(switches), 3)
+        self.assertEqual(len(sensors), 3)
+        for reported in (
+            "automatic",
+            "timer",
+            "manual",
+            "off",
+            "unknown",
+            "conflicting",
+            None,
+        ):
+            with self.subTest(reported=reported):
+                coordinator.async_set_updated_data(
+                    state_data(
+                        backend="quick_connect",
+                        state=readings(settings=quickconnect_settings(mode=reported)),
+                    )
+                )
+                for entity in (*switches, *sensors):
+                    expected_mode = entity.unique_id.rsplit("_", 2)[-2]
+                    expected = (
+                        reported == expected_mode
+                        if reported in ("automatic", "timer", "manual", "off")
+                        else None
+                    )
+                    self.assertIs(entity.is_on, expected)
 
     async def test_reconfigure_preserves_identity_and_rejects_another_proxy(
         self,

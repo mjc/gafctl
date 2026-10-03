@@ -9,7 +9,14 @@ from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from .client import ApiClient, normalize_api_url
 from .const import CONF_API_URL, CONF_DEVICE_ID, CONF_PROXY_ID, DEFAULT_API_URL, DOMAIN
 from .controls import entity_keys, select_device
-from .models import ApiError, Device, JsonObject, JsonValue, device_identity
+from .models import (
+    ApiError,
+    Device,
+    JsonObject,
+    JsonValue,
+    configured_identity,
+    device_identity,
+)
 
 CONF_DEVICE_IDS = "device_ids"
 
@@ -114,11 +121,7 @@ class GafctlConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             device = select_device(
                 await self._fetch_devices(self._api_url), user_input[CONF_DEVICE_ID]
             )
-            if device_identity(device) != (
-                user_input[CONF_PROXY_ID],
-                user_input[CONF_DEVICE_ID],
-                user_input["backend"],
-            ):
+            if device_identity(device) != configured_identity(user_input):
                 raise ApiError("identity changed")
         except ApiError, KeyError:
             return self.async_abort(reason="device_unavailable")
@@ -150,11 +153,7 @@ class GafctlConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             return self._address_form(
                 "reconfigure", default, {"base": "cannot_connect"}
             )
-        identity = (
-            entry.data[CONF_PROXY_ID],
-            entry.data[CONF_DEVICE_ID],
-            entry.data["backend"],
-        )
+        identity = configured_identity(entry.data)
         if device_identity(device) != identity:
             return self._address_form("reconfigure", default, {"base": "wrong_device"})
         return self.async_update_reload_and_abort(

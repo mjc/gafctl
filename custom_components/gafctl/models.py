@@ -1,6 +1,7 @@
 """The fixed Gafctl HTTP response shapes."""
 
-from typing import Literal, TypedDict
+from collections.abc import Mapping
+from typing import Any, Literal, TypedDict
 
 type Backend = Literal["legacy_ble", "quick_connect"]
 type EntitySource = Literal["http", "mqtt"]
@@ -81,6 +82,10 @@ class DeviceState(TypedDict):
 
 def device_identity(device: Device) -> tuple[str, str, Backend]:
     return device["proxy_id"], device["id"], device["backend"]
+
+
+def configured_identity(data: Mapping[str, Any]) -> tuple[str, str, Backend]:
+    return data["proxy_id"], data["device_id"], data["backend"]
 
 
 class ApiError(Exception):
