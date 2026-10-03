@@ -5,12 +5,15 @@ pub mod control;
 mod control_display;
 pub mod device;
 mod legacy_control;
+mod legacy_projection;
 mod logging;
 #[cfg(feature = "mqtt")]
 mod mqtt;
 mod output;
 pub mod quickconnect_control;
 mod stdout;
+#[cfg(test)]
+mod test_support;
 
 use std::process::ExitCode;
 

@@ -313,7 +313,6 @@ class RegistryTests(unittest.IsolatedAsyncioTestCase):
         entry = await self.entry()
         selected = device(backend="quick_connect", commands=["quick_connect_mode"])
         coordinator = coordinator_for(self.hass, AsyncMock(), selected, entry)
-        entry.runtime_data = coordinator
         switches = await self.platform_entities(gafctl_switch, coordinator)
         sensors = await self.platform_entities(gafctl_binary, coordinator)
         sensors = [entity for entity in sensors if entity.unique_id.endswith("_mode")]
@@ -383,16 +382,11 @@ class RegistryTests(unittest.IsolatedAsyncioTestCase):
         selected = device(backend="quick_connect", commands=["quick_connect_mode"])
         coordinator = coordinator_for(self.hass, AsyncMock(), selected, entry)
         coordinator.async_set_updated_data(
-            state_data(
-                backend="quick_connect",
-                state=readings(settings=quickconnect_settings(mode="automatic")),
-            )
+            state_data(backend="quick_connect", state=reported_state("quick_connect"))
         )
-        entry.runtime_data = coordinator
         coordinator.async_set_mode = AsyncMock()
-        switches, buttons = ([], [])
-        await gafctl_switch.async_setup_entry(self.hass, entry, switches.extend)
-        await gafctl_button.async_setup_entry(self.hass, entry, buttons.extend)
+        switches = await self.platform_entities(gafctl_switch, coordinator)
+        buttons = await self.platform_entities(gafctl_button, coordinator)
         self.assertEqual([switch.is_on for switch in switches], [True, False, False])
         self.assertTrue(all(switch.available for switch in switches))
         await switches[2].async_turn_on()
@@ -407,9 +401,7 @@ class RegistryTests(unittest.IsolatedAsyncioTestCase):
         coordinator.device = changed_device(selected, commands=[])
         self.assertFalse(all_off.available)
         self.assertTrue(all(not switch.available for switch in switches))
-        empty = []
-        await gafctl_switch.async_setup_entry(self.hass, entry, empty.extend)
-        self.assertEqual(empty, [])
+        self.assertEqual(await self.platform_entities(gafctl_switch, coordinator), [])
 
     async def test_mode_control_rejects_mismatched_readback_and_unknown_conditional_off(
         self,
@@ -417,10 +409,7 @@ class RegistryTests(unittest.IsolatedAsyncioTestCase):
         entry = await self.entry()
         selected = device(backend="quick_connect", commands=["quick_connect_mode"])
         client = fake_client(devices=[selected])
-        old = state_data(
-            backend="quick_connect",
-            state=readings(settings=quickconnect_settings(mode="automatic")),
-        )
+        old = state_data(backend="quick_connect", state=reported_state("quick_connect"))
         client.fetch_state.return_value = old
         coordinator = coordinator_for(self.hass, client, selected, entry)
         with self.assertRaises(ApiError):
@@ -440,10 +429,7 @@ class RegistryTests(unittest.IsolatedAsyncioTestCase):
         entry = await self.entry()
         selected = device(backend="quick_connect", commands=["quick_connect_mode"])
         client = fake_client(devices=[selected])
-        old = state_data(
-            backend="quick_connect",
-            state=readings(settings=quickconnect_settings(mode="automatic")),
-        )
+        old = state_data(backend="quick_connect", state=reported_state("quick_connect"))
         new = old | {"state": readings(settings=quickconnect_settings(mode="off"))}
         client.fetch_state.side_effect = [old, new]
         coordinator = coordinator_for(self.hass, client, selected, entry)
@@ -575,17 +561,7 @@ class RegistryTests(unittest.IsolatedAsyncioTestCase):
         }[operation]
         selected = device(backend=backend, commands=[capability])
         client = fake_client(devices=[selected])
-        settings = (
-            quickconnect_settings(mode="automatic")
-            if operation == "mode"
-            else legacy_settings(
-                mode="automatic",
-                automatic_temperature_tenths_f=1050,
-                timer_original_minutes=0,
-                timer_remaining_minutes=0,
-            )
-        )
-        old = state_data(backend=backend, state=readings(settings=settings))
+        old = state_data(backend=backend, state=reported_state(backend))
         updated = (
             quickconnect_settings(mode="manual")
             if operation == "mode"
@@ -829,7 +805,6 @@ class RegistryTests(unittest.IsolatedAsyncioTestCase):
         return flow
 
     async def platform_entities(self, module, coordinator):
-        coordinator.entry.runtime_data = coordinator
         entities = []
         await module.async_setup_entry(self.hass, coordinator.entry, entities.extend)
         return entities

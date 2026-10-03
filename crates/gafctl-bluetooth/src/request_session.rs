@@ -43,7 +43,7 @@ impl<T: GattTransport> RequestSession<T> {
         control_deadline: Option<tokio::time::Instant>,
     ) -> Result<QueryResult> {
         let identity = self.exchange(ReadCommand::Identity.into()).await?;
-        if let Some(command) = control_command {
+        let (snapshot, state_error, control) = if let Some(command) = control_command {
             validate_gaf_identity(&identity)?;
             if control_deadline.is_some_and(|deadline| tokio::time::Instant::now() > deadline) {
                 return Err(anyhow::Error::new(crate::error::ControlExpired));
@@ -52,36 +52,25 @@ impl<T: GattTransport> RequestSession<T> {
                 .exchange(command.into())
                 .await
                 .context("wait for ordinary control acknowledgement")?;
-            return match self.read_state(identity).await {
-                Ok(snapshot) => Ok(QueryResult {
-                    control: Some(
-                        ControlOutcome::from_response(command, response, Some(&snapshot))
-                            .context("validate ordinary control outcome")?,
-                    ),
-                    snapshot: Some(snapshot),
-                    state_error: None,
-                    discovery_failures: Vec::new(),
-                    disconnect: DisconnectOutcome::Disconnected,
-                }),
-                Err(error) => Ok(QueryResult {
-                    control: Some(
-                        ControlOutcome::from_response(command, response, None)
-                            .context("retain ordinary control acknowledgement")?,
-                    ),
-                    snapshot: None,
-                    state_error: Some(format!("{error:#}")),
-                    discovery_failures: Vec::new(),
-                    disconnect: DisconnectOutcome::Disconnected,
-                }),
+            let (snapshot, state_error, context) = match self.read_state(identity).await {
+                Ok(snapshot) => (Some(snapshot), None, "validate ordinary control outcome"),
+                Err(error) => (
+                    None,
+                    Some(format!("{error:#}")),
+                    "retain ordinary control acknowledgement",
+                ),
             };
-        }
-
-        let snapshot = self.read_state(identity).await?;
+            let control = ControlOutcome::from_response(command, response, snapshot.as_ref())
+                .context(context)?;
+            (snapshot, state_error, Some(control))
+        } else {
+            (Some(self.read_state(identity).await?), None, None)
+        };
         Ok(QueryResult {
-            snapshot: Some(snapshot),
-            state_error: None,
+            snapshot,
+            state_error,
             discovery_failures: Vec::new(),
-            control: None,
+            control,
             disconnect: DisconnectOutcome::Disconnected,
         })
     }
@@ -214,6 +203,18 @@ mod tests {
         assert_eq!(
             transport.0.lock().unwrap().as_slice(),
             &[b"#idg\n".to_vec()]
+        );
+    }
+
+    #[tokio::test]
+    async fn ordinary_state_read_failure_is_returned_as_error() {
+        let (session, transport) = session(&[b"#idr030000x\n"]);
+        let error = session.query(None, None).await.unwrap_err();
+
+        assert!(format!("{error:#}").contains("BLE notification stream ended"));
+        assert_eq!(
+            transport.0.lock().unwrap().as_slice(),
+            &[b"#idg\n".to_vec(), b"#dmg\n".to_vec()]
         );
     }
 

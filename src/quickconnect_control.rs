@@ -507,9 +507,7 @@ mod tests {
             QuickConnectControlStatus,
         },
     };
-    use gafctl_quickconnect::{
-        AccountRole, Credentials, QuickConnectClient, QuickConnectCommand, QuickConnectConfig,
-    };
+    use gafctl_quickconnect::QuickConnectCommand;
 
     #[test]
     fn intent_and_outcome_preserve_the_validated_request_id_allocation() {
@@ -585,19 +583,7 @@ mod tests {
             .route("/gaf/device", get(detail))
             .route("/gaf/deviceMode/provider-fan", post(save_settings))
             .with_state(mock.clone());
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap();
-        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-        let base = reqwest::Url::parse(&format!("http://{address}/")).unwrap();
-        let client = QuickConnectClient::new(
-            Credentials::new(
-                "synthetic-user",
-                "synthetic-password",
-                AccountRole::Contractor,
-            ),
-            QuickConnectConfig::new(base.join("cognito/").unwrap(), base.join("gaf/").unwrap()),
-        )
-        .unwrap();
+        let (client, server) = crate::test_support::mock_client(app).await;
         let store_path = std::env::temp_dir()
             .join(format!("gafctl-control-{}", uuid::Uuid::new_v4()))
             .join("identities.json");

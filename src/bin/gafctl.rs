@@ -4,6 +4,8 @@ mod cli_ble;
 mod cli_client;
 #[path = "../control_display.rs"]
 mod control_display;
+#[path = "../legacy_projection.rs"]
+mod legacy_projection;
 #[path = "../logging.rs"]
 mod logging;
 #[path = "../stdout.rs"]

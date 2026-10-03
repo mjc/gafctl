@@ -10,8 +10,8 @@ use crate::backend::{DeviceRegistry, DeviceRuntime, RefreshReceiver, RefreshRese
 use crate::control::ControlPreset;
 use crate::control::{CommandId, is_fresh_at, unix_millis};
 use crate::device::{
-    DeviceBackend, DeviceCommand, DeviceDescriptor, DeviceId, DeviceSettings, DeviceState,
-    EntitySource, EntitySources, LegacyMode, StateProvenance,
+    DeviceBackend, DeviceCommand, DeviceDescriptor, DeviceId, DeviceState, EntitySource,
+    EntitySources,
 };
 use anyhow::{Context, Result};
 use axum::{
@@ -518,12 +518,6 @@ impl LegacyBleRuntime {
             let poll_id = self.reconciler.write().await.begin_poll();
             let result = self.probe(None).await;
             let thresholds = probe_thresholds(&result);
-            if let Ok(ProbeResult::Queried { result, .. }) = &result
-                && let Some(snapshot) = &result.snapshot
-                && let Some(projection) = project_legacy_snapshot(snapshot)
-            {
-                self.device.set_state(projection).await;
-            }
             self.reconcile_poll_result(poll_id, result).await;
             state.publish_state().await;
             thresholds
@@ -601,6 +595,14 @@ impl LegacyBleRuntime {
     async fn read_state_locked(&self) -> DeviceRefreshStatus {
         let poll_id = self.reconciler.write().await.begin_poll();
         let result = self.probe(None).await;
+        self.reconcile_poll_result(poll_id, result).await
+    }
+
+    async fn reconcile_poll_result(
+        &self,
+        poll_id: u64,
+        result: Result<ProbeResult, ProbeError>,
+    ) -> DeviceRefreshStatus {
         let status = if let Ok(ProbeResult::Queried { result, .. }) = &result
             && let Some(snapshot) = &result.snapshot
             && let Some(projection) = project_legacy_snapshot(snapshot)
@@ -610,13 +612,9 @@ impl LegacyBleRuntime {
         } else {
             DeviceRefreshStatus::Failed
         };
-        self.reconcile_poll_result(poll_id, result).await;
-        status
-    }
-
-    async fn reconcile_poll_result(&self, poll_id: u64, result: Result<ProbeResult, ProbeError>) {
         let mut reconciler = self.reconciler.write().await;
         record_poll_result(&mut reconciler, poll_id, result);
+        status
     }
 }
 
@@ -1462,42 +1460,12 @@ struct HealthResponse {
 }
 
 fn project_legacy_snapshot(snapshot: &DeviceSnapshot) -> Option<DeviceState> {
-    let identity = snapshot.identity.decoded().ok()?;
-    let mode = snapshot.mode.decoded().ok()?;
-    let sensors = snapshot.sensors.decoded().ok()?;
-    let thresholds = snapshot.thresholds.decoded().ok()?;
-    let timer = snapshot.timer.decoded().ok()?;
-    let version = identity.firmware_version;
-    let firmware_version = format!("{}.{}.{}", version.major, version.minor, version.patch);
-    let device_state = DeviceState {
-        temperature_f: Some(tenths_to_decimal(sensors.temperature.value())),
-        humidity_percent: Some(tenths_to_decimal(sensors.humidity.value())),
-        settings: DeviceSettings::LegacyBle {
-            mode: Some(match mode.mode {
-                gafctl_protocol::OperatingMode::Automatic => LegacyMode::Automatic,
-                gafctl_protocol::OperatingMode::Timer => LegacyMode::Timer,
-                gafctl_protocol::OperatingMode::Ota => LegacyMode::Ota,
-            }),
-            controller_fan_on: Some(mode.fan == gafctl_protocol::FanState::On),
-            automatic_temperature_tenths_f: Some(thresholds.temperature.value()),
-            automatic_humidity_tenths_percent: Some(thresholds.humidity.value()),
-            timer_remaining_minutes: Some(timer.remaining.value()),
-            timer_original_minutes: Some(timer.original.value()),
-        },
-        estimated_running: None,
-        diagnostics: Some(crate::device::DeviceDiagnostics {
-            firmware_version: Some(firmware_version),
-            signal_strength_raw: None,
-            verified_raw: None,
-            ota_in_progress: None,
-        }),
-        provenance: StateProvenance {
-            backend: DeviceBackend::LegacyBle,
-            fetched_at_unix_ms: unix_millis(SystemTime::now()),
-            observed_at_unix_ms: unix_millis(snapshot.observed_at),
-        },
-    };
-    Some(device_state)
+    snapshot.identity.decoded().ok()?;
+    snapshot.mode.decoded().ok()?;
+    snapshot.sensors.decoded().ok()?;
+    snapshot.thresholds.decoded().ok()?;
+    snapshot.timer.decoded().ok()?;
+    Some(crate::legacy_projection::project_snapshot(snapshot))
 }
 
 async fn poll_device(state: ApiState, poll_interval: Duration) {
@@ -1591,10 +1559,6 @@ fn probe_error_message(error: &ProbeError) -> &'static str {
     }
 }
 
-fn tenths_to_decimal(value: u16) -> f64 {
-    f64::from(value) / 10.0
-}
-
 #[cfg(test)]
 mod tests {
     #[tokio::test]
@@ -1657,6 +1621,7 @@ mod tests {
     use tower::ServiceExt;
 
     use super::*;
+    use crate::device::{DeviceSettings, StateProvenance};
 
     #[derive(Default)]
     struct CloudPollFixture {
@@ -1741,26 +1706,208 @@ mod tests {
             )
             .route("/gaf/device", get(cloud_poll_fixture_detail))
             .with_state(Arc::clone(&fixture));
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let base = format!("http://{}/", listener.local_addr().unwrap());
-        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let (client, server) = crate::test_support::mock_client(app).await;
         let mut state = ApiState::with_registry(registry);
         state.quickconnect_runtime = Some(QuickConnectRuntime {
             account_id: "synthetic-account".to_owned(),
-            client: QuickConnectClient::new(
-                gafctl_quickconnect::Credentials::new(
-                    "user",
-                    "password",
-                    gafctl_quickconnect::AccountRole::Contractor,
-                ),
-                QuickConnectConfig::new(
-                    format!("{base}cognito/").parse().unwrap(),
-                    format!("{base}gaf/").parse().unwrap(),
-                ),
-            )
-            .unwrap(),
+            client,
         });
         (state, fixture, server, path)
+    }
+
+    async fn mock_quickconnect_client() -> (
+        gafctl_quickconnect::QuickConnectClient,
+        tokio::task::JoinHandle<()>,
+    ) {
+        let app = Router::new()
+            .route("/cognito/login", post(mock_login))
+            .route("/gaf/device/deviceList", get(mock_inventory))
+            .route("/gaf/device", get(mock_detail));
+        crate::test_support::mock_client(app).await
+    }
+
+    async fn mock_duplicate_inventory_client() -> (
+        gafctl_quickconnect::QuickConnectClient,
+        tokio::task::JoinHandle<()>,
+    ) {
+        let app = Router::new()
+            .route("/cognito/login", post(mock_login))
+            .route("/gaf/device/deviceList", get(mock_duplicate_inventory))
+            .route("/gaf/device", get(mock_detail));
+        crate::test_support::mock_client(app).await
+    }
+
+    async fn mock_login() -> Json<serde_json::Value> {
+        Json(serde_json::json!({"responseData": {"idToken": "SYNTHETIC_TOKEN_DO_NOT_USE"}}))
+    }
+
+    async fn mock_inventory() -> Json<serde_json::Value> {
+        Json(serde_json::json!({
+            "responseData": {"devices": [
+                {"deviceId": "synthetic-failed-detail", "name": "Failed detail"},
+                {"deviceId": "synthetic-live-detail", "name": "Live detail"}
+            ]}
+        }))
+    }
+
+    async fn mock_duplicate_inventory() -> Json<serde_json::Value> {
+        Json(serde_json::json!({
+            "responseData": [
+                {"deviceId": "synthetic-device", "name": "Duplicate one"},
+                {"deviceId": "synthetic-device", "name": "Duplicate two"}
+            ]
+        }))
+    }
+
+    async fn mock_detail(
+        uri: axum::http::Uri,
+    ) -> (axum::http::StatusCode, Json<serde_json::Value>) {
+        if uri
+            .query()
+            .is_some_and(|query| query.contains("synthetic-failed-detail"))
+        {
+            return (
+                axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({"message": "synthetic failure"})),
+            );
+        }
+        (
+            axum::http::StatusCode::OK,
+            Json(serde_json::json!({
+                "responseData": {
+                    "deviceConfig": {"setTemperature": 78, "setHumidity": 44},
+                    "deviceSettings": {
+                        "automaticMode": true,
+                        "timerMode": false,
+                        "fanMode": false,
+                        "setTemperature": 105,
+                        "setHumidity": 40,
+                        "humidityMonitor": true
+                    }
+                }
+            })),
+        )
+    }
+
+    #[tokio::test]
+    async fn detail_failure_keeps_device_registered_while_other_state_and_ble_remain_available() {
+        let path = identity_store_path();
+        let mut registry = DeviceRegistry::load(&path).unwrap();
+        let ble_runtime = registry.register_configured_ble();
+        let (client, server) = mock_quickconnect_client().await;
+
+        let mut state = ApiState::with_registry(registry);
+        state.quickconnect_runtime = Some(QuickConnectRuntime {
+            account_id: "synthetic-account".to_owned(),
+            client,
+        });
+        state.poll_quickconnect().await;
+        let registry = state.registry.read().await;
+        assert_eq!(
+            registry
+                .descriptors()
+                .filter(|device| device.backend == DeviceBackend::QuickConnect)
+                .count(),
+            2,
+        );
+        let descriptors = registry
+            .descriptors()
+            .map(|descriptor| (descriptor.name.as_str(), descriptor.id.clone()))
+            .collect::<std::collections::BTreeMap<_, _>>();
+        let failed = registry.runtime(&descriptors["Failed detail"]).unwrap();
+        let live = registry.runtime(&descriptors["Live detail"]).unwrap();
+        let failed_snapshot = failed.snapshot().await;
+        assert!(failed_snapshot.state.is_none());
+        assert_eq!(
+            failed_snapshot.inventory_status,
+            crate::backend::DeviceInventoryStatus::Present
+        );
+        assert_eq!(failed_snapshot.last_successful_state, None);
+        assert_eq!(live.state().await.unwrap().temperature_f, Some(78.0));
+        assert_eq!(
+            live.snapshot().await.inventory_status,
+            crate::backend::DeviceInventoryStatus::Present
+        );
+        assert!(ble_runtime.state().await.is_none());
+        assert!(
+            registry
+                .descriptors()
+                .any(|descriptor| descriptor.id == DeviceId::configured_ble())
+        );
+
+        server.abort();
+        fs::remove_dir_all(path.parent().unwrap()).ok();
+    }
+
+    #[tokio::test]
+    async fn invalid_inventory_marks_only_that_accounts_current_state_unavailable() {
+        let path = identity_store_path();
+        let mut registry = DeviceRegistry::load(&path).unwrap();
+        let first = registry
+            .reconcile_quickconnect(
+                "account-a",
+                &[crate::backend::CloudDeviceInput::new(
+                    "provider-a".to_owned(),
+                    "One".to_owned(),
+                )],
+            )
+            .unwrap();
+        let second = registry
+            .reconcile_quickconnect(
+                "account-b",
+                &[crate::backend::CloudDeviceInput::new(
+                    "provider-a".to_owned(),
+                    "Two".to_owned(),
+                )],
+            )
+            .unwrap();
+        let first_runtime = registry.runtime(&first[0]).unwrap();
+        let second_runtime = registry.runtime(&second[0]).unwrap();
+        let state = || DeviceState {
+            temperature_f: Some(78.0),
+            humidity_percent: Some(40.0),
+            settings: DeviceSettings::QuickConnect {
+                mode: crate::device::QuickConnectModeStatus::Automatic,
+                automatic_temperature_f: Some(100),
+                automatic_humidity_percent: Some(40),
+                timer_duration_minutes: None,
+                humidity_monitor: Some(true),
+            },
+            estimated_running: Some(false),
+            diagnostics: None,
+            provenance: StateProvenance {
+                backend: DeviceBackend::QuickConnect,
+                fetched_at_unix_ms: unix_millis(SystemTime::now()),
+                observed_at_unix_ms: None,
+            },
+        };
+        first_runtime.set_state(state()).await;
+        second_runtime.set_state(state()).await;
+        let (client, server) = mock_duplicate_inventory_client().await;
+
+        let mut state = ApiState::with_registry(registry);
+        state.quickconnect_runtime = Some(QuickConnectRuntime {
+            account_id: "account-a".to_owned(),
+            client,
+        });
+        state.poll_quickconnect().await;
+
+        let failed = first_runtime.snapshot().await;
+        assert_eq!(
+            failed.inventory_status,
+            crate::backend::DeviceInventoryStatus::Unavailable
+        );
+        assert!(failed.state.is_none());
+        assert!(failed.last_successful_state.is_some());
+        let unaffected = second_runtime.snapshot().await;
+        assert_eq!(
+            unaffected.inventory_status,
+            crate::backend::DeviceInventoryStatus::Present
+        );
+        assert_eq!(unaffected.state.unwrap().temperature_f, Some(78.0));
+
+        server.abort();
+        fs::remove_dir_all(path.parent().unwrap()).ok();
     }
 
     async fn wait_for_cloud_reads(fixture: &CloudPollFixture, count: usize) {
@@ -2133,21 +2280,7 @@ mod tests {
             )
             .route("/gaf/device", get(refresh_fixture_detail))
             .with_state(Arc::clone(&fixture));
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let base = format!("http://{}/", listener.local_addr().unwrap());
-        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-        let client = QuickConnectClient::new(
-            gafctl_quickconnect::Credentials::new(
-                "synthetic-user",
-                "synthetic-password",
-                gafctl_quickconnect::AccountRole::Contractor,
-            ),
-            QuickConnectConfig::new(
-                format!("{base}cognito/").parse().unwrap(),
-                format!("{base}gaf/").parse().unwrap(),
-            ),
-        )
-        .unwrap();
+        let (client, server) = crate::test_support::mock_client(app).await;
         let mut state = ApiState::with_registry(registry);
         state.quickconnect_runtime = Some(QuickConnectRuntime {
             account_id: "synthetic-account".to_owned(),
@@ -3429,21 +3562,39 @@ mod tests {
     }
 
     #[test]
+    fn snapshot_projection_requires_every_field_to_decode() {
+        let valid: [&'static [u8]; 5] = [
+            b"#idr030000private-suffix\n",
+            b"#dmraf\n",
+            b"#sdr03ca00aa\n",
+            b"#atr041a012c\n",
+            b"#ttr00000000\n",
+        ];
+        let invalid: [&'static [u8]; 5] = [
+            b"#idrnot-a-version\n",
+            b"#dmrunrecognized\n",
+            b"#sdrbad\n",
+            b"#atrbad\n",
+            b"#ttrbad\n",
+        ];
+        for (field, malformed) in invalid.into_iter().enumerate() {
+            let mut wires = valid;
+            wires[field] = malformed;
+            let [identity, mode, sensors, thresholds, timer] = wires.map(|wire| {
+                gafctl_protocol::Frame::from_bytes(bytes::Bytes::from_static(wire)).unwrap()
+            });
+            let snapshot =
+                DeviceSnapshot::from_frames(identity, mode, sensors, thresholds, timer).unwrap();
+            assert!(
+                project_legacy_snapshot(&snapshot).is_none(),
+                "field {field}"
+            );
+        }
+    }
+
+    #[test]
     fn snapshot_projection_does_not_expose_identity_suffix_or_claim_airflow() {
-        let snapshot = DeviceSnapshot::from_frames(
-            gafctl_protocol::Frame::from_bytes(bytes::Bytes::from_static(
-                b"#idr030000private-suffix\n",
-            ))
-            .unwrap(),
-            gafctl_protocol::Frame::from_bytes(bytes::Bytes::from_static(b"#dmraf\n")).unwrap(),
-            gafctl_protocol::Frame::from_bytes(bytes::Bytes::from_static(b"#sdr03ca00aa\n"))
-                .unwrap(),
-            gafctl_protocol::Frame::from_bytes(bytes::Bytes::from_static(b"#atr041a012c\n"))
-                .unwrap(),
-            gafctl_protocol::Frame::from_bytes(bytes::Bytes::from_static(b"#ttr00000000\n"))
-                .unwrap(),
-        )
-        .unwrap();
+        let snapshot = snapshot_at(Instant::now(), SystemTime::now());
         let projected = serde_json::to_string(&project_legacy_snapshot(&snapshot)).unwrap();
         assert!(!projected.contains("private-suffix"));
         assert!(projected.contains("\"estimated_running\":null"));

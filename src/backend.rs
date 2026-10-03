@@ -540,32 +540,6 @@ impl DeviceRegistry {
         Ok((runtime, provider_id))
     }
 
-    pub async fn poll_quickconnect(
-        &mut self,
-        account_id: &str,
-        client: &gafctl_quickconnect::QuickConnectClient,
-    ) -> Result<Vec<DeviceId>, QuickConnectPollingError> {
-        let generations = self.begin_quickconnect_poll(account_id);
-        let inventory = match client.read_inventory().await {
-            Ok(inventory) => inventory,
-            Err(error) => {
-                self.mark_quickconnect_inventory_unavailable(account_id, &generations)
-                    .await;
-                return Err(error.into());
-            }
-        };
-        let targets = self
-            .reconcile_quickconnect_inventory(account_id, inventory, &generations)
-            .await?;
-        let ids = targets.iter().map(|target| target.id.clone()).collect();
-        futures_util::stream::iter(targets)
-            .for_each_concurrent(Some(QUICKCONNECT_POLL_CONCURRENCY), |target| async move {
-                target.read(client).await;
-            })
-            .await;
-        Ok(ids)
-    }
-
     pub fn begin_quickconnect_poll(&self, account_id: &str) -> BTreeMap<DeviceId, u64> {
         self.identities
             .bindings
@@ -1206,9 +1180,7 @@ mod tests {
     }
 
     use super::*;
-    use crate::device::{DeviceBackend, DeviceSettings, StateProvenance};
-    use axum::{Json, Router, http::Uri, routing::get, routing::post};
-    use serde_json::{Value, json};
+    use serde_json::json;
 
     fn registry_path() -> PathBuf {
         std::env::temp_dir()
@@ -1220,200 +1192,11 @@ mod tests {
         CloudDeviceInput::new(provider_id.to_owned(), name.to_owned())
     }
 
-    async fn mock_quickconnect_client() -> (
-        gafctl_quickconnect::QuickConnectClient,
-        tokio::task::JoinHandle<()>,
-    ) {
-        let app = Router::new()
-            .route("/cognito/login", post(mock_login))
-            .route("/gaf/device/deviceList", get(mock_inventory))
-            .route("/gaf/device", get(mock_detail));
-        mock_client(app).await
-    }
-
-    async fn mock_duplicate_inventory_client() -> (
-        gafctl_quickconnect::QuickConnectClient,
-        tokio::task::JoinHandle<()>,
-    ) {
-        let app = Router::new()
-            .route("/cognito/login", post(mock_login))
-            .route("/gaf/device/deviceList", get(mock_duplicate_inventory))
-            .route("/gaf/device", get(mock_detail));
-        mock_client(app).await
-    }
-
-    async fn mock_client(
-        app: Router,
-    ) -> (
-        gafctl_quickconnect::QuickConnectClient,
-        tokio::task::JoinHandle<()>,
-    ) {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap();
-        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-        let base = reqwest::Url::parse(&format!("http://{address}/")).unwrap();
-        let client = gafctl_quickconnect::QuickConnectClient::new(
-            gafctl_quickconnect::Credentials::new(
-                "synthetic-user",
-                "synthetic-password",
-                gafctl_quickconnect::AccountRole::Contractor,
-            ),
-            gafctl_quickconnect::QuickConnectConfig::new(
-                base.join("cognito/").unwrap(),
-                base.join("gaf/").unwrap(),
-            ),
-        )
-        .unwrap();
-        (client, server)
-    }
-
-    async fn mock_login() -> Json<Value> {
-        Json(json!({"responseData": {"idToken": "SYNTHETIC_TOKEN_DO_NOT_USE"}}))
-    }
-
-    async fn mock_inventory() -> Json<Value> {
-        Json(json!({
-            "responseData": {"devices": [
-                {"deviceId": "synthetic-failed-detail", "name": "Failed detail"},
-                {"deviceId": "synthetic-live-detail", "name": "Live detail"}
-            ]}
-        }))
-    }
-
-    async fn mock_duplicate_inventory() -> Json<Value> {
-        Json(json!({
-            "responseData": [
-                {"deviceId": "synthetic-device", "name": "Duplicate one"},
-                {"deviceId": "synthetic-device", "name": "Duplicate two"}
-            ]
-        }))
-    }
-
-    async fn mock_detail(uri: Uri) -> (axum::http::StatusCode, Json<Value>) {
-        if uri
-            .query()
-            .is_some_and(|query| query.contains("synthetic-failed-detail"))
-        {
-            return (
-                axum::http::StatusCode::SERVICE_UNAVAILABLE,
-                Json(json!({"message": "synthetic failure"})),
-            );
-        }
-        (
-            axum::http::StatusCode::OK,
-            Json(json!({
-                "responseData": {
-                    "deviceConfig": {"setTemperature": 78, "setHumidity": 44},
-                    "deviceSettings": {
-                        "automaticMode": true,
-                        "timerMode": false,
-                        "fanMode": false,
-                        "setTemperature": 105,
-                        "setHumidity": 40,
-                        "humidityMonitor": true
-                    }
-                }
-            })),
-        )
-    }
-
     fn ids_by_name(registry: &DeviceRegistry) -> BTreeMap<String, String> {
         registry
             .descriptors()
             .map(|descriptor| (descriptor.name.clone(), descriptor.id.as_str().to_owned()))
             .collect()
-    }
-
-    #[tokio::test]
-    async fn detail_failure_keeps_device_registered_while_other_state_and_ble_remain_available() {
-        let path = registry_path();
-        let mut registry = DeviceRegistry::load(&path).unwrap();
-        let ble_runtime = registry.register_configured_ble();
-        let (client, server) = mock_quickconnect_client().await;
-
-        let ids = registry
-            .poll_quickconnect("synthetic-account", &client)
-            .await
-            .unwrap();
-
-        assert_eq!(ids.len(), 2);
-        let descriptors = registry
-            .descriptors()
-            .map(|descriptor| (descriptor.name.as_str(), descriptor.id.clone()))
-            .collect::<BTreeMap<_, _>>();
-        let failed = registry.runtime(&descriptors["Failed detail"]).unwrap();
-        let live = registry.runtime(&descriptors["Live detail"]).unwrap();
-        let failed_snapshot = failed.snapshot().await;
-        assert!(failed_snapshot.state.is_none());
-        assert_eq!(
-            failed_snapshot.inventory_status,
-            DeviceInventoryStatus::Present
-        );
-        assert_eq!(failed_snapshot.last_successful_state, None);
-        assert_eq!(live.state().await.unwrap().temperature_f, Some(78.0));
-        assert_eq!(
-            live.snapshot().await.inventory_status,
-            DeviceInventoryStatus::Present
-        );
-        assert!(ble_runtime.state().await.is_none());
-        assert!(
-            registry
-                .descriptors()
-                .any(|descriptor| descriptor.id == DeviceId::configured_ble())
-        );
-
-        server.abort();
-        fs::remove_dir_all(path.parent().unwrap()).ok();
-    }
-
-    #[tokio::test]
-    async fn invalid_inventory_marks_only_that_accounts_current_state_unavailable() {
-        let path = registry_path();
-        let mut registry = DeviceRegistry::load(&path).unwrap();
-        let first = registry
-            .reconcile_quickconnect("account-a", &[cloud_device("provider-a", "One")])
-            .unwrap();
-        let second = registry
-            .reconcile_quickconnect("account-b", &[cloud_device("provider-a", "Two")])
-            .unwrap();
-        let first_runtime = registry.runtime(&first[0]).unwrap();
-        let second_runtime = registry.runtime(&second[0]).unwrap();
-        let state = || DeviceState {
-            temperature_f: Some(78.0),
-            humidity_percent: Some(40.0),
-            settings: DeviceSettings::QuickConnect {
-                mode: QuickConnectModeStatus::Automatic,
-                automatic_temperature_f: Some(100),
-                automatic_humidity_percent: Some(40),
-                timer_duration_minutes: None,
-                humidity_monitor: Some(true),
-            },
-            estimated_running: Some(false),
-            diagnostics: None,
-            provenance: StateProvenance {
-                backend: DeviceBackend::QuickConnect,
-                fetched_at_unix_ms: unix_millis(SystemTime::now()),
-                observed_at_unix_ms: None,
-            },
-        };
-        first_runtime.set_state(state()).await;
-        second_runtime.set_state(state()).await;
-        let (client, server) = mock_duplicate_inventory_client().await;
-
-        assert!(is_duplicate_poll_error(
-            registry.poll_quickconnect("account-a", &client).await
-        ));
-
-        let failed = first_runtime.snapshot().await;
-        assert_eq!(failed.inventory_status, DeviceInventoryStatus::Unavailable);
-        assert!(failed.state.is_none());
-        assert!(failed.last_successful_state.is_some());
-        let unaffected = second_runtime.snapshot().await;
-        assert_eq!(unaffected.inventory_status, DeviceInventoryStatus::Present);
-        assert_eq!(unaffected.state.unwrap().temperature_f, Some(78.0));
-
-        server.abort();
-        fs::remove_dir_all(path.parent().unwrap()).ok();
     }
 
     #[test]
@@ -1559,16 +1342,6 @@ mod tests {
             | DeviceRegistryError::UnsupportedCommand
             | DeviceRegistryError::Io(_)
             | DeviceRegistryError::Encoding(_) => false,
-        }
-    }
-
-    fn is_duplicate_poll_error(result: Result<Vec<DeviceId>, QuickConnectPollingError>) -> bool {
-        match result {
-            Err(QuickConnectPollingError::Registry(DeviceRegistryError::DuplicateProviderId)) => {
-                true
-            }
-            Err(QuickConnectPollingError::Client(_) | QuickConnectPollingError::Registry(_))
-            | Ok(_) => false,
         }
     }
 
