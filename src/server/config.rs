@@ -1,5 +1,6 @@
 use std::{net::SocketAddr, path::PathBuf};
 
+use crate::service::quickconnect::QuickConnectRuntimeConfig;
 use anyhow::{Context, Result, bail};
 use gafctl_quickconnect::{AccountRole, Credentials};
 
@@ -13,10 +14,19 @@ pub(crate) struct ServerConfig {
     pub(crate) quickconnect_config: Option<QuickConnectRuntimeConfig>,
 }
 
-pub(crate) struct QuickConnectRuntimeConfig {
-    pub(crate) credentials: Credentials,
-    pub(crate) account_id: String,
-    pub(crate) writes_enabled: bool,
+impl ServerConfig {
+    pub(super) fn validate(&self) -> Result<()> {
+        anyhow::ensure!(
+            self.address.ip().is_loopback() || self.allow_remote,
+            "non-loopback API binding requires --allow-remote"
+        );
+        anyhow::ensure!(
+            self.identity_store.is_some()
+                || (self.device_id.is_none() && self.quickconnect_config.is_none()),
+            "configured devices require --identity-store"
+        );
+        Ok(())
+    }
 }
 
 pub(super) fn read_quickconnect_config(
@@ -29,24 +39,13 @@ pub(super) fn read_quickconnect_config(
     quickconnect_config_from(username, password, password_file, role, writes_enabled)
 }
 
-fn environment_value(name: &str) -> Result<Option<String>> {
+pub(super) fn environment_value(name: &str) -> Result<Option<String>> {
     match std::env::var(name) {
         Ok(value) if value.is_empty() => bail!("{name} must not be empty"),
         Ok(value) => Ok(Some(value)),
         Err(std::env::VarError::NotPresent) => Ok(None),
         Err(std::env::VarError::NotUnicode(_)) => bail!("{name} must be valid UTF-8"),
     }
-}
-
-pub(super) fn ensure_quickconnect_identity_store(
-    quickconnect_enabled: bool,
-    identity_store: Option<&std::path::Path>,
-) -> Result<()> {
-    anyhow::ensure!(
-        !quickconnect_enabled || identity_store.is_some(),
-        "QuickConnect requires --identity-store or GAFCTL_IDENTITY_STORE"
-    );
-    Ok(())
 }
 
 fn quickconnect_config_from(
@@ -118,17 +117,6 @@ fn read_private_secret(path: &std::path::Path) -> Result<String> {
 }
 
 #[cfg(feature = "mqtt")]
-pub(super) fn read_mqtt_password() -> Result<Option<String>> {
-    match std::env::var("GAFCTL_MQTT_PASSWORD") {
-        Ok(password) => Ok(Some(password)),
-        Err(std::env::VarError::NotPresent) => Ok(None),
-        Err(std::env::VarError::NotUnicode(_)) => {
-            bail!("GAFCTL_MQTT_PASSWORD must be valid UTF-8")
-        }
-    }
-}
-
-#[cfg(feature = "mqtt")]
 pub(super) fn mqtt_config(
     host: Option<String>,
     port: u16,
@@ -158,6 +146,38 @@ pub(super) fn mqtt_config(
 mod tests {
     use super::*;
 
+    fn server_config() -> ServerConfig {
+        ServerConfig {
+            device_id: None,
+            identity_store: None,
+            address: "127.0.0.1:8787".parse().unwrap(),
+            allow_remote: false,
+            #[cfg(feature = "mqtt")]
+            mqtt_config: None,
+            quickconnect_config: None,
+        }
+    }
+
+    #[test]
+    fn bind_address_validation_requires_remote_opt_in() {
+        [
+            ("127.0.0.1:8787", false, true),
+            ("[::1]:8787", false, true),
+            ("192.168.1.5:8787", false, false),
+            ("0.0.0.0:8787", true, true),
+            ("192.168.1.5:8787", true, true),
+        ]
+        .into_iter()
+        .for_each(|(address, allow_remote, valid)| {
+            let config = ServerConfig {
+                address: address.parse().unwrap(),
+                allow_remote,
+                ..server_config()
+            };
+            assert_eq!(config.validate().is_ok(), valid, "{address}");
+        });
+    }
+
     #[test]
     fn quickconnect_is_optional_without_credentials() {
         assert!(
@@ -168,13 +188,34 @@ mod tests {
     }
 
     #[test]
-    fn quickconnect_requires_a_persistent_identity_store() {
-        assert!(ensure_quickconnect_identity_store(true, None).is_err());
-        assert!(ensure_quickconnect_identity_store(false, None).is_ok());
-        assert!(
-            ensure_quickconnect_identity_store(true, Some(std::path::Path::new("identities.json")))
-                .is_ok()
-        );
+    fn configured_backends_require_a_persistent_identity_store() {
+        [(false, false), (true, false), (false, true), (true, true)]
+            .into_iter()
+            .for_each(|(ble, cloud)| {
+                [false, true].into_iter().for_each(|store| {
+                    let config = ServerConfig {
+                        device_id: ble.then(|| "synthetic-ble-id".into()),
+                        identity_store: store.then(|| PathBuf::from("identities.json")),
+                        quickconnect_config: cloud.then(|| {
+                            quickconnect_config_from(
+                                Some("account".into()),
+                                Some("secret".into()),
+                                None,
+                                "consumer",
+                                false,
+                            )
+                            .unwrap()
+                            .unwrap()
+                        }),
+                        ..server_config()
+                    };
+                    assert_eq!(
+                        config.validate().is_ok(),
+                        store || (!ble && !cloud),
+                        "BLE={ble}, QuickConnect={cloud}, identity store={store}"
+                    );
+                });
+            });
     }
 
     #[test]

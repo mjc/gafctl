@@ -98,12 +98,13 @@ live account compatibility is untested.
 | --- | --- |
 | `src/lib.rs` | Application entrypoints and shared process exit handling |
 | `src/main.rs`, `src/bin/gafctl.rs` | Tokio entrypoints for the two executables |
+| `src/arguments.rs` | Shared positive, platform-representable deadline arguments |
 | `src/cli/` | Administrative command dispatch, service commands, direct BLE commands, and text/JSON output |
 | `src/server.rs`, `src/server/` | Server startup, configuration, secret loading, and diagnostic commands |
-| `src/service/` | Device operations, control admission and replay, polling, and MQTT service requests |
+| `src/service/` | Inventory and ownership, refresh workers, control replay, configured backends, and typed state publication |
 | `src/api.rs` | HTTP routing and request/response adaptation |
 | `src/backend/` | Persistent device identities, inventory, current state, and per-device coordination |
-| `src/mqtt.rs`, `src/mqtt/` | Broker connection, delivery tracking, topics, and Home Assistant discovery |
+| `src/mqtt.rs`, `src/mqtt/` | Broker connection, request translation, delivery tracking, retained state, and Home Assistant discovery |
 | `crates/gafctl-api/` | Shared device, state, capability, and command types |
 | `crates/gafctl-client/` | HTTP client library for a running service |
 | `crates/gafctl-protocol/` | Original controller's frames, commands, and values |
@@ -124,10 +125,25 @@ the broker adapter and enables `http`. Each feature gates its application
 modules in `src/lib.rs`.
 
 CLI service and BLE commands share their argument values and output format.
+Administrative and diagnostic commands use the same deadline parser.
 BLE parsing, transport options, result projection, and command exit decisions
 live together in `src/cli/ble.rs`. Server argument parsing constructs validated
 configuration from `src/server/config.rs`; device execution does not depend on
 CLI parser types. The HTTP and MQTT adapters call the same device service.
+
+Server startup owns transport assembly. `src/server/mqtt.rs` attaches the typed
+state publisher before cloning the service for request workers, then owns
+intake and drain handles. `src/mqtt/adapter.rs` translates command and refresh
+envelopes into service calls. The service uses shared API types and backend
+operations without importing server configuration or broker types.
+
+`src/service/inventory.rs` owns registered-device views and persisted entity
+ownership. `src/service/refresh.rs` owns detached reads and overlapping refresh
+coordination; the rendezvous channel remains on each device runtime.
+`src/service/quickconnect/` owns one configured cloud backend with its client,
+account identity, registry, and readback policy. Its read and control operations
+share that configuration. State publication serializes snapshot collection and
+replacement and rejects snapshots with obsolete ownership descriptors.
 
 Shared legacy snapshot normalization lives in `src/legacy_projection.rs`.
 Direct BLE output retains partial readings and field errors; the service

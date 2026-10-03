@@ -1,3 +1,4 @@
+mod adapter;
 mod connection;
 mod discovery;
 mod requests;
@@ -12,6 +13,7 @@ use futures_util::{StreamExt, stream};
 use tokio::sync::{mpsc, watch};
 
 use crate::service::publication::StateSnapshot;
+pub(crate) use adapter::run_device_requests;
 pub(crate) use requests::{
     CONTROL_QUEUE_CAPACITY, MqttDeviceWork, MqttRefreshRequest, MqttReply, MqttRequest,
     MqttRequestIntake, RequestKind,

@@ -1,9 +1,9 @@
 use std::time::Duration;
 use std::{net::SocketAddr, path::PathBuf};
 
-use super::config::{ServerConfig, ensure_quickconnect_identity_store, read_quickconnect_config};
+use super::config::{ServerConfig, read_quickconnect_config};
 #[cfg(feature = "mqtt")]
-use super::config::{mqtt_config, read_mqtt_password};
+use super::config::{environment_value, mqtt_config};
 use anyhow::{Context, Result, bail};
 use clap::{Args, CommandFactory, Parser, Subcommand};
 use gafctl_bluetooth::{ProbeMode, ProbeOptions, probe};
@@ -11,6 +11,8 @@ use gafctl_protocol::{
     AutomaticThresholds, ControlCommand, HumidityTenthsPercent, Minutes, TemperatureTenthsF,
 };
 use std::process::ExitCode;
+
+use crate::arguments::DeadlineSeconds;
 
 #[derive(Debug, Parser)]
 #[command(
@@ -116,12 +118,12 @@ struct BleOptions {
     device_id: Option<String>,
 
     /// How long to scan for the GAF service.
-    #[arg(long, default_value_t = 6)]
-    scan_seconds: u64,
+    #[arg(long, default_value = "6")]
+    scan_seconds: DeadlineSeconds,
 
     /// Seconds for GATT setup, command writes, and responses; platform calls allow at least 40s.
-    #[arg(long, default_value_t = 3)]
-    response_timeout_seconds: u64,
+    #[arg(long, default_value = "3")]
+    response_timeout_seconds: DeadlineSeconds,
 
     /// Print the raw identity response, which may contain a device identifier.
     #[arg(long)]
@@ -174,8 +176,8 @@ impl BleOptions {
             }
         };
         ProbeOptions {
-            scan_duration: Duration::from_secs(self.scan_seconds),
-            response_timeout: Duration::from_secs(self.response_timeout_seconds),
+            scan_duration: Duration::from_secs(self.scan_seconds.get()),
+            response_timeout: Duration::from_secs(self.response_timeout_seconds.get()),
             control_deadline: None,
             mode,
         }
@@ -211,15 +213,11 @@ impl ServeOptions {
             self.mqtt_host,
             self.mqtt_port,
             self.mqtt_username,
-            read_mqtt_password()?,
+            environment_value("GAFCTL_MQTT_PASSWORD")?,
             self.mqtt_discovery,
         )?;
         let quickconnect_config =
             read_quickconnect_config(&self.quickconnect_role, self.quickconnect_writes_enabled)?;
-        ensure_quickconnect_identity_store(
-            quickconnect_config.is_some(),
-            self.identity_store.as_deref(),
-        )?;
         crate::server::serve(ServerConfig {
             device_id: self.device_id,
             identity_store: self.identity_store,
@@ -294,6 +292,72 @@ mod tests {
         ]
         .into_iter()
         .for_each(|args| assert!(Cli::try_parse_from(args).is_ok()));
+    }
+
+    #[test]
+    fn diagnostic_probe_rejects_zero_deadlines() {
+        ["--scan-seconds", "--response-timeout-seconds"]
+            .into_iter()
+            .for_each(|flag| {
+                assert!(
+                    Cli::try_parse_from(["gafctl-server", "probe", "ble", flag, "0"]).is_err(),
+                    "{flag} must reject zero before transport access"
+                );
+            });
+    }
+
+    #[test]
+    fn diagnostic_probe_rejects_unrepresentable_deadlines() {
+        ["--scan-seconds", "--response-timeout-seconds"]
+            .into_iter()
+            .for_each(|flag| {
+                assert!(
+                    Cli::try_parse_from([
+                        "gafctl-server",
+                        "probe",
+                        "ble",
+                        flag,
+                        "18446744073709551615",
+                    ])
+                    .is_err(),
+                    "{flag} must reject an unrepresentable deadline before transport access"
+                );
+            });
+    }
+
+    #[test]
+    fn diagnostic_probe_preserves_default_and_explicit_deadlines() {
+        [
+            (&["gafctl-server", "probe", "ble"][..], 6, 3),
+            (
+                &[
+                    "gafctl-server",
+                    "probe",
+                    "ble",
+                    "--scan-seconds",
+                    "7",
+                    "--response-timeout-seconds",
+                    "4",
+                ][..],
+                7,
+                4,
+            ),
+        ]
+        .into_iter()
+        .for_each(|(args, scan_seconds, response_seconds)| {
+            let Some(Command::Probe(ProbeCommand {
+                transport: ProbeTransport::Ble(options),
+            })) = Cli::try_parse_from(args).unwrap().command
+            else {
+                unreachable!("expected BLE probe command");
+            };
+            let options = options.into_probe_options();
+            assert_eq!(options.scan_duration, Duration::from_secs(scan_seconds));
+            assert_eq!(
+                options.response_timeout,
+                Duration::from_secs(response_seconds)
+            );
+        });
     }
 
     #[test]
@@ -405,21 +469,23 @@ mod tests {
             .split_once("::")
             .unwrap()
             .1;
-        let output = std::process::Command::new(std::env::current_exe().unwrap())
-            .args(["--exact", child, "--nocapture"])
-            .env("GAFCTL_TEST_MQTT_PASSWORD_DEBUG", "1")
-            .env("GAFCTL_MQTT_HOST", "127.0.0.1")
-            .env("GAFCTL_MQTT_USERNAME", "gafctl")
-            .env("GAFCTL_MQTT_PASSWORD", "test-secret")
-            .output()
-            .unwrap();
+        [" test-secret ", ""].into_iter().for_each(|password| {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", child, "--nocapture"])
+                .env("GAFCTL_TEST_MQTT_PASSWORD_DEBUG", "1")
+                .env("GAFCTL_MQTT_HOST", "127.0.0.1")
+                .env("GAFCTL_MQTT_USERNAME", "gafctl")
+                .env("GAFCTL_MQTT_PASSWORD", password)
+                .output()
+                .unwrap();
 
-        assert!(
-            output.status.success(),
-            "MQTT password appeared in CLI debug output: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed"));
+            assert!(
+                output.status.success(),
+                "MQTT password validation or debug redaction failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed"));
+        });
     }
 
     #[test]
@@ -431,6 +497,15 @@ mod tests {
 
         let cli = Cli::try_parse_from(["gafctl-server", "--device-id", "local-device-id"]).unwrap();
         assert!(!format!("{cli:?}").contains("test-secret"));
+        let password = environment_value("GAFCTL_MQTT_PASSWORD");
+        if std::env::var("GAFCTL_MQTT_PASSWORD").unwrap().is_empty() {
+            assert_eq!(
+                password.unwrap_err().to_string(),
+                "GAFCTL_MQTT_PASSWORD must not be empty"
+            );
+        } else {
+            assert_eq!(password.unwrap(), Some(" test-secret ".into()));
+        }
     }
 
     #[test]

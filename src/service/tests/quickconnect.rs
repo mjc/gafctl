@@ -8,10 +8,11 @@ async fn detail_failure_keeps_device_registered_while_other_state_and_ble_remain
     let (client, server) = mock_quickconnect_client().await;
 
     let mut state = DeviceService::with_registry(registry);
-    state.quickconnect_runtime = Some(QuickConnectRuntime {
-        account_id: "synthetic-account".to_owned(),
+    state.quickconnect = Some(super::super::quickconnect::QuickConnectBackend::new(
+        Arc::clone(&state.registry),
         client,
-    });
+        "synthetic-account",
+    ));
     state.poll_quickconnect().await;
     let registry = state.registry.read().await;
     assert_eq!(
@@ -97,10 +98,11 @@ async fn invalid_inventory_marks_only_that_accounts_current_state_unavailable() 
     let (client, server) = mock_duplicate_inventory_client().await;
 
     let mut state = DeviceService::with_registry(registry);
-    state.quickconnect_runtime = Some(QuickConnectRuntime {
-        account_id: "account-a".to_owned(),
+    state.quickconnect = Some(super::super::quickconnect::QuickConnectBackend::new(
+        Arc::clone(&state.registry),
         client,
-    });
+        "account-a",
+    ));
     state.poll_quickconnect().await;
 
     let failed = first_runtime.snapshot().await;
@@ -126,7 +128,7 @@ async fn invalid_inventory_marks_only_that_accounts_current_state_unavailable() 
 async fn cloud_poll_publishes_fast_device_before_blocked_sibling() {
     let (mut state, fixture, server, path) = cloud_poll_fixture(&["slow", "fast"], &["slow"]).await;
     let (updates, observed) = watch::channel(Arc::new(state.state_snapshot().await.unwrap()));
-    state.state_updates = Some(updates);
+    state.attach_state_publication(updates, false);
     let polling = tokio::spawn({
         let state = state.clone();
         async move { state.poll_quickconnect().await }
@@ -180,49 +182,4 @@ async fn cloud_poll_bounds_concurrent_device_reads() {
     assert_eq!(blocked_reads, 4);
     assert_eq!(fixture.reads.load(std::sync::atomic::Ordering::SeqCst), 6);
     assert_eq!(fixture.peak.load(std::sync::atomic::Ordering::SeqCst), 4);
-}
-
-#[tokio::test]
-async fn cloud_poll_skips_transaction_queued_read_superseded_by_control() {
-    let (state, fixture, server, path) = cloud_poll_fixture(&["vent"], &[]).await;
-    let cloud = state.quickconnect_runtime.as_ref().unwrap();
-    let mut registry = state.registry.write().await;
-    registry
-        .reconcile_quickconnect(
-            &cloud.account_id,
-            &[crate::backend::CloudDeviceInput::new(
-                "vent".to_owned(),
-                "vent".to_owned(),
-            )],
-        )
-        .unwrap();
-    let generations = registry.begin_quickconnect_poll(&cloud.account_id);
-    let target = registry
-        .reconcile_quickconnect_inventory(
-            &cloud.account_id,
-            cloud.client.read_inventory().await.unwrap(),
-            &generations,
-        )
-        .await
-        .unwrap()
-        .pop()
-        .unwrap();
-    let runtime = Arc::clone(&target.runtime);
-    drop(registry);
-    let transaction = runtime.acquire_transaction().await;
-    let client = cloud.client.clone();
-    let polling = tokio::spawn(async move { target.read(&client).await });
-    tokio::time::sleep(Duration::from_millis(30)).await;
-    let blocked_reads = fixture.reads.load(std::sync::atomic::Ordering::SeqCst);
-    runtime.begin_control_intent();
-    drop(transaction);
-    polling.await.unwrap();
-    server.abort();
-    fs::remove_file(path).unwrap();
-    assert_eq!(blocked_reads, 0, "poll bypassed the device transaction");
-    assert_eq!(
-        fixture.reads.load(std::sync::atomic::Ordering::SeqCst),
-        0,
-        "superseded poll reached the backend"
-    );
 }

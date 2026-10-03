@@ -10,15 +10,12 @@ use std::{
 use futures_util::{StreamExt, stream};
 use gafctl_api::{DeviceId, is_fresh_at, unix_millis};
 use gafctl_quickconnect::{
-    ClientError, QuickConnectClient, QuickConnectCommand, QuickConnectSettings,
-    QuickConnectSettingsBody,
+    ClientError, QuickConnectCommand, QuickConnectSettings, QuickConnectSettingsBody,
 };
-use tokio::{
-    sync::RwLock,
-    time::{Instant, sleep, timeout},
-};
+use tokio::time::{Instant, sleep, timeout};
 
-use crate::backend::{DeviceRegistry, DeviceRuntime};
+use super::QuickConnectBackend;
+use crate::backend::DeviceRuntime;
 
 const DEFAULT_MAX_COMMAND_AGE: Duration = Duration::from_secs(30);
 const DEFAULT_MAX_FUTURE_SKEW: Duration = Duration::from_secs(5);
@@ -27,7 +24,7 @@ const DEFAULT_READBACK_INTERVAL: Duration = Duration::from_secs(2);
 const DEFAULT_READBACK_ATTEMPTS: u16 = 31;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum QuickConnectControlStatus {
+pub(in crate::service) enum QuickConnectControlStatus {
     Rejected,
     SubmittedUnconfirmed,
     ReadbackMismatch,
@@ -36,7 +33,7 @@ pub enum QuickConnectControlStatus {
 }
 
 #[derive(Clone, Copy, Debug)]
-pub struct QuickConnectControlPolicy {
+pub(super) struct QuickConnectControlPolicy {
     max_command_age: Duration,
     max_future_skew: Duration,
     readback_timeout: Duration,
@@ -81,13 +78,13 @@ impl QuickConnectControlPolicy {
 }
 
 #[derive(Clone, Debug)]
-pub struct QuickConnectControlIntent {
+pub(in crate::service) struct QuickConnectControlIntent {
     issued_at_unix_ms: u64,
     command: QuickConnectCommand,
 }
 
 impl QuickConnectControlIntent {
-    pub fn new(issued_at_unix_ms: u64, command: QuickConnectCommand) -> Self {
+    pub(in crate::service) fn new(issued_at_unix_ms: u64, command: QuickConnectCommand) -> Self {
         Self {
             issued_at_unix_ms,
             command,
@@ -104,18 +101,11 @@ impl QuickConnectControlIntent {
     }
 }
 
-#[derive(Clone)]
-pub struct QuickConnectControlService {
-    registry: Arc<RwLock<DeviceRegistry>>,
-    client: QuickConnectClient,
-    account_id: Arc<str>,
-    policy: QuickConnectControlPolicy,
-}
-
-impl QuickConnectControlService {
-    pub fn new(
-        registry: Arc<RwLock<DeviceRegistry>>,
-        client: QuickConnectClient,
+#[cfg(test)]
+impl QuickConnectBackend {
+    fn with_policy(
+        registry: Arc<tokio::sync::RwLock<crate::backend::DeviceRegistry>>,
+        client: gafctl_quickconnect::QuickConnectClient,
         account_id: impl Into<Arc<str>>,
         policy: QuickConnectControlPolicy,
     ) -> Self {
@@ -126,8 +116,10 @@ impl QuickConnectControlService {
             policy,
         }
     }
+}
 
-    pub async fn execute(
+impl QuickConnectBackend {
+    pub(in crate::service) async fn execute(
         &self,
         id: &DeviceId,
         intent: QuickConnectControlIntent,
@@ -174,10 +166,7 @@ impl QuickConnectControlService {
             Ok(body) => body,
             Err(gafctl_quickconnect::QuickConnectCommandError::ModeAlreadyInactive) => {
                 return if runtime
-                    .set_control_state_if_current(
-                        generation,
-                        crate::service::quickconnect::common_state(before),
-                    )
+                    .set_control_state_if_current(generation, super::common_state(before))
                     .await
                 {
                     QuickConnectControlStatus::Confirmed
@@ -401,10 +390,7 @@ impl QuickConnectControlService {
         match state {
             Some(state) => {
                 runtime
-                    .set_control_state_if_current(
-                        generation,
-                        crate::service::quickconnect::common_state(state),
-                    )
+                    .set_control_state_if_current(generation, super::common_state(state))
                     .await
             }
             None => {
@@ -460,13 +446,8 @@ mod tests {
     use serde_json::{Value, json};
     use tokio::{sync::RwLock, time::sleep};
 
-    use crate::{
-        backend::{CloudDeviceInput, DeviceRegistry},
-        quickconnect_control::{
-            QuickConnectControlIntent, QuickConnectControlPolicy, QuickConnectControlService,
-            QuickConnectControlStatus,
-        },
-    };
+    use super::*;
+    use crate::backend::{CloudDeviceInput, DeviceRegistry};
     use gafctl_api::DeviceId;
     use gafctl_quickconnect::QuickConnectCommand;
 
@@ -491,7 +472,7 @@ mod tests {
     }
 
     struct ControlFixture {
-        service: QuickConnectControlService,
+        service: QuickConnectBackend,
         device_id: DeviceId,
         registry: Arc<RwLock<DeviceRegistry>>,
         mock: MockState,
@@ -545,7 +526,7 @@ mod tests {
             .unwrap();
         registry.set_quickconnect_writes_enabled(writes_enabled);
         let registry = Arc::new(RwLock::new(registry));
-        let service = QuickConnectControlService::new(
+        let service = QuickConnectBackend::with_policy(
             Arc::clone(&registry),
             client,
             "synthetic-account",

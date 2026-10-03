@@ -1,5 +1,5 @@
+use super::quickconnect::{QuickConnectControlIntent, QuickConnectControlStatus};
 use super::{DeviceService, legacy::ControlAdmissionError};
-use crate::quickconnect_control::{QuickConnectControlIntent, QuickConnectControlStatus};
 use gafctl_api::{CommandId, is_fresh_at, unix_millis};
 use gafctl_api::{
     ControlStatus as V2ControlStatus, DeviceControlV2Request, DeviceControlV2Response,
@@ -13,7 +13,7 @@ use std::{
 };
 
 #[derive(Clone)]
-pub(super) struct CachedV2ControlResult {
+struct CachedV2ControlResult {
     response: DeviceControlV2Response,
 }
 
@@ -170,7 +170,7 @@ async fn execute_cloud_v2_control(
     id: &DeviceId,
     request: &DeviceControlV2Request,
 ) -> V2ControlStatus {
-    let Some(service) = state.quickconnect_control.as_ref() else {
+    let Some(service) = state.quickconnect.as_ref() else {
         return V2ControlStatus::BackendUnavailable;
     };
     let Some(command) = quickconnect_command(request.command) else {

@@ -1,4 +1,9 @@
 use super::*;
+use crate::service::test_support::*;
+use crate::{api::router, backend::DeviceRegistry};
+use gafctl_api::DeviceId;
+use std::time::Instant;
+use tokio::net::TcpListener;
 
 #[tokio::test]
 async fn state_route_reports_normalized_state_and_expired_state_as_unavailable() {

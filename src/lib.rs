@@ -2,6 +2,8 @@
 
 #[cfg(feature = "http")]
 mod api;
+#[cfg(any(feature = "cli", feature = "http"))]
+mod arguments;
 #[cfg(feature = "http")]
 mod backend;
 #[cfg(feature = "cli")]
@@ -18,8 +20,6 @@ mod logging;
 mod mqtt;
 #[cfg(feature = "http")]
 mod output;
-#[cfg(feature = "http")]
-mod quickconnect_control;
 #[cfg(feature = "http")]
 mod server;
 #[cfg(feature = "http")]

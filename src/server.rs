@@ -5,7 +5,7 @@ use crate::{
 };
 use anyhow::{Context, Result};
 use futures_util::{Stream, StreamExt, stream};
-use std::{net::SocketAddr, time::Duration};
+use std::time::Duration;
 use tokio::{
     net::TcpListener,
     time::{Interval, MissedTickBehavior, interval},
@@ -13,25 +13,23 @@ use tokio::{
 
 pub(crate) mod cli;
 pub(crate) mod config;
+#[cfg(feature = "mqtt")]
+pub(crate) mod mqtt;
 
 const DEFAULT_POLL_INTERVAL: Duration = Duration::from_secs(30);
 const SHUTDOWN_CLEANUP_TIMEOUT: Duration = Duration::from_secs(5);
 
 pub(crate) async fn serve(config: config::ServerConfig) -> Result<()> {
+    config.validate()?;
     let config::ServerConfig {
         device_id,
         identity_store,
         address,
-        allow_remote,
+        allow_remote: _,
         #[cfg(feature = "mqtt")]
         mqtt_config,
         quickconnect_config,
     } = config;
-    validate_bind_address(address, allow_remote)?;
-    anyhow::ensure!(
-        identity_store.is_some() || (device_id.is_none() && quickconnect_config.is_none()),
-        "configured devices require --identity-store"
-    );
     let listener = TcpListener::bind(address)
         .await
         .context("could not bind HTTP listener")?;
@@ -58,7 +56,7 @@ pub(crate) async fn serve(config: config::ServerConfig) -> Result<()> {
     }
     #[cfg(feature = "mqtt")]
     let mut mqtt = match mqtt_config {
-        Some(config) => Some(state.start_mqtt(config).await?),
+        Some(config) => Some(mqtt::start(&mut state, config).await?),
         None => None,
     };
     let app = router(state.clone());
@@ -130,14 +128,6 @@ async fn shutdown_signal() {
     tracing::info!("HTTP shutdown requested");
 }
 
-fn validate_bind_address(address: SocketAddr, allow_remote: bool) -> Result<()> {
-    anyhow::ensure!(
-        address.ip().is_loopback() || allow_remote,
-        "non-loopback API binding requires --allow-remote"
-    );
-    Ok(())
-}
-
 async fn poll_device(state: DeviceService, poll_interval: Duration) {
     poll_ticks(poll_interval)
         .for_each(|()| state.poll_and_publish_state())
@@ -160,6 +150,3 @@ async fn wait_for_poll_tick(mut ticker: Interval) -> Option<((), Interval)> {
     ticker.tick().await;
     Some(((), ticker))
 }
-
-#[cfg(test)]
-mod tests;

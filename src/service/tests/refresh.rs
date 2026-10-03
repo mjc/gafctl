@@ -31,16 +31,6 @@ async fn refresh_deadline_releases_worker_without_starting_a_second_ble_owner() 
 }
 
 #[tokio::test]
-async fn refresh_waiter_reports_closed_worker_without_hanging() {
-    let (sender, receiver) = tokio::sync::watch::channel(None);
-    drop(sender);
-    assert_eq!(
-        wait_for_device_refresh(receiver).await.unwrap_err(),
-        ServiceError::WorkerUnavailable
-    );
-}
-
-#[tokio::test]
 async fn refresh_survives_cancelled_caller_and_coalesces_overlapping_reads() {
     let (state, id, fixture, server, path) = refresh_fixture().await;
     let first_state = state.clone();

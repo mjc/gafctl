@@ -2,8 +2,7 @@ mod ble;
 mod output;
 mod service;
 
-use std::{ffi::OsString, num::NonZeroU64, path::PathBuf, process::ExitCode};
-use std::{process::Command as ProcessCommand, str::FromStr, time::Duration};
+use std::{ffi::OsString, path::PathBuf, process::Command as ProcessCommand, process::ExitCode};
 
 use anyhow::Result;
 use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
@@ -11,28 +10,6 @@ use gafctl_api::ControlPreset;
 
 use ble::BleCommand;
 use service::{ControlOptions, ServiceOptions, StateOptions};
-
-#[derive(Clone, Copy, Debug)]
-pub(crate) struct DeadlineSeconds(NonZeroU64);
-
-impl DeadlineSeconds {
-    pub(super) fn get(self) -> u64 {
-        self.0.get()
-    }
-}
-
-impl FromStr for DeadlineSeconds {
-    type Err = &'static str;
-    fn from_str(value: &str) -> std::result::Result<Self, Self::Err> {
-        let seconds = value
-            .parse::<NonZeroU64>()
-            .map_err(|_| "deadline must be a positive integer")?;
-        std::time::Instant::now()
-            .checked_add(Duration::from_secs(seconds.get()))
-            .ok_or("deadline is too large for this platform")?;
-        Ok(Self(seconds))
-    }
-}
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
 pub(crate) enum Preset {

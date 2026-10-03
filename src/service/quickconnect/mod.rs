@@ -1,6 +1,10 @@
+use self::control::QuickConnectControlPolicy;
+pub(super) use self::control::{QuickConnectControlIntent, QuickConnectControlStatus};
 use super::{DeviceService, ServiceError};
+use crate::backend::DeviceRegistry;
 use crate::backend::{DeviceRuntime, QuickConnectReadTarget};
-use crate::quickconnect_control::QuickConnectControlService;
+use tokio::sync::RwLock;
+mod control;
 use anyhow::{Context, Result};
 use futures_util::{StreamExt, stream};
 use gafctl_api::DeviceRefreshStatus;
@@ -8,35 +12,51 @@ use gafctl_api::{
     DeviceBackend, DeviceDiagnostics, DeviceId, DeviceSettings, DeviceState,
     QuickConnectModeStatus, StateProvenance,
 };
-use gafctl_quickconnect::{QuickConnectClient, QuickConnectConfig};
+use gafctl_quickconnect::{Credentials, QuickConnectClient, QuickConnectConfig};
 use std::{sync::Arc, time::Duration};
 
 const QUICKCONNECT_DETAIL_TIMEOUT: Duration = Duration::from_secs(270);
 
-#[derive(Clone)]
-pub(super) struct QuickConnectRuntime {
-    pub(super) account_id: String,
-    pub(super) client: QuickConnectClient,
+pub(crate) struct QuickConnectRuntimeConfig {
+    pub(crate) credentials: Credentials,
+    pub(crate) account_id: String,
+    pub(crate) writes_enabled: bool,
 }
 
-impl DeviceService {
-    pub(super) async fn read_quickconnect_state_locked(
+#[derive(Clone)]
+pub(super) struct QuickConnectBackend {
+    registry: Arc<RwLock<DeviceRegistry>>,
+    client: QuickConnectClient,
+    account_id: Arc<str>,
+    policy: QuickConnectControlPolicy,
+}
+
+impl QuickConnectBackend {
+    pub(super) fn new(
+        registry: Arc<RwLock<DeviceRegistry>>,
+        client: QuickConnectClient,
+        account_id: impl Into<Arc<str>>,
+    ) -> Self {
+        Self {
+            registry,
+            client,
+            account_id: account_id.into(),
+            policy: QuickConnectControlPolicy::default(),
+        }
+    }
+    pub(super) async fn read_state_locked(
         &self,
         id: &DeviceId,
         runtime: &DeviceRuntime,
     ) -> Result<DeviceRefreshStatus, ServiceError> {
-        let cloud = self
-            .quickconnect_runtime
-            .as_ref()
-            .ok_or(ServiceError::BackendUnavailable)?;
         let (_, provider_id) = self
             .registry
             .read()
             .await
-            .quickconnect_read_target(&cloud.account_id, id)
+            .quickconnect_read_target(&self.account_id, id)
             .map_err(|_| ServiceError::UnknownDevice)?;
         let generation = runtime.begin_state_read();
-        match cloud.client.read_device_state(&provider_id).await {
+        match self.client.read_device_state(&provider_id).await {
             Ok(state) => Ok(
                 if runtime
                     .set_state_if_current(generation, common_state(state))
@@ -59,10 +79,12 @@ impl DeviceService {
             }
         }
     }
+}
 
+impl DeviceService {
     pub(crate) async fn start_quickconnect(
         &mut self,
-        config: crate::server::config::QuickConnectRuntimeConfig,
+        config: QuickConnectRuntimeConfig,
     ) -> Result<()> {
         let client = QuickConnectClient::new(config.credentials, QuickConnectConfig::production()?)
             .context("could not configure QuickConnect client")?;
@@ -70,21 +92,16 @@ impl DeviceService {
             .write()
             .await
             .set_quickconnect_writes_enabled(config.writes_enabled);
-        self.quickconnect_control = Some(QuickConnectControlService::new(
+        self.quickconnect = Some(QuickConnectBackend::new(
             Arc::clone(&self.registry),
-            client.clone(),
-            config.account_id.clone(),
-            crate::quickconnect_control::QuickConnectControlPolicy::default(),
-        ));
-        self.quickconnect_runtime = Some(QuickConnectRuntime {
-            account_id: config.account_id,
             client,
-        });
+            config.account_id,
+        ));
         Ok(())
     }
 
     pub(crate) async fn poll_quickconnect(&self) {
-        let Some(cloud) = self.quickconnect_runtime.as_ref() else {
+        let Some(cloud) = self.quickconnect.as_ref() else {
             return;
         };
         let generations = self
@@ -158,7 +175,7 @@ impl QuickConnectReadTarget {
     }
 }
 
-pub(crate) fn common_state(state: gafctl_quickconnect::QuickConnectDeviceState) -> DeviceState {
+fn common_state(state: gafctl_quickconnect::QuickConnectDeviceState) -> DeviceState {
     use gafctl_quickconnect::DeviceModeStatus;
 
     DeviceState {
@@ -192,3 +209,6 @@ pub(crate) fn common_state(state: gafctl_quickconnect::QuickConnectDeviceState) 
         },
     }
 }
+
+#[cfg(test)]
+mod tests;

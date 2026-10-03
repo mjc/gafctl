@@ -17,9 +17,9 @@ use std::{
 use tokio::sync::RwLock;
 
 pub(super) struct LegacyBleRuntime {
-    pub(super) reconciler: Arc<RwLock<StateReconciler>>,
-    pub(super) device: Arc<DeviceRuntime>,
-    pub(super) ble_client: Arc<ProbeClient>,
+    reconciler: Arc<RwLock<StateReconciler>>,
+    device: Arc<DeviceRuntime>,
+    ble_client: Arc<ProbeClient>,
     peripheral_id: Arc<str>,
 }
 
@@ -43,6 +43,22 @@ impl ControlAdmissionError {
 }
 
 impl LegacyBleRuntime {
+    pub(super) async fn wait_until_idle(&self) {
+        self.ble_client.wait_until_idle().await;
+    }
+
+    pub(super) async fn decorate_state_response(
+        &self,
+        response: &mut gafctl_api::DeviceStateV2Response,
+    ) {
+        let reconciler = self.reconciler.read().await;
+        let poll_error = reconciler.last_error().map(str::to_owned);
+        if poll_error.is_some() && reconciler.latest_snapshot().is_none() {
+            response.inventory_status = crate::backend::DeviceInventoryStatus::Unavailable;
+        }
+        response.last_error = poll_error.or(response.last_error.take());
+    }
+
     pub(super) fn new(peripheral_id: String, device: Arc<DeviceRuntime>) -> Self {
         Self {
             reconciler: Arc::new(RwLock::new(StateReconciler::default())),
@@ -292,7 +308,7 @@ fn control_outcome(result: Result<ProbeResult, ProbeError>) -> ControlOutcome {
     }
 }
 
-pub(super) fn project_legacy_snapshot(snapshot: &DeviceSnapshot) -> Option<DeviceState> {
+fn project_legacy_snapshot(snapshot: &DeviceSnapshot) -> Option<DeviceState> {
     snapshot.identity.decoded().ok()?;
     snapshot.mode.decoded().ok()?;
     snapshot.sensors.decoded().ok()?;
@@ -368,3 +384,11 @@ fn probe_error_message(error: &ProbeError) -> &'static str {
         ProbeErrorKind::Protocol => "GAF protocol error",
     }
 }
+
+#[cfg(test)]
+#[path = "tests/legacy.rs"]
+mod tests;
+
+#[cfg(test)]
+#[path = "tests/state.rs"]
+mod state_tests;

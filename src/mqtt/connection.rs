@@ -33,7 +33,7 @@ use gafctl_api::DeviceId;
 
 struct PublishRequest {
     topic: String,
-    payload: axum::body::Bytes,
+    payload: Vec<u8>,
     retain: bool,
     receipt: Option<oneshot::Sender<()>>,
 }
@@ -77,16 +77,12 @@ impl MqttConnection {
         )
     }
 
-    pub(super) async fn publish_retained(
-        &self,
-        topic: String,
-        payload: impl Into<axum::body::Bytes>,
-    ) {
+    pub(super) async fn publish_retained(&self, topic: String, payload: Vec<u8>) {
         if self
             .publications
             .send(PublishRequest {
                 topic,
-                payload: payload.into(),
+                payload,
                 retain: true,
                 receipt: None,
             })
@@ -105,7 +101,7 @@ impl MqttConnection {
                     .publications
                     .send(PublishRequest {
                         topic: self.topics.device(device, response.kind().result_suffix()),
-                        payload: payload.into(),
+                        payload,
                         retain: false,
                         receipt: Some(receipt),
                     })
@@ -130,7 +126,7 @@ impl MqttConnection {
             Ok(payload) => {
                 if let Err(error) = self.publications.try_send(PublishRequest {
                     topic: self.topics.device(device, response.kind().result_suffix()),
-                    payload: payload.into(),
+                    payload,
                     retain: false,
                     receipt: None,
                 }) {
@@ -269,7 +265,7 @@ async fn initialize_connection(connection: &MqttConnection) {
         tracing::warn!(%error, "could not subscribe to MQTT controls");
     }
     connection
-        .publish_retained(connection.topics.process_availability(), "online")
+        .publish_retained(connection.topics.process_availability(), b"online".to_vec())
         .await;
 }
 

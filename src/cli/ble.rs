@@ -11,7 +11,9 @@ use gafctl_protocol::{
 };
 use serde::Serialize;
 
-use super::{DeadlineSeconds, Preset, output::OutputFormat};
+use crate::arguments::DeadlineSeconds;
+
+use super::{Preset, output::OutputFormat};
 
 #[derive(Debug, Args)]
 pub(super) struct BleCommand {
