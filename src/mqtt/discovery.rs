@@ -1,6 +1,6 @@
 use serde_json::{Value, json};
 
-use crate::device::{CommandCapability, DeviceBackend, DeviceDescriptor, DeviceId, EntitySource};
+use gafctl_api::{CommandCapability, DeviceBackend, DeviceDescriptor, DeviceId, EntitySource};
 
 use super::topics::Topics;
 
@@ -632,7 +632,10 @@ fn switch_configs(device: &DeviceDescriptor) -> impl Iterator<Item = (String, Va
 
 #[cfg(test)]
 mod tests {
-    use super::request_template;
+    use super::super::{discovery, test_support::mqtt_device};
+    use super::*;
+    use gafctl_api::ProxyId;
+    use std::collections::HashSet;
 
     #[test]
     fn request_envelopes_preserve_control_and_refresh_payloads() {
@@ -642,6 +645,143 @@ mod tests {
         assert_eq!(
             request_template(Some(command)),
             format!("{prefix},\"command\":{command}}}")
+        );
+    }
+
+    #[test]
+    fn mqtt_discovery_includes_applicable_ha_entities_and_cleanup_candidates() {
+        let mut ble = DeviceDescriptor::configured_ble();
+        ble.state_source = EntitySource::Mqtt;
+        ble.command_source = EntitySource::Mqtt;
+        let cloud = mqtt_device(ble.proxy_id, "cloud");
+        for (device, expected) in [
+            (
+                &ble,
+                vec![
+                    ("binary_sensor", "controller_fan_flag"),
+                    ("number", "automatic_temperature"),
+                    ("number", "automatic_humidity"),
+                    ("number", "timer_duration"),
+                    ("button", "refresh"),
+                    ("select", "automatic_thresholds"),
+                    ("select", "timer"),
+                ],
+            ),
+            (
+                &cloud,
+                vec![
+                    ("binary_sensor", "running_estimate"),
+                    ("binary_sensor", "ota_in_progress"),
+                    ("sensor", "signal_strength_raw"),
+                    ("sensor", "verified_raw"),
+                    ("binary_sensor", "automatic_mode"),
+                    ("binary_sensor", "humidity_monitor"),
+                    ("number", "automatic_temperature"),
+                    ("number", "automatic_humidity"),
+                    ("number", "timer_duration"),
+                    ("switch", "automatic_mode"),
+                    ("switch", "timer_mode"),
+                    ("switch", "manual_mode"),
+                    ("button", "all_off"),
+                    ("button", "refresh"),
+                ],
+            ),
+        ] {
+            let topics = Topics(device.proxy_id);
+            let configs = discovery::configs(std::slice::from_ref(device)).collect::<Vec<_>>();
+            let candidates = discovery::candidates(topics, &[(device.id.clone(), device.backend)])
+                .collect::<HashSet<_>>();
+            for (domain, key) in expected {
+                let topic = topics.discovery(&device.id, domain, key);
+                assert!(
+                    configs.iter().any(|(candidate, _)| candidate == &topic),
+                    "{domain}/{key}"
+                );
+                assert!(candidates.contains(&topic), "cleanup {domain}/{key}");
+            }
+        }
+    }
+
+    #[test]
+    fn namespaced_templates_preserve_unknown_readings_and_freshness() {
+        let mut device = DeviceDescriptor::configured_ble();
+        device.state_source = EntitySource::Mqtt;
+        device.command_source = EntitySource::Mqtt;
+        let cloud = mqtt_device(device.proxy_id, "cloud-fixture");
+        let devices = [device, cloud];
+        let configs = discovery::configs(&devices).collect::<Vec<_>>();
+        assert!(configs.iter().any(|(topic, config)| {
+            topic.ends_with("_freshness/config")
+                && config["value_template"]
+                    .as_str()
+                    .unwrap()
+                    .contains("unknown")
+        }));
+        let threshold = configs
+            .iter()
+            .find(|(topic, _)| topic.ends_with("_automatic_temperature_threshold/config"))
+            .unwrap();
+        assert!(
+            threshold.1["value_template"]
+                .as_str()
+                .unwrap()
+                .contains("if reading is number else none")
+        );
+        if let Some(path) = std::env::var_os("GAFCTL_DISCOVERY_FIXTURE") {
+            std::fs::write(path, serde_json::to_vec_pretty(&configs).unwrap()).unwrap();
+        }
+    }
+
+    #[test]
+    fn ble_discovery_does_not_override_http_ownership() {
+        let mut device = DeviceDescriptor::configured_ble();
+        assert!(
+            discovery::configs(std::slice::from_ref(&device))
+                .next()
+                .is_none()
+        );
+        device.state_source = EntitySource::Mqtt;
+        assert!(
+            discovery::configs(std::slice::from_ref(&device))
+                .next()
+                .is_none()
+        );
+        device.command_source = EntitySource::Mqtt;
+        assert!(discovery::configs(std::slice::from_ref(&device)).count() > 10);
+    }
+
+    #[test]
+    fn discovery_has_sensor_metadata_and_distinct_availability_per_proxy() {
+        let device = mqtt_device(ProxyId::default(), "same-id");
+        let topics = Topics(device.proxy_id);
+        let configs = discovery::configs(std::slice::from_ref(&device)).collect::<Vec<_>>();
+        let temperature = configs
+            .iter()
+            .find(|(topic, _)| topic.ends_with("_temperature/config"))
+            .unwrap();
+        assert_eq!(temperature.1["device_class"], "temperature");
+        assert_eq!(temperature.1["state_class"], "measurement");
+        assert_eq!(temperature.1["unit_of_measurement"], "°F");
+        assert!(
+            configs
+                .iter()
+                .all(|(topic, config)| config["availability_mode"] == "all"
+                    && config["availability"][0]["topic"] == topics.process_availability()
+                    && if topic.ends_with("_refresh/config") {
+                        config["availability"].as_array().unwrap().len() == 1
+                    } else {
+                        config["availability"][1]["topic"]
+                            == topics.device(&device.id, "availability")
+                    })
+        );
+        let other = mqtt_device(ProxyId::default(), "same-id");
+        let other_topics = discovery::configs(&[other])
+            .map(|(topic, _)| topic)
+            .collect::<HashSet<_>>();
+        assert!(
+            configs
+                .iter()
+                .all(|(topic, _)| !other_topics.contains(topic))
         );
     }
 }

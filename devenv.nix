@@ -42,7 +42,7 @@ in {
   tasks."check:clippy-cli".exec = "cargo clippy --package gafctl --all-targets --no-default-features --features cli --locked -- -D warnings";
   tasks."check:clippy-http".exec = "cargo clippy --package gafctl --all-targets --no-default-features --features http --locked -- -D warnings";
   tasks."check:test".exec = "cargo nextest run --workspace --all-targets --all-features --locked --status-level fail --final-status-level fail";
-  tasks."check:cli-bin".exec = "cargo nextest run --package gafctl --no-default-features --features cli --bin gafctl --locked --status-level fail --final-status-level fail";
+  tasks."check:cli-bin".exec = "cargo nextest run --package gafctl --no-default-features --features cli --lib --bin gafctl --locked --status-level fail --final-status-level fail";
   tasks."check:http".exec = "cargo nextest run --package gafctl --all-targets --no-default-features --features http --locked --status-level fail --final-status-level fail";
   tasks."check:doc".exec = "cargo test --workspace --doc --locked";
   tasks."check:python-format".exec = "ruff format --check custom_components tests/*.py";

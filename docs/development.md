@@ -96,7 +96,14 @@ live account compatibility is untested.
 
 | Path | Purpose |
 | --- | --- |
-| `src/` | Executable, HTTP service, CLI, state polling, and MQTT |
+| `src/lib.rs` | Application entrypoints and shared process exit handling |
+| `src/main.rs`, `src/bin/gafctl.rs` | Tokio entrypoints for the two executables |
+| `src/cli/` | Administrative command dispatch, service commands, direct BLE commands, and text/JSON output |
+| `src/server.rs`, `src/server/` | Server startup, configuration, secret loading, and diagnostic commands |
+| `src/service/` | Device operations, control admission and replay, polling, and MQTT service requests |
+| `src/api.rs` | HTTP routing and request/response adaptation |
+| `src/backend/` | Persistent device identities, inventory, current state, and per-device coordination |
+| `src/mqtt.rs`, `src/mqtt/` | Broker connection, delivery tracking, topics, and Home Assistant discovery |
 | `crates/gafctl-api/` | Shared device, state, capability, and command types |
 | `crates/gafctl-client/` | HTTP client library for a running service |
 | `crates/gafctl-protocol/` | Original controller's frames, commands, and values |
@@ -108,6 +115,36 @@ live account compatibility is untested.
 
 The protocol crate has no Bluetooth or application dependency. The HTTP client
 uses the shared API types without importing the service or Bluetooth runtime.
+
+Both binaries call the root application library. `gafctl server` replaces the
+CLI process with `gafctl-server` on Unix; it does not construct a service inside
+the CLI. The `cli` feature includes administrative commands and direct BLE.
+The `http` feature includes the service and server configuration; `mqtt` adds
+the broker adapter and enables `http`. Each feature gates its application
+modules in `src/lib.rs`.
+
+CLI service and BLE commands share their argument values and output format.
+BLE parsing, transport options, result projection, and command exit decisions
+live together in `src/cli/ble.rs`. Server argument parsing constructs validated
+configuration from `src/server/config.rs`; device execution does not depend on
+CLI parser types. The HTTP and MQTT adapters call the same device service.
+
+Shared legacy snapshot normalization lives in `src/legacy_projection.rs`.
+Direct BLE output retains partial readings and field errors; the service
+accepts complete decoded snapshots before publishing current state. Each
+caller owns that acceptance decision. Readback presentation,
+stdout writing, and logging also have one implementation in the application
+library. Shared request and response types belong to `gafctl-api`, transport I/O to
+the Bluetooth and QuickConnect crates, and wire decoding to `gafctl-protocol`.
+
+Unit tests live beside the parser, projection, configuration, runtime, or
+adapter they exercise. `tests/cli.rs` checks actual executable startup,
+argument forwarding, stdout, exit codes, and HTTP command behavior. The
+CLI-only test task includes the library target as well as the executable.
+Per-crate tests cover wire and client contracts. The Python client tests use
+an in-memory HTTP session; the native Linux registry suite uses pinned Home
+Assistant and generated MQTT discovery fixtures. Shared test fixtures stay
+local to these boundaries.
 
 ## Optional tools
 

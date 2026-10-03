@@ -8,7 +8,7 @@ use std::{
 };
 
 use futures_util::{StreamExt, stream};
-use gafctl_api::{CommandId, is_fresh_at};
+use gafctl_api::{DeviceId, is_fresh_at, unix_millis};
 use gafctl_quickconnect::{
     ClientError, QuickConnectClient, QuickConnectCommand, QuickConnectSettings,
     QuickConnectSettingsBody,
@@ -18,11 +18,7 @@ use tokio::{
     time::{Instant, sleep, timeout},
 };
 
-use crate::{
-    backend::{DeviceRegistry, DeviceRuntime},
-    control::unix_millis,
-    device::DeviceId,
-};
+use crate::backend::{DeviceRegistry, DeviceRuntime};
 
 const DEFAULT_MAX_COMMAND_AGE: Duration = Duration::from_secs(30);
 const DEFAULT_MAX_FUTURE_SKEW: Duration = Duration::from_secs(5);
@@ -37,29 +33,6 @@ pub enum QuickConnectControlStatus {
     ReadbackMismatch,
     ReadbackUnavailable,
     Confirmed,
-}
-
-#[derive(Clone, Debug)]
-pub struct QuickConnectControlOutcome {
-    request_id: CommandId,
-    status: QuickConnectControlStatus,
-}
-
-impl QuickConnectControlOutcome {
-    pub fn request_id(&self) -> &str {
-        self.request_id.as_str()
-    }
-
-    pub const fn status(&self) -> QuickConnectControlStatus {
-        self.status
-    }
-
-    fn new(request_id: &CommandId, status: QuickConnectControlStatus) -> Self {
-        Self {
-            request_id: request_id.clone(),
-            status,
-        }
-    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -84,12 +57,14 @@ impl Default for QuickConnectControlPolicy {
 }
 
 impl QuickConnectControlPolicy {
+    #[cfg(test)]
     pub fn with_command_freshness(mut self, max_age: Duration, max_future_skew: Duration) -> Self {
         self.max_command_age = max_age;
         self.max_future_skew = max_future_skew;
         self
     }
 
+    #[cfg(test)]
     pub fn with_readback(mut self, timeout: Duration, interval: Duration, attempts: u16) -> Self {
         self.readback_timeout = timeout;
         self.readback_interval = interval;
@@ -107,19 +82,13 @@ impl QuickConnectControlPolicy {
 
 #[derive(Clone, Debug)]
 pub struct QuickConnectControlIntent {
-    request_id: CommandId,
     issued_at_unix_ms: u64,
     command: QuickConnectCommand,
 }
 
 impl QuickConnectControlIntent {
-    pub fn new(
-        request_id: CommandId,
-        issued_at_unix_ms: u64,
-        command: QuickConnectCommand,
-    ) -> Self {
+    pub fn new(issued_at_unix_ms: u64, command: QuickConnectCommand) -> Self {
         Self {
-            request_id,
             issued_at_unix_ms,
             command,
         }
@@ -162,25 +131,16 @@ impl QuickConnectControlService {
         &self,
         id: &DeviceId,
         intent: QuickConnectControlIntent,
-    ) -> QuickConnectControlOutcome {
+    ) -> QuickConnectControlStatus {
         if !self.is_fresh(&intent) {
-            return QuickConnectControlOutcome::new(
-                &intent.request_id,
-                QuickConnectControlStatus::Rejected,
-            );
+            return QuickConnectControlStatus::Rejected;
         }
         let target = self.control_target(id, intent.command).await;
         let Ok((runtime, provider_id)) = target else {
-            return QuickConnectControlOutcome::new(
-                &intent.request_id,
-                QuickConnectControlStatus::Rejected,
-            );
+            return QuickConnectControlStatus::Rejected;
         };
         let Some(_queue_permit) = runtime.try_reserve_control() else {
-            return QuickConnectControlOutcome::new(
-                &intent.request_id,
-                QuickConnectControlStatus::Rejected,
-            );
+            return QuickConnectControlStatus::Rejected;
         };
         let generation = runtime.begin_control_intent();
         let _transaction = runtime.acquire_transaction().await;
@@ -188,16 +148,11 @@ impl QuickConnectControlService {
             .is_current(&intent, id, &runtime, &provider_id, generation)
             .await
         {
-            return QuickConnectControlOutcome::new(
-                &intent.request_id,
-                QuickConnectControlStatus::Rejected,
-            );
+            return QuickConnectControlStatus::Rejected;
         }
 
-        let status = self
-            .execute_locked(id, &intent, &runtime, &provider_id, generation)
-            .await;
-        QuickConnectControlOutcome::new(&intent.request_id, status)
+        self.execute_locked(id, &intent, &runtime, &provider_id, generation)
+            .await
     }
 
     async fn execute_locked(
@@ -219,7 +174,10 @@ impl QuickConnectControlService {
             Ok(body) => body,
             Err(gafctl_quickconnect::QuickConnectCommandError::ModeAlreadyInactive) => {
                 return if runtime
-                    .set_control_state_if_current(generation, crate::backend::common_state(before))
+                    .set_control_state_if_current(
+                        generation,
+                        crate::service::quickconnect::common_state(before),
+                    )
                     .await
                 {
                     QuickConnectControlStatus::Confirmed
@@ -443,7 +401,10 @@ impl QuickConnectControlService {
         match state {
             Some(state) => {
                 runtime
-                    .set_control_state_if_current(generation, crate::backend::common_state(state))
+                    .set_control_state_if_current(
+                        generation,
+                        crate::service::quickconnect::common_state(state),
+                    )
                     .await
             }
             None => {
@@ -501,31 +462,13 @@ mod tests {
 
     use crate::{
         backend::{CloudDeviceInput, DeviceRegistry},
-        device::DeviceId,
         quickconnect_control::{
             QuickConnectControlIntent, QuickConnectControlPolicy, QuickConnectControlService,
             QuickConnectControlStatus,
         },
     };
+    use gafctl_api::DeviceId;
     use gafctl_quickconnect::QuickConnectCommand;
-
-    #[test]
-    fn intent_and_outcome_preserve_the_validated_request_id_allocation() {
-        let request_id = gafctl_api::CommandId::parse("shared-request-id").unwrap();
-        let intent = QuickConnectControlIntent::new(
-            request_id.clone(),
-            1000,
-            QuickConnectCommand::SetMode {
-                mode: gafctl_quickconnect::QuickConnectCommandMode::Off,
-            },
-        );
-        let outcome = super::QuickConnectControlOutcome::new(
-            &intent.request_id,
-            QuickConnectControlStatus::Confirmed,
-        );
-        assert_eq!(outcome.request_id(), request_id.as_str());
-        assert_eq!(outcome.request_id().as_ptr(), request_id.as_str().as_ptr());
-    }
 
     #[derive(Clone)]
     struct MockState {
@@ -618,7 +561,7 @@ mod tests {
         }
     }
 
-    fn fresh_intent(request_id: &str, command: QuickConnectCommand) -> QuickConnectControlIntent {
+    fn fresh_intent(command: QuickConnectCommand) -> QuickConnectControlIntent {
         let now_unix_ms = u64::try_from(
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)
@@ -626,11 +569,7 @@ mod tests {
                 .as_millis(),
         )
         .unwrap();
-        QuickConnectControlIntent::new(
-            gafctl_api::CommandId::parse(request_id).unwrap(),
-            now_unix_ms,
-            command,
-        )
+        QuickConnectControlIntent::new(now_unix_ms, command)
     }
 
     fn automatic_target_change() -> QuickConnectCommand {
@@ -648,19 +587,16 @@ mod tests {
     #[tokio::test]
     async fn conditional_off_of_inactive_mode_confirms_without_writing() {
         let fixture = control_fixture(QuickConnectControlPolicy::for_test(), true).await;
-        let outcome = fixture
+        let status = fixture
             .service
             .execute(
                 &fixture.device_id,
-                fresh_intent(
-                    "inactive-timer-off",
-                    QuickConnectCommand::ClearMode {
-                        mode: gafctl_quickconnect::QuickConnectCommandMode::Timer,
-                    },
-                ),
+                fresh_intent(QuickConnectCommand::ClearMode {
+                    mode: gafctl_quickconnect::QuickConnectCommandMode::Timer,
+                }),
             )
             .await;
-        assert_eq!(outcome.status(), QuickConnectControlStatus::Confirmed);
+        assert_eq!(status, QuickConnectControlStatus::Confirmed);
         assert_eq!(fixture.mock.settings_writes.load(Ordering::SeqCst), 0);
         assert_eq!(fixture.mock.detail_reads.load(Ordering::SeqCst), 1);
         clean_up(fixture);
@@ -674,19 +610,12 @@ mod tests {
             .mismatch_preserved_humidity
             .store(true, Ordering::SeqCst);
 
-        let outcome = fixture
+        let status = fixture
             .service
-            .execute(
-                &fixture.device_id,
-                fresh_intent("request-1", automatic_target_change()),
-            )
+            .execute(&fixture.device_id, fresh_intent(automatic_target_change()))
             .await;
 
-        assert_eq!(
-            outcome.status(),
-            QuickConnectControlStatus::ReadbackMismatch
-        );
-        assert_eq!(outcome.request_id(), "request-1");
+        assert_eq!(status, QuickConnectControlStatus::ReadbackMismatch);
         assert_eq!(fixture.mock.settings_writes.load(Ordering::SeqCst), 1);
         assert_eq!(fixture.mock.detail_reads.load(Ordering::SeqCst), 2);
         clean_up(fixture);
@@ -695,15 +624,12 @@ mod tests {
     #[tokio::test]
     async fn disabled_write_capability_rejects_before_cloud_io() {
         let fixture = control_fixture(QuickConnectControlPolicy::for_test(), false).await;
-        let outcome = fixture
+        let status = fixture
             .service
-            .execute(
-                &fixture.device_id,
-                fresh_intent("request-2", automatic_target_change()),
-            )
+            .execute(&fixture.device_id, fresh_intent(automatic_target_change()))
             .await;
 
-        assert_eq!(outcome.status(), QuickConnectControlStatus::Rejected);
+        assert_eq!(status, QuickConnectControlStatus::Rejected);
         assert_eq!(fixture.mock.settings_writes.load(Ordering::SeqCst), 0);
         assert_eq!(fixture.mock.detail_reads.load(Ordering::SeqCst), 0);
         clean_up(fixture);
@@ -716,15 +642,12 @@ mod tests {
         let fixture = control_fixture(policy, true).await;
         fixture.mock.login_delay_ms.store(60, Ordering::SeqCst);
 
-        let outcome = fixture
+        let status = fixture
             .service
-            .execute(
-                &fixture.device_id,
-                fresh_intent("request-3", automatic_target_change()),
-            )
+            .execute(&fixture.device_id, fresh_intent(automatic_target_change()))
             .await;
 
-        assert_eq!(outcome.status(), QuickConnectControlStatus::Rejected);
+        assert_eq!(status, QuickConnectControlStatus::Rejected);
         assert_eq!(fixture.mock.settings_writes.load(Ordering::SeqCst), 0);
         clean_up(fixture);
     }
@@ -735,10 +658,9 @@ mod tests {
         fixture.mock.login_delay_ms.store(60, Ordering::SeqCst);
         let login_started = Arc::clone(&fixture.mock.login_started);
         let registry = Arc::clone(&fixture.registry);
-        let outcome = fixture.service.execute(
-            &fixture.device_id,
-            fresh_intent("request-gate", automatic_target_change()),
-        );
+        let status = fixture
+            .service
+            .execute(&fixture.device_id, fresh_intent(automatic_target_change()));
         let disable_gate = async move {
             login_started.notified().await;
             registry
@@ -746,9 +668,9 @@ mod tests {
                 .await
                 .set_quickconnect_writes_enabled(false);
         };
-        let (outcome, ()) = tokio::join!(outcome, disable_gate);
+        let (status, ()) = tokio::join!(status, disable_gate);
 
-        assert_eq!(outcome.status(), QuickConnectControlStatus::Rejected);
+        assert_eq!(status, QuickConnectControlStatus::Rejected);
         assert_eq!(fixture.mock.settings_writes.load(Ordering::SeqCst), 0);
         clean_up(fixture);
     }
@@ -757,20 +679,17 @@ mod tests {
     async fn matching_readback_confirms_only_after_the_single_post() {
         let fixture = control_fixture(QuickConnectControlPolicy::for_test(), true).await;
 
-        let outcome = fixture
+        let status = fixture
             .service
             .execute(
                 &fixture.device_id,
-                fresh_intent(
-                    "request-4",
-                    QuickConnectCommand::SetTimerDuration {
-                        duration_minutes: 90,
-                    },
-                ),
+                fresh_intent(QuickConnectCommand::SetTimerDuration {
+                    duration_minutes: 90,
+                }),
             )
             .await;
 
-        assert_eq!(outcome.status(), QuickConnectControlStatus::Confirmed);
+        assert_eq!(status, QuickConnectControlStatus::Confirmed);
         assert_eq!(fixture.mock.settings_writes.load(Ordering::SeqCst), 1);
         assert_eq!(fixture.mock.detail_reads.load(Ordering::SeqCst), 2);
         clean_up(fixture);
@@ -781,18 +700,12 @@ mod tests {
         let fixture = control_fixture(QuickConnectControlPolicy::for_test(), true).await;
         fixture.mock.post_status.store(500, Ordering::SeqCst);
 
-        let outcome = fixture
+        let status = fixture
             .service
-            .execute(
-                &fixture.device_id,
-                fresh_intent("request-ambiguous", automatic_target_change()),
-            )
+            .execute(&fixture.device_id, fresh_intent(automatic_target_change()))
             .await;
 
-        assert_eq!(
-            outcome.status(),
-            QuickConnectControlStatus::SubmittedUnconfirmed
-        );
+        assert_eq!(status, QuickConnectControlStatus::SubmittedUnconfirmed);
         assert_eq!(fixture.mock.settings_writes.load(Ordering::SeqCst), 1);
         clean_up(fixture);
     }
@@ -805,18 +718,12 @@ mod tests {
             .fail_detail_after_write
             .store(true, Ordering::SeqCst);
 
-        let outcome = fixture
+        let status = fixture
             .service
-            .execute(
-                &fixture.device_id,
-                fresh_intent("request-unavailable", automatic_target_change()),
-            )
+            .execute(&fixture.device_id, fresh_intent(automatic_target_change()))
             .await;
 
-        assert_eq!(
-            outcome.status(),
-            QuickConnectControlStatus::ReadbackUnavailable
-        );
+        assert_eq!(status, QuickConnectControlStatus::ReadbackUnavailable);
         assert_eq!(fixture.mock.settings_writes.load(Ordering::SeqCst), 1);
         assert!(fixture.mock.detail_reads.load(Ordering::SeqCst) >= 2);
         clean_up(fixture);
@@ -836,10 +743,7 @@ mod tests {
         let wait_for_readback = Arc::clone(&fixture.mock.post_readback_started);
         let first = tokio::spawn(async move {
             first_service
-                .execute(
-                    &first_device,
-                    fresh_intent("request-old", automatic_target_change()),
-                )
+                .execute(&first_device, fresh_intent(automatic_target_change()))
                 .await
         });
         wait_for_readback.notified().await;
@@ -850,13 +754,10 @@ mod tests {
             second_service
                 .execute(
                     &second_device,
-                    fresh_intent(
-                        "request-new",
-                        QuickConnectCommand::SetAutomaticTargets {
-                            temperature_f: Some(111),
-                            humidity_percent: Some(42),
-                        },
-                    ),
+                    fresh_intent(QuickConnectCommand::SetAutomaticTargets {
+                        temperature_f: Some(111),
+                        humidity_percent: Some(42),
+                    }),
                 )
                 .await
         });
@@ -876,13 +777,10 @@ mod tests {
             .expect("new intent should not wait for the old readback deadline");
 
         assert_eq!(
-            first.await.unwrap().status(),
+            first.await.unwrap(),
             QuickConnectControlStatus::SubmittedUnconfirmed
         );
-        assert_eq!(
-            second.unwrap().status(),
-            QuickConnectControlStatus::Confirmed
-        );
+        assert_eq!(second.unwrap(), QuickConnectControlStatus::Confirmed);
         assert_eq!(fixture.mock.settings_writes.load(Ordering::SeqCst), 2);
         clean_up(fixture);
     }
@@ -906,10 +804,7 @@ mod tests {
         let wait_for_refresh = Arc::clone(&fixture.mock.post_readback_started);
         let first = tokio::spawn(async move {
             first_service
-                .execute(
-                    &first_device,
-                    fresh_intent("request-ambiguous-old", automatic_target_change()),
-                )
+                .execute(&first_device, fresh_intent(automatic_target_change()))
                 .await
         });
         wait_for_refresh.notified().await;
@@ -920,13 +815,10 @@ mod tests {
             second_service
                 .execute(
                     &second_device,
-                    fresh_intent(
-                        "request-ambiguous-new",
-                        QuickConnectCommand::SetAutomaticTargets {
-                            temperature_f: Some(111),
-                            humidity_percent: Some(42),
-                        },
-                    ),
+                    fresh_intent(QuickConnectCommand::SetAutomaticTargets {
+                        temperature_f: Some(111),
+                        humidity_percent: Some(42),
+                    }),
                 )
                 .await
         });
@@ -936,13 +828,10 @@ mod tests {
             .unwrap();
 
         assert_eq!(
-            first.await.unwrap().status(),
+            first.await.unwrap(),
             QuickConnectControlStatus::SubmittedUnconfirmed
         );
-        assert_eq!(
-            second.status(),
-            QuickConnectControlStatus::SubmittedUnconfirmed
-        );
+        assert_eq!(second, QuickConnectControlStatus::SubmittedUnconfirmed);
         assert_eq!(fixture.mock.settings_writes.load(Ordering::SeqCst), 2);
         clean_up(fixture);
     }
@@ -965,10 +854,7 @@ mod tests {
         let wait_for_pre_read = Arc::clone(&fixture.mock.pre_read_started);
         let first = tokio::spawn(async move {
             first_service
-                .execute(
-                    &first_device,
-                    fresh_intent("request-pre-read-old", automatic_target_change()),
-                )
+                .execute(&first_device, fresh_intent(automatic_target_change()))
                 .await
         });
         wait_for_pre_read.notified().await;
@@ -979,13 +865,10 @@ mod tests {
             second_service
                 .execute(
                     &second_device,
-                    fresh_intent(
-                        "request-pre-read-new",
-                        QuickConnectCommand::SetAutomaticTargets {
-                            temperature_f: Some(111),
-                            humidity_percent: Some(42),
-                        },
-                    ),
+                    fresh_intent(QuickConnectCommand::SetAutomaticTargets {
+                        temperature_f: Some(111),
+                        humidity_percent: Some(42),
+                    }),
                 )
                 .await
         });
@@ -994,11 +877,8 @@ mod tests {
             .expect("new intent should cancel the stale pre-read")
             .unwrap();
 
-        assert_eq!(
-            first.await.unwrap().status(),
-            QuickConnectControlStatus::Rejected
-        );
-        assert_eq!(second.status(), QuickConnectControlStatus::Confirmed);
+        assert_eq!(first.await.unwrap(), QuickConnectControlStatus::Rejected);
+        assert_eq!(second, QuickConnectControlStatus::Confirmed);
         assert_eq!(fixture.mock.settings_writes.load(Ordering::SeqCst), 1);
         clean_up(fixture);
     }

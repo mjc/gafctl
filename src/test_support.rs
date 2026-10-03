@@ -17,3 +17,10 @@ pub(crate) async fn mock_client(app: Router) -> (QuickConnectClient, tokio::task
     .unwrap();
     (client, server)
 }
+
+pub(crate) fn identity_store_path() -> std::path::PathBuf {
+    std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("target/test-fixtures")
+        .join(format!("gafctl-api-identities-{}", uuid::Uuid::new_v4()))
+        .join("identities.json")
+}

@@ -7,7 +7,7 @@ use crate::control_display::{ControlReadbackDisplay, ModeReadbackDisplay};
 use gafctl_bluetooth::{DiscoveredDevice, ProbeResult};
 use gafctl_protocol::{Acknowledgement, ControlOutcome, DeviceSnapshot, ReadCommand};
 
-pub(crate) use crate::stdout::{StdoutError, write_stdout};
+use crate::stdout::write_stdout;
 
 pub(crate) fn print_probe_result(result: ProbeResult, show_identity: bool) -> anyhow::Result<()> {
     write_stdout(|output| write_probe_result(output, result, show_identity))

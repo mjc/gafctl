@@ -1,7 +1,8 @@
-use std::{fmt, process::ExitCode};
+use std::{fmt, process::ExitCode, str::FromStr, time::Duration};
 
 use anyhow::Result;
-use gafctl_api::DeviceState;
+use clap::{Args, Subcommand};
+use gafctl_api::{ControlPreset, DeviceState};
 use gafctl_bluetooth::{
     DisconnectOutcome, DiscoveredDevice, ProbeOptions, ProbeResult, QueryResult, probe,
 };
@@ -10,10 +11,110 @@ use gafctl_protocol::{
 };
 use serde::Serialize;
 
-use crate::cli_client::BleSettings;
+use super::{DeadlineSeconds, Preset, output::OutputFormat};
+
+#[derive(Debug, Args)]
+pub(super) struct BleCommand {
+    #[command(flatten)]
+    settings: BleSettings,
+    #[command(subcommand)]
+    command: BleOperation,
+}
+
+#[derive(Debug, Args)]
+struct BleSettings {
+    #[arg(long, global = true, default_value = "6")]
+    scan_seconds: DeadlineSeconds,
+    /// Seconds for GATT setup, command writes, and responses; platform calls allow at least 40s.
+    #[arg(long, global = true, default_value = "3")]
+    timeout_seconds: DeadlineSeconds,
+    #[arg(long, global = true, value_enum, default_value = "text")]
+    format: OutputFormat,
+    /// Include raw identity bytes that may contain a private identifier.
+    #[arg(long, global = true)]
+    show_identity: bool,
+}
+
+#[derive(Clone, Debug)]
+struct PeripheralId(String);
+impl FromStr for PeripheralId {
+    type Err = &'static str;
+    fn from_str(value: &str) -> std::result::Result<Self, Self::Err> {
+        if value.trim().is_empty() {
+            Err("peripheral ID must not be empty")
+        } else {
+            Ok(Self(value.to_owned()))
+        }
+    }
+}
+
+#[derive(Debug, Subcommand)]
+enum BleOperation {
+    /// Discover BLE advertisements without connecting or reading the protocol.
+    Scan,
+    /// Query a fan directly; auto-selection requires one unambiguous candidate.
+    State {
+        #[arg(long)]
+        device_id: Option<PeripheralId>,
+    },
+    /// Apply a tested preset to the selected fan.
+    Control {
+        #[arg(long)]
+        device_id: PeripheralId,
+        #[command(subcommand)]
+        command: BleControl,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum BleControl {
+    Preset {
+        #[arg(value_enum)]
+        preset: Preset,
+    },
+}
+
+impl BleCommand {
+    fn into_probe(self) -> (BleIntent, BleSettings, gafctl_bluetooth::ProbeOptions) {
+        use gafctl_bluetooth::{ProbeMode, ProbeOptions};
+        let settings = self.settings;
+        let (intent, mode) = match self.command {
+            BleOperation::Scan => (BleIntent::Scan, ProbeMode::Scan),
+            BleOperation::State { device_id } => (
+                BleIntent::Read,
+                ProbeMode::Query {
+                    device_id: device_id.map(|id| id.0),
+                    control_command: None,
+                },
+            ),
+            BleOperation::Control {
+                device_id,
+                command: BleControl::Preset { preset },
+            } => (
+                BleIntent::Control,
+                ProbeMode::Query {
+                    device_id: Some(device_id.0),
+                    control_command: Some(ControlPreset::from(preset).command()),
+                },
+            ),
+        };
+        let options = ProbeOptions {
+            scan_duration: Duration::from_secs(settings.scan_seconds.get()),
+            response_timeout: Duration::from_secs(settings.timeout_seconds.get()),
+            control_deadline: None,
+            mode,
+        };
+        (intent, settings, options)
+    }
+
+    pub(super) async fn run(self) -> Result<ExitCode> {
+        let (intent, settings, options) = self.into_probe();
+        run(intent, settings, options).await
+    }
+}
 
 #[derive(Clone, Copy)]
-pub(crate) enum BleIntent {
+enum BleIntent {
     Scan,
     Read,
     Control,
@@ -64,15 +165,15 @@ impl fmt::Display for BleReport {
             | Self::Ambiguous { devices }
             | Self::DiscoveryIncomplete { devices, .. } => {
                 writeln!(output, "BLE devices:")?;
-                for device in devices {
+                devices.iter().try_for_each(|device| {
                     writeln!(
                         output,
                         "  {}: {} (RSSI {:?} dBm)",
                         device.peripheral_id,
                         device.name.as_deref().unwrap_or("unknown"),
                         device.rssi_dbm
-                    )?;
-                }
+                    )
+                })?;
                 match self {
                     Self::Discovered { .. } => {
                         output.write_str("Scan only; no connection or protocol request.")
@@ -338,11 +439,7 @@ fn query_succeeded(query: &QueryReport, intent: BleIntent) -> bool {
     }
 }
 
-pub(crate) async fn run(
-    intent: BleIntent,
-    settings: BleSettings,
-    options: ProbeOptions,
-) -> Result<ExitCode> {
+async fn run(intent: BleIntent, settings: BleSettings, options: ProbeOptions) -> Result<ExitCode> {
     match probe(options).await {
         Ok(result) => {
             let (report, code) = project_result(&result, intent, settings.show_identity);
@@ -362,7 +459,15 @@ mod tests {
     use gafctl_bluetooth::{DisconnectOutcome, QueryResult};
     use gafctl_protocol::{ControlOutcome, DeviceSnapshot, Frame};
 
-    use super::project_query;
+    use super::*;
+    use clap::Parser;
+    use gafctl_api::DeviceId;
+
+    #[derive(clap::Parser)]
+    struct BleParser {
+        #[command(flatten)]
+        options: BleCommand,
+    }
 
     fn frame(wire: &'static [u8]) -> Frame<'static> {
         Frame::from_bytes(Bytes::from_static(wire)).unwrap()
@@ -557,5 +662,129 @@ mod tests {
             assert_eq!(value["control"]["confirmed"], confirmed);
             assert_eq!(value["disconnect"]["status"], "failed");
         }
+    }
+
+    #[test]
+    fn ble_shared_flags_work_before_and_after_operation_subcommands() {
+        assert!(
+            BleParser::try_parse_from([
+                "gafctl",
+                "--format",
+                "json",
+                "--scan-seconds",
+                "7",
+                "scan"
+            ])
+            .is_ok()
+        );
+        assert!(
+            BleParser::try_parse_from([
+                "gafctl",
+                "--timeout-seconds",
+                "4",
+                "control",
+                "--device-id",
+                "id",
+                "preset",
+                "timer-clear",
+                "--format",
+                "json"
+            ])
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn ble_preset_mapping_preserves_target_and_transport_deadlines() {
+        use gafctl_protocol::{
+            AutomaticThresholds, ControlCommand, HumidityTenthsPercent, Minutes, TemperatureTenthsF,
+        };
+        for (name, command) in [
+            (
+                "automatic-105-f-30-percent",
+                ControlCommand::SetAutomaticThresholds(AutomaticThresholds {
+                    temperature: TemperatureTenthsF::new(1050),
+                    humidity: HumidityTenthsPercent::new(300),
+                }),
+            ),
+            (
+                "automatic-105-1-f-30-1-percent",
+                ControlCommand::SetAutomaticThresholds(AutomaticThresholds {
+                    temperature: TemperatureTenthsF::new(1051),
+                    humidity: HumidityTenthsPercent::new(301),
+                }),
+            ),
+            ("timer-clear", ControlCommand::SetTimer(Minutes::new(0))),
+            (
+                "timer-one-minute",
+                ControlCommand::SetTimer(Minutes::new(1)),
+            ),
+        ] {
+            let parsed = BleParser::try_parse_from([
+                "gafctl",
+                "control",
+                "--device-id",
+                "platform/id",
+                "preset",
+                name,
+                "--scan-seconds",
+                "7",
+                "--timeout-seconds",
+                "4",
+            ])
+            .unwrap();
+            let (intent, _, options) = parsed.options.into_probe();
+            assert!(match intent {
+                BleIntent::Control => true,
+                BleIntent::Read | BleIntent::Scan => false,
+            });
+            assert_eq!(options.scan_duration, Duration::from_secs(7));
+            assert_eq!(options.response_timeout, Duration::from_secs(4));
+            match options.mode {
+                gafctl_bluetooth::ProbeMode::Query {
+                    device_id,
+                    control_command,
+                } => {
+                    assert_eq!(device_id.as_deref(), Some("platform/id"));
+                    assert_eq!(control_command, Some(command));
+                }
+                gafctl_bluetooth::ProbeMode::Scan => unreachable!("control mapped to scan"),
+            }
+        }
+    }
+
+    #[test]
+    fn ble_controls_require_explicit_target_and_only_offer_verified_presets() {
+        for preset in [
+            "automatic-105-f-30-percent",
+            "automatic-105-1-f-30-1-percent",
+            "timer-clear",
+            "timer-one-minute",
+        ] {
+            assert!(
+                BleParser::try_parse_from([
+                    "gafctl",
+                    "control",
+                    "--device-id",
+                    "platform/id",
+                    "preset",
+                    preset,
+                    "--format",
+                    "json"
+                ])
+                .is_ok()
+            );
+        }
+        for args in [
+            vec!["control", "preset", "timer-clear"],
+            vec!["control", "--device-id", "id", "mode", "off"],
+            vec!["scan", "--device-id", "id"],
+            vec!["state", "--timeout-seconds", "0"],
+        ] {
+            assert!(BleParser::try_parse_from(["gafctl"].into_iter().chain(args)).is_err());
+        }
+        assert!(BleParser::try_parse_from(["gafctl", "state"]).is_ok());
+        assert!("platform/id".parse::<PeripheralId>().is_ok());
+        assert!("platform/id".parse::<DeviceId>().is_err());
     }
 }

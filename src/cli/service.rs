@@ -1,102 +1,18 @@
-use std::{fmt::Display, num::NonZeroU64, process::ExitCode, str::FromStr, time::Duration};
+use std::{process::ExitCode, str::FromStr, time::Duration};
 
 use anyhow::Result;
 use clap::{Args, Subcommand, ValueEnum};
 use gafctl_api::{
-    AutomaticHumidityPercent, AutomaticTemperatureF, CommandId, ControlPreset, DeviceCommand,
-    DeviceId, QuickConnectMode,
+    AutomaticHumidityPercent, AutomaticTemperatureF, CommandId, DeviceCommand, DeviceId,
+    QuickConnectMode,
 };
 use gafctl_client::{Client, ClientError, ClientOptions, ServerUrl};
 use serde::Serialize;
 
-#[derive(Clone, Copy, Debug, Default, ValueEnum)]
-pub(crate) enum OutputFormat {
-    #[default]
-    Text,
-    Json,
-}
-
-impl OutputFormat {
-    pub(crate) fn write(&self, value: &impl Serialize, text: impl Display) -> Result<()> {
-        match self {
-            Self::Text => crate::output::write_stdout(|output| writeln!(output, "{text}")),
-            Self::Json => {
-                let mut bytes = serde_json::to_vec(value)?;
-                bytes.push(b'\n');
-                crate::output::write_stdout(|output| output.write_all(&bytes))
-            }
-        }
-    }
-
-    fn error(&self, error: &ClientError) -> Result<ExitCode> {
-        self.failure(
-            error.kind(),
-            error.to_string(),
-            error.request_id(),
-            error.http_status(),
-        )
-    }
-
-    pub(crate) fn failure(
-        &self,
-        kind: &'static str,
-        message: String,
-        request_id: Option<&CommandId>,
-        http_status: Option<u16>,
-    ) -> Result<ExitCode> {
-        #[derive(Serialize)]
-        struct ErrorDetails<'a> {
-            kind: &'static str,
-            message: String,
-            request_id: Option<&'a CommandId>,
-            http_status: Option<u16>,
-        }
-        #[derive(Serialize)]
-        struct ErrorResponse<'a> {
-            error: ErrorDetails<'a>,
-        }
-        match self {
-            Self::Text => eprintln!("{message}"),
-            Self::Json => self.write(
-                &ErrorResponse {
-                    error: ErrorDetails {
-                        kind,
-                        message,
-                        request_id,
-                        http_status,
-                    },
-                },
-                "",
-            )?,
-        }
-        Ok(ExitCode::FAILURE)
-    }
-}
-
-#[derive(Clone, Copy, Debug)]
-pub(crate) struct DeadlineSeconds(NonZeroU64);
-
-impl DeadlineSeconds {
-    fn get(self) -> u64 {
-        self.0.get()
-    }
-}
-
-impl FromStr for DeadlineSeconds {
-    type Err = &'static str;
-    fn from_str(value: &str) -> std::result::Result<Self, Self::Err> {
-        let seconds = value
-            .parse::<NonZeroU64>()
-            .map_err(|_| "deadline must be a positive integer")?;
-        std::time::Instant::now()
-            .checked_add(Duration::from_secs(seconds.get()))
-            .ok_or("deadline is too large for this platform")?;
-        Ok(Self(seconds))
-    }
-}
+use super::{DeadlineSeconds, Preset, output::OutputFormat};
 
 #[derive(Debug, Args)]
-pub(crate) struct ServiceOptions {
+pub(super) struct ServiceOptions {
     /// Base HTTP/HTTPS service URL; may contain a reverse-proxy path prefix.
     #[arg(
         long,
@@ -124,7 +40,7 @@ impl ServiceOptions {
         Client::new(self.server.clone(), options)
     }
 
-    pub(crate) async fn devices(self) -> Result<ExitCode> {
+    pub(super) async fn devices(self) -> Result<ExitCode> {
         let result = async { self.client()?.devices().await }.await;
         match result {
             Ok(result) => {
@@ -152,14 +68,14 @@ impl ServiceOptions {
 }
 
 #[derive(Debug, Args)]
-pub(crate) struct StateOptions {
+pub(super) struct StateOptions {
     device_id: DeviceId,
     #[command(flatten)]
     service: ServiceOptions,
 }
 
 impl StateOptions {
-    pub(crate) async fn run(self) -> Result<ExitCode> {
+    pub(super) async fn run(self) -> Result<ExitCode> {
         let result = async { self.service.client()?.state(&self.device_id).await }.await;
         match result {
             Ok(result) => {
@@ -178,27 +94,6 @@ impl StateOptions {
                 Ok(ExitCode::SUCCESS)
             }
             Err(error) => self.service.format.error(&error),
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, ValueEnum)]
-pub(crate) enum Preset {
-    #[value(name = "automatic-105-f-30-percent")]
-    Automatic105F30Percent,
-    #[value(name = "automatic-105-1-f-30-1-percent")]
-    Automatic105_1F30_1Percent,
-    TimerClear,
-    TimerOneMinute,
-}
-
-impl From<Preset> for ControlPreset {
-    fn from(value: Preset) -> Self {
-        match value {
-            Preset::Automatic105F30Percent => Self::Automatic105F30Percent,
-            Preset::Automatic105_1F30_1Percent => Self::Automatic105_1F30_1Percent,
-            Preset::TimerClear => Self::TimerClear,
-            Preset::TimerOneMinute => Self::TimerOneMinute,
         }
     }
 }
@@ -309,7 +204,7 @@ impl From<ServiceControl> for DeviceCommand {
 }
 
 #[derive(Debug, Args)]
-pub(crate) struct ControlOptions {
+pub(super) struct ControlOptions {
     device_id: DeviceId,
     #[command(flatten)]
     service: ServiceOptions,
@@ -321,7 +216,7 @@ pub(crate) struct ControlOptions {
 }
 
 impl ControlOptions {
-    pub(crate) async fn run(self) -> Result<ExitCode> {
+    pub(super) async fn run(self) -> Result<ExitCode> {
         let request_id = match self.request_id {
             Some(id) => id,
             None => uuid::Uuid::new_v4()
@@ -370,113 +265,6 @@ impl ControlOptions {
     }
 }
 
-#[derive(Debug, Args)]
-pub(crate) struct BleCommand {
-    #[command(flatten)]
-    settings: BleSettings,
-    #[command(subcommand)]
-    command: BleOperation,
-}
-
-#[derive(Debug, Args)]
-pub(crate) struct BleSettings {
-    #[arg(long, global = true, default_value = "6")]
-    pub(crate) scan_seconds: DeadlineSeconds,
-    /// Seconds for GATT setup, command writes, and responses; platform calls allow at least 40s.
-    #[arg(long, global = true, default_value = "3")]
-    pub(crate) timeout_seconds: DeadlineSeconds,
-    #[arg(long, global = true, value_enum, default_value = "text")]
-    pub(crate) format: OutputFormat,
-    /// Include raw identity bytes that may contain a private identifier.
-    #[arg(long, global = true)]
-    pub(crate) show_identity: bool,
-}
-
-#[derive(Clone, Debug)]
-pub(crate) struct PeripheralId(String);
-impl FromStr for PeripheralId {
-    type Err = &'static str;
-    fn from_str(value: &str) -> std::result::Result<Self, Self::Err> {
-        if value.trim().is_empty() {
-            Err("peripheral ID must not be empty")
-        } else {
-            Ok(Self(value.to_owned()))
-        }
-    }
-}
-
-#[derive(Debug, Subcommand)]
-enum BleOperation {
-    /// Discover BLE advertisements without connecting or reading the protocol.
-    Scan,
-    /// Query a fan directly; auto-selection requires one unambiguous candidate.
-    State {
-        #[arg(long)]
-        device_id: Option<PeripheralId>,
-    },
-    /// Apply a tested preset to the selected fan.
-    Control {
-        #[arg(long)]
-        device_id: PeripheralId,
-        #[command(subcommand)]
-        command: BleControl,
-    },
-}
-
-#[derive(Debug, Subcommand)]
-enum BleControl {
-    Preset {
-        #[arg(value_enum)]
-        preset: Preset,
-    },
-}
-
-impl BleCommand {
-    fn into_probe(
-        self,
-    ) -> (
-        crate::cli_ble::BleIntent,
-        BleSettings,
-        gafctl_bluetooth::ProbeOptions,
-    ) {
-        use crate::cli_ble::BleIntent;
-        use gafctl_bluetooth::{ProbeMode, ProbeOptions};
-        let settings = self.settings;
-        let (intent, mode) = match self.command {
-            BleOperation::Scan => (BleIntent::Scan, ProbeMode::Scan),
-            BleOperation::State { device_id } => (
-                BleIntent::Read,
-                ProbeMode::Query {
-                    device_id: device_id.map(|id| id.0),
-                    control_command: None,
-                },
-            ),
-            BleOperation::Control {
-                device_id,
-                command: BleControl::Preset { preset },
-            } => (
-                BleIntent::Control,
-                ProbeMode::Query {
-                    device_id: Some(device_id.0),
-                    control_command: Some(ControlPreset::from(preset).command()),
-                },
-            ),
-        };
-        let options = ProbeOptions {
-            scan_duration: Duration::from_secs(settings.scan_seconds.get()),
-            response_timeout: Duration::from_secs(settings.timeout_seconds.get()),
-            control_deadline: None,
-            mode,
-        };
-        (intent, settings, options)
-    }
-
-    pub(crate) async fn run(self) -> Result<ExitCode> {
-        let (intent, settings, options) = self.into_probe();
-        crate::cli_ble::run(intent, settings, options).await
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -488,32 +276,11 @@ mod tests {
         #[command(flatten)]
         options: ControlOptions,
     }
-    #[derive(Parser)]
-    struct BleParser {
-        #[command(flatten)]
-        options: BleCommand,
-    }
+
     #[derive(Parser)]
     struct ServiceParser {
         #[command(flatten)]
         options: ServiceOptions,
-    }
-
-    #[test]
-    fn unrepresentable_deadlines_are_rejected_before_transport_access() {
-        assert!(
-            BleParser::try_parse_from([
-                "gafctl",
-                "state",
-                "--timeout-seconds",
-                "18446744073709551615"
-            ])
-            .is_err()
-        );
-        assert!(
-            ServiceParser::try_parse_from(["gafctl", "--timeout-seconds", "18446744073709551615"])
-                .is_err()
-        );
     }
 
     #[test]
@@ -580,130 +347,6 @@ mod tests {
                 expected
             );
         }
-    }
-
-    #[test]
-    fn ble_shared_flags_work_before_and_after_operation_subcommands() {
-        assert!(
-            BleParser::try_parse_from([
-                "gafctl",
-                "--format",
-                "json",
-                "--scan-seconds",
-                "7",
-                "scan"
-            ])
-            .is_ok()
-        );
-        assert!(
-            BleParser::try_parse_from([
-                "gafctl",
-                "--timeout-seconds",
-                "4",
-                "control",
-                "--device-id",
-                "id",
-                "preset",
-                "timer-clear",
-                "--format",
-                "json"
-            ])
-            .is_ok()
-        );
-    }
-
-    #[test]
-    fn ble_preset_mapping_preserves_target_and_transport_deadlines() {
-        use gafctl_protocol::{
-            AutomaticThresholds, ControlCommand, HumidityTenthsPercent, Minutes, TemperatureTenthsF,
-        };
-        for (name, command) in [
-            (
-                "automatic-105-f-30-percent",
-                ControlCommand::SetAutomaticThresholds(AutomaticThresholds {
-                    temperature: TemperatureTenthsF::new(1050),
-                    humidity: HumidityTenthsPercent::new(300),
-                }),
-            ),
-            (
-                "automatic-105-1-f-30-1-percent",
-                ControlCommand::SetAutomaticThresholds(AutomaticThresholds {
-                    temperature: TemperatureTenthsF::new(1051),
-                    humidity: HumidityTenthsPercent::new(301),
-                }),
-            ),
-            ("timer-clear", ControlCommand::SetTimer(Minutes::new(0))),
-            (
-                "timer-one-minute",
-                ControlCommand::SetTimer(Minutes::new(1)),
-            ),
-        ] {
-            let parsed = BleParser::try_parse_from([
-                "gafctl",
-                "control",
-                "--device-id",
-                "platform/id",
-                "preset",
-                name,
-                "--scan-seconds",
-                "7",
-                "--timeout-seconds",
-                "4",
-            ])
-            .unwrap();
-            let (intent, _, options) = parsed.options.into_probe();
-            assert!(match intent {
-                crate::cli_ble::BleIntent::Control => true,
-                crate::cli_ble::BleIntent::Read | crate::cli_ble::BleIntent::Scan => false,
-            });
-            assert_eq!(options.scan_duration, Duration::from_secs(7));
-            assert_eq!(options.response_timeout, Duration::from_secs(4));
-            match options.mode {
-                gafctl_bluetooth::ProbeMode::Query {
-                    device_id,
-                    control_command,
-                } => {
-                    assert_eq!(device_id.as_deref(), Some("platform/id"));
-                    assert_eq!(control_command, Some(command));
-                }
-                gafctl_bluetooth::ProbeMode::Scan => unreachable!("control mapped to scan"),
-            }
-        }
-    }
-
-    #[test]
-    fn ble_controls_require_explicit_target_and_only_offer_verified_presets() {
-        for preset in [
-            "automatic-105-f-30-percent",
-            "automatic-105-1-f-30-1-percent",
-            "timer-clear",
-            "timer-one-minute",
-        ] {
-            assert!(
-                BleParser::try_parse_from([
-                    "gafctl",
-                    "control",
-                    "--device-id",
-                    "platform/id",
-                    "preset",
-                    preset,
-                    "--format",
-                    "json"
-                ])
-                .is_ok()
-            );
-        }
-        for args in [
-            vec!["control", "preset", "timer-clear"],
-            vec!["control", "--device-id", "id", "mode", "off"],
-            vec!["scan", "--device-id", "id"],
-            vec!["state", "--timeout-seconds", "0"],
-        ] {
-            assert!(BleParser::try_parse_from(["gafctl"].into_iter().chain(args)).is_err());
-        }
-        assert!(BleParser::try_parse_from(["gafctl", "state"]).is_ok());
-        assert!("platform/id".parse::<PeripheralId>().is_ok());
-        assert!("platform/id".parse::<DeviceId>().is_err());
     }
 
     #[test]
