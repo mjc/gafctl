@@ -13,7 +13,7 @@ const DEVICE_STATE_FRESHNESS_LIMIT_MS: u64 = 90_000;
 const CONTROL_QUEUE_CAPACITY: usize = 8;
 
 pub struct DeviceRuntime {
-    snapshot: RwLock<DeviceRuntimeSnapshot>,
+    observation: RwLock<RuntimeObservation>,
     transaction: Arc<Mutex<()>>,
     state_generation: AtomicU64,
     control_generation: AtomicU64,
@@ -35,17 +35,68 @@ pub(crate) enum RefreshReservation {
 #[derive(Clone, Debug, Default)]
 pub struct DeviceRuntimeSnapshot {
     pub state: Option<DeviceState>,
-    pub last_successful_state: Option<DeviceState>,
     pub inventory_status: DeviceInventoryStatus,
     pub last_error: Option<String>,
 }
 
-impl DeviceRuntimeSnapshot {
-    fn record_success(&mut self, state: DeviceState) {
-        self.state = Some(state.clone());
-        self.last_successful_state = Some(state);
-        self.inventory_status = DeviceInventoryStatus::Present;
-        self.last_error = None;
+#[derive(Default)]
+enum RuntimeObservation {
+    #[default]
+    Unknown,
+    Available(DeviceState),
+    Unavailable(RuntimeUnavailableReason),
+}
+
+impl RuntimeObservation {
+    fn snapshot_at(&self, now_unix_ms: Option<u64>) -> DeviceRuntimeSnapshot {
+        match self {
+            Self::Unknown => DeviceRuntimeSnapshot::default(),
+            Self::Available(state) => {
+                let fresh = now_unix_ms.is_some_and(|now| state_is_fresh(state, now));
+                DeviceRuntimeSnapshot {
+                    state: fresh.then(|| state.clone()),
+                    inventory_status: DeviceInventoryStatus::Present,
+                    last_error: (!fresh).then(|| "device state expired".to_owned()),
+                }
+            }
+            Self::Unavailable(reason) => reason.snapshot(),
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum RuntimeUnavailableReason {
+    Detail,
+    Missing,
+    Inventory,
+    ControlReadback,
+}
+
+impl RuntimeUnavailableReason {
+    fn snapshot(self) -> DeviceRuntimeSnapshot {
+        let (inventory_status, message) = match self {
+            Self::Detail => (
+                DeviceInventoryStatus::Present,
+                "QuickConnect device detail unavailable",
+            ),
+            Self::Missing => (
+                DeviceInventoryStatus::Missing,
+                "QuickConnect device absent from inventory",
+            ),
+            Self::Inventory => (
+                DeviceInventoryStatus::Unavailable,
+                "QuickConnect inventory unavailable",
+            ),
+            Self::ControlReadback => (
+                DeviceInventoryStatus::Present,
+                "QuickConnect control readback unavailable",
+            ),
+        };
+        DeviceRuntimeSnapshot {
+            state: None,
+            inventory_status,
+            last_error: Some(message.to_owned()),
+        }
     }
 }
 
@@ -53,7 +104,7 @@ impl DeviceRuntime {
     pub(super) fn new() -> Self {
         let (control_changed, _) = watch::channel(0);
         Self {
-            snapshot: RwLock::new(DeviceRuntimeSnapshot::default()),
+            observation: RwLock::new(RuntimeObservation::default()),
             transaction: Arc::new(Mutex::new(())),
             state_generation: AtomicU64::new(0),
             control_generation: AtomicU64::new(0),
@@ -95,29 +146,18 @@ impl DeviceRuntime {
     }
 
     async fn snapshot_at_option(&self, now_unix_ms: Option<u64>) -> DeviceRuntimeSnapshot {
-        let mut snapshot = self.snapshot.read().await.clone();
-        if snapshot
-            .state
-            .as_ref()
-            .is_some_and(|state| now_unix_ms.is_none_or(|now| !state_is_fresh(state, now)))
-        {
-            snapshot.state = None;
-            snapshot.last_error = Some("device state expired".to_owned());
-        }
-        snapshot
+        self.observation.read().await.snapshot_at(now_unix_ms)
     }
 
     #[cfg(all(test, feature = "mqtt"))]
-    pub(crate) async fn block_snapshot_for_test(
-        &self,
-    ) -> tokio::sync::RwLockWriteGuard<'_, DeviceRuntimeSnapshot> {
-        self.snapshot.write().await
+    pub(crate) async fn block_snapshot_for_test(&self) -> impl Send + '_ {
+        self.observation.write().await
     }
 
     pub async fn set_state(&self, state: DeviceState) {
-        let mut snapshot = self.snapshot.write().await;
+        let mut observation = self.observation.write().await;
         self.state_generation.fetch_add(1, Ordering::AcqRel);
-        snapshot.record_success(state);
+        *observation = RuntimeObservation::Available(state);
     }
 
     pub(crate) fn is_current_state_read(&self, generation: u64) -> bool {
@@ -131,54 +171,39 @@ impl DeviceRuntime {
     }
 
     pub async fn set_state_if_current(&self, generation: u64, state: DeviceState) -> bool {
-        let mut snapshot = self.snapshot.write().await;
+        let mut observation = self.observation.write().await;
         if !self.is_current_state_read(generation) {
             return false;
         }
-        snapshot.record_success(state);
+        *observation = RuntimeObservation::Available(state);
         true
     }
 
     pub async fn mark_detail_unavailable_if_current(&self, generation: u64) -> bool {
-        self.update_error_if_current(
-            generation,
-            DeviceInventoryStatus::Present,
-            "QuickConnect device detail unavailable",
-        )
-        .await
+        self.mark_unavailable_if_current(generation, RuntimeUnavailableReason::Detail)
+            .await
     }
 
     pub(super) async fn mark_missing_if_current(&self, generation: u64) -> bool {
-        self.update_error_if_current(
-            generation,
-            DeviceInventoryStatus::Missing,
-            "QuickConnect device absent from inventory",
-        )
-        .await
+        self.mark_unavailable_if_current(generation, RuntimeUnavailableReason::Missing)
+            .await
     }
 
     pub(super) async fn mark_inventory_unavailable_if_current(&self, generation: u64) -> bool {
-        self.update_error_if_current(
-            generation,
-            DeviceInventoryStatus::Unavailable,
-            "QuickConnect inventory unavailable",
-        )
-        .await
+        self.mark_unavailable_if_current(generation, RuntimeUnavailableReason::Inventory)
+            .await
     }
 
-    async fn update_error_if_current(
+    async fn mark_unavailable_if_current(
         &self,
         generation: u64,
-        inventory_status: DeviceInventoryStatus,
-        message: &'static str,
+        reason: RuntimeUnavailableReason,
     ) -> bool {
-        let mut snapshot = self.snapshot.write().await;
+        let mut observation = self.observation.write().await;
         if !self.is_current_state_read(generation) {
             return false;
         }
-        snapshot.state = None;
-        snapshot.inventory_status = inventory_status;
-        snapshot.last_error = Some(message.to_owned());
+        *observation = RuntimeObservation::Unavailable(reason);
         true
     }
 
@@ -222,24 +247,22 @@ impl DeviceRuntime {
     }
 
     pub async fn set_control_state_if_current(&self, generation: u64, state: DeviceState) -> bool {
-        let mut snapshot = self.snapshot.write().await;
+        let mut observation = self.observation.write().await;
         if !self.is_current_control_intent(generation) {
             return false;
         }
         self.state_generation.fetch_add(1, Ordering::AcqRel);
-        snapshot.record_success(state);
+        *observation = RuntimeObservation::Available(state);
         true
     }
 
     pub async fn mark_control_state_unavailable_if_current(&self, generation: u64) -> bool {
-        let mut snapshot = self.snapshot.write().await;
+        let mut observation = self.observation.write().await;
         if !self.is_current_control_intent(generation) {
             return false;
         }
         self.state_generation.fetch_add(1, Ordering::AcqRel);
-        snapshot.state = None;
-        snapshot.inventory_status = DeviceInventoryStatus::Present;
-        snapshot.last_error = Some("QuickConnect control readback unavailable".to_owned());
+        *observation = RuntimeObservation::Unavailable(RuntimeUnavailableReason::ControlReadback);
         true
     }
 
@@ -267,6 +290,168 @@ mod tests {
     use super::*;
     use gafctl_api::{DeviceBackend, DeviceSettings, QuickConnectModeStatus, StateProvenance};
     use std::fs;
+    fn observed_state(fetched_at_unix_ms: Option<u64>) -> DeviceState {
+        DeviceState {
+            temperature_f: Some(102.0),
+            humidity_percent: Some(43.0),
+            settings: DeviceSettings::QuickConnect {
+                mode: QuickConnectModeStatus::Automatic,
+                automatic_temperature_f: Some(105),
+                automatic_humidity_percent: Some(40),
+                timer_duration_minutes: None,
+                humidity_monitor: Some(true),
+            },
+            estimated_running: Some(true),
+            diagnostics: None,
+            provenance: StateProvenance {
+                backend: DeviceBackend::QuickConnect,
+                fetched_at_unix_ms,
+                observed_at_unix_ms: None,
+            },
+        }
+    }
+
+    async fn assert_observation(
+        runtime: &DeviceRuntime,
+        state: Option<DeviceState>,
+        inventory_status: DeviceInventoryStatus,
+        last_error: Option<&str>,
+    ) {
+        let snapshot = runtime.snapshot_at(50_000).await;
+        assert_eq!(snapshot.state, state);
+        assert_eq!(snapshot.inventory_status, inventory_status);
+        assert_eq!(snapshot.last_error.as_deref(), last_error);
+    }
+
+    #[tokio::test]
+    async fn runtime_observation_transitions_report_failures_and_recover() {
+        let runtime = DeviceRuntime::new();
+        assert_observation(&runtime, None, DeviceInventoryStatus::Unknown, None).await;
+        let state = observed_state(Some(1));
+        runtime.set_state(state.clone()).await;
+        assert_observation(
+            &runtime,
+            Some(state.clone()),
+            DeviceInventoryStatus::Present,
+            None,
+        )
+        .await;
+
+        let generation = runtime.begin_state_read();
+        assert!(runtime.mark_detail_unavailable_if_current(generation).await);
+        assert!(runtime.mark_detail_unavailable_if_current(generation).await);
+        assert_observation(
+            &runtime,
+            None,
+            DeviceInventoryStatus::Present,
+            Some("QuickConnect device detail unavailable"),
+        )
+        .await;
+        runtime.set_state(state.clone()).await;
+        assert_observation(
+            &runtime,
+            Some(state.clone()),
+            DeviceInventoryStatus::Present,
+            None,
+        )
+        .await;
+
+        let generation = runtime.begin_state_read();
+        assert!(runtime.mark_missing_if_current(generation).await);
+        assert!(runtime.mark_missing_if_current(generation).await);
+        assert_observation(
+            &runtime,
+            None,
+            DeviceInventoryStatus::Missing,
+            Some("QuickConnect device absent from inventory"),
+        )
+        .await;
+        runtime.set_state(state.clone()).await;
+        assert_observation(
+            &runtime,
+            Some(state.clone()),
+            DeviceInventoryStatus::Present,
+            None,
+        )
+        .await;
+
+        let generation = runtime.begin_state_read();
+        assert!(
+            runtime
+                .mark_inventory_unavailable_if_current(generation)
+                .await
+        );
+        assert!(
+            runtime
+                .mark_inventory_unavailable_if_current(generation)
+                .await
+        );
+        assert_observation(
+            &runtime,
+            None,
+            DeviceInventoryStatus::Unavailable,
+            Some("QuickConnect inventory unavailable"),
+        )
+        .await;
+        runtime.set_state(state.clone()).await;
+        assert_observation(
+            &runtime,
+            Some(state.clone()),
+            DeviceInventoryStatus::Present,
+            None,
+        )
+        .await;
+
+        let generation = runtime.begin_control_intent();
+        assert!(
+            runtime
+                .mark_control_state_unavailable_if_current(generation)
+                .await
+        );
+        assert!(
+            runtime
+                .mark_control_state_unavailable_if_current(generation)
+                .await
+        );
+        assert_observation(
+            &runtime,
+            None,
+            DeviceInventoryStatus::Present,
+            Some("QuickConnect control readback unavailable"),
+        )
+        .await;
+        assert!(
+            runtime
+                .set_control_state_if_current(generation, state.clone())
+                .await
+        );
+        assert_observation(&runtime, Some(state), DeviceInventoryStatus::Present, None).await;
+    }
+
+    #[tokio::test]
+    async fn runtime_observation_freshness_is_projected_without_changing_stored_state() {
+        let runtime = DeviceRuntime::new();
+        let state = observed_state(Some(1));
+        runtime.set_state(state.clone()).await;
+        assert_eq!(runtime.snapshot_at(90_001).await.state, Some(state.clone()));
+        let expired = runtime.snapshot_at(90_002).await;
+        assert_eq!(expired.state, None);
+        assert_eq!(expired.inventory_status, DeviceInventoryStatus::Present);
+        assert_eq!(expired.last_error.as_deref(), Some("device state expired"));
+        assert_eq!(runtime.snapshot_at(0).await.state, None);
+        assert_eq!(runtime.snapshot_at_option(None).await.state, None);
+        assert_eq!(runtime.snapshot_at(50_000).await.state, Some(state));
+
+        runtime.set_state(observed_state(None)).await;
+        assert_observation(
+            &runtime,
+            None,
+            DeviceInventoryStatus::Present,
+            Some("device state expired"),
+        )
+        .await;
+    }
+
     #[tokio::test]
     async fn overlapping_refreshes_share_one_worker_and_abandoned_workers_are_replaced() {
         let runtime = DeviceRuntime::new();
@@ -366,10 +551,6 @@ mod tests {
         );
         let expired = first.snapshot_at(90_002).await;
         assert!(expired.state.is_none());
-        assert_eq!(
-            expired.last_successful_state.unwrap().estimated_running,
-            Some(true)
-        );
         assert!(first.snapshot_at(0).await.state.is_none());
         assert!(first.snapshot_at_option(None).await.state.is_none());
         assert!(second.state().await.is_none());

@@ -34,8 +34,13 @@ use gafctl_api::DeviceId;
 struct PublishRequest {
     topic: String,
     payload: Vec<u8>,
-    retain: bool,
-    receipt: Option<oneshot::Sender<()>>,
+    delivery: Delivery,
+}
+
+enum Delivery {
+    Retained,
+    Untracked,
+    Acknowledged(oneshot::Sender<()>),
 }
 
 #[derive(Default)]
@@ -83,8 +88,7 @@ impl MqttConnection {
             .send(PublishRequest {
                 topic,
                 payload,
-                retain: true,
-                receipt: None,
+                delivery: Delivery::Retained,
             })
             .await
             .is_err()
@@ -102,8 +106,7 @@ impl MqttConnection {
                     .send(PublishRequest {
                         topic: self.topics.device(device, response.kind().result_suffix()),
                         payload,
-                        retain: false,
-                        receipt: Some(receipt),
+                        delivery: Delivery::Acknowledged(receipt),
                     })
                     .await
                     .is_err()
@@ -118,7 +121,7 @@ impl MqttConnection {
 
     pub(super) fn reject(&self, device: &DeviceId, request: &MqttRequest, status: &'static str) {
         let response = MqttReply::Rejected {
-            request_id: request.request_id().as_str().to_owned(),
+            request_id: request.request_id().clone(),
             status,
             kind: request.kind(),
         };
@@ -127,8 +130,7 @@ impl MqttConnection {
                 if let Err(error) = self.publications.try_send(PublishRequest {
                     topic: self.topics.device(device, response.kind().result_suffix()),
                     payload,
-                    retain: false,
-                    receipt: None,
+                    delivery: Delivery::Untracked,
                 }) {
                     tracing::warn!(%error, "could not enqueue MQTT control rejection");
                 }
@@ -149,18 +151,18 @@ async fn publish_requests(
         receiver.recv().await.map(|request| (request, receiver))
     })
     .for_each(|request| async move {
+        let (retain, receipt) = match request.delivery {
+            Delivery::Retained => (true, None),
+            Delivery::Untracked => (false, None),
+            Delivery::Acknowledged(receipt) => (false, Some(receipt)),
+        };
         receipts
             .lock()
             .expect("MQTT receipts lock poisoned")
             .queued
-            .push_back(request.receipt);
+            .push_back(receipt);
         if let Err(error) = client
-            .publish(
-                request.topic,
-                QoS::AtLeastOnce,
-                request.retain,
-                request.payload,
-            )
+            .publish(request.topic, QoS::AtLeastOnce, retain, request.payload)
             .await
         {
             receipts
@@ -415,6 +417,71 @@ mod tests {
     use gafctl_api::ProxyId;
     use rumqttc::v5::mqttbytes::v5::Publish;
     use tokio::time::timeout;
+
+    #[tokio::test]
+    async fn publication_modes_queue_receipts_and_wait_only_for_acknowledged_results() {
+        use super::super::requests::{MqttRefreshRequest, RequestKind};
+        use futures_util::FutureExt;
+        use gafctl_api::{CommandId, DeviceRefreshStatus};
+        let topics = Topics(ProxyId::default());
+        let device = DeviceId::configured_ble();
+        let (client, _eventloop) = AsyncClient::new(test_mqtt_options("queue-modes", 1), 4);
+        let (publications, mut queued) = mpsc::channel(4);
+        let connection = MqttConnection {
+            client,
+            publications,
+            topics,
+        };
+
+        connection
+            .publish_retained(topics.device(&device, "state"), b"state".to_vec())
+            .await;
+        let retained = queued.recv().await.unwrap();
+        assert_eq!(retained.topic, topics.device(&device, "state"));
+        assert_eq!(retained.payload, b"state");
+        let Delivery::Retained = retained.delivery else {
+            unreachable!("retained publication must use retained delivery")
+        };
+
+        let request = MqttRequest::Refresh(MqttRefreshRequest {
+            request_id: CommandId::parse("rejected-id").unwrap(),
+            issued_at_unix_ms: 0,
+        });
+        connection.reject(&device, &request, "stale_request");
+        let untracked = queued.recv().await.unwrap();
+        assert_eq!(untracked.topic, topics.device(&device, "refresh/result"));
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&untracked.payload).unwrap(),
+            serde_json::json!({"request_id": "rejected-id", "status": "stale_request"})
+        );
+        let Delivery::Untracked = untracked.delivery else {
+            unreachable!("rejection publication must use untracked delivery")
+        };
+
+        let reply = MqttReply::Refresh {
+            request_id: CommandId::parse("accepted-id").unwrap(),
+            status: DeviceRefreshStatus::Fresh,
+        };
+        assert_eq!(reply.kind(), RequestKind::Refresh);
+        let publication = connection.publish_result(&device, &reply);
+        tokio::pin!(publication);
+        assert!(publication.as_mut().now_or_never().is_none());
+        let acknowledged = queued.recv().await.unwrap();
+        assert_eq!(acknowledged.topic, topics.device(&device, "refresh/result"));
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&acknowledged.payload).unwrap(),
+            serde_json::json!({"request_id": "accepted-id", "status": "fresh"})
+        );
+        let Delivery::Acknowledged(receipt) = acknowledged.delivery else {
+            unreachable!("result publication must own its acknowledgement ticket")
+        };
+        assert!(
+            publication.as_mut().now_or_never().is_none(),
+            "queue admission must not complete receipt delivery"
+        );
+        receipt.send(()).unwrap();
+        publication.await;
+    }
 
     #[test]
     fn subscriptions_preserve_retained_request_metadata() {

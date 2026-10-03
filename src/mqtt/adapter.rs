@@ -48,7 +48,7 @@ async fn process_mqtt_refresh(
     request: crate::mqtt::MqttRefreshRequest,
 ) -> crate::mqtt::MqttReply {
     use crate::mqtt::{MqttReply, RequestKind};
-    let request_id = request.request_id.as_str().to_owned();
+    let request_id = request.request_id;
     if !v2_request_is_fresh(request.issued_at_unix_ms) {
         return MqttReply::Rejected {
             request_id,
@@ -115,7 +115,7 @@ mod tests {
         else {
             unreachable!("stale queued refresh must be rejected")
         };
-        assert_eq!(request_id, "stale-read");
+        assert_eq!(request_id.as_str(), "stale-read");
         assert_eq!(status, "stale_request");
         assert_eq!(kind, crate::mqtt::RequestKind::Refresh);
         assert_eq!(fixture.reads.load(Ordering::SeqCst), 0);
@@ -124,7 +124,7 @@ mod tests {
         let MqttReply::Refresh { request_id, status } = response.await.unwrap() else {
             unreachable!("fresh queued refresh must return its correlated reply")
         };
-        assert_eq!(request_id, "fresh-read");
+        assert_eq!(request_id.as_str(), "fresh-read");
         assert_eq!(status, DeviceRefreshStatus::Fresh);
         assert_eq!(fixture.reads.load(Ordering::SeqCst), 1);
         assert!(state.state(&id).await.unwrap().available);

@@ -92,11 +92,11 @@ fn parse_request(kind: RequestKind, payload: &[u8]) -> Option<MqttRequest> {
 pub(crate) enum MqttReply {
     Control(DeviceControlV2Response),
     Refresh {
-        request_id: String,
+        request_id: CommandId,
         status: gafctl_api::DeviceRefreshStatus,
     },
     Rejected {
-        request_id: String,
+        request_id: CommandId,
         status: &'static str,
         #[serde(skip)]
         kind: RequestKind,
@@ -230,7 +230,7 @@ fn enqueue_control(
 ) {
     let (reply, response) = oneshot::channel();
     let uncertain = MqttReply::Rejected {
-        request_id: request.request_id().as_str().to_owned(),
+        request_id: request.request_id().clone(),
         status: "outcome_unknown",
         kind: request.kind(),
     };
@@ -306,12 +306,62 @@ mod tests {
     use serde_json::{Value, json};
     use std::time::SystemTime;
 
+    #[test]
+    fn mqtt_reply_wire_format_preserves_correlation_and_kind() {
+        [
+            gafctl_api::DeviceRefreshStatus::Fresh,
+            gafctl_api::DeviceRefreshStatus::Failed,
+            gafctl_api::DeviceRefreshStatus::Superseded,
+        ]
+        .into_iter()
+        .for_each(|status| {
+            let reply = MqttReply::Refresh {
+                request_id: CommandId::parse("refresh-id").unwrap(),
+                status,
+            };
+            assert_eq!(reply.kind(), RequestKind::Refresh);
+            assert_eq!(
+                serde_json::to_value(reply).unwrap(),
+                json!({"request_id": "refresh-id", "status": status})
+            );
+        });
+        [RequestKind::Control, RequestKind::Refresh]
+            .into_iter()
+            .for_each(|kind| {
+                [
+                    "retained_request",
+                    "stale_request",
+                    "control_results_busy",
+                    "queue_full",
+                    "control_worker_unavailable",
+                    "outcome_unknown",
+                    "unknown_device",
+                    "backend_unavailable",
+                    "unsupported_read",
+                    "refresh_failed",
+                ]
+                .into_iter()
+                .for_each(|status| {
+                    let reply = MqttReply::Rejected {
+                        request_id: CommandId::parse("rejected-id").unwrap(),
+                        status,
+                        kind,
+                    };
+                    assert_eq!(reply.kind(), kind);
+                    assert_eq!(
+                        serde_json::to_value(reply).unwrap(),
+                        json!({"request_id": "rejected-id", "status": status})
+                    );
+                });
+            });
+    }
+
     #[tokio::test(start_paused = true)]
     async fn mqtt_deadline_or_closed_worker_returns_correlated_unknown_outcome() {
         for closed in [false, true] {
             let (sender, response) = oneshot::channel();
             let uncertain = MqttReply::Rejected {
-                request_id: "uncertain".to_owned(),
+                request_id: CommandId::parse("uncertain").unwrap(),
                 status: "outcome_unknown",
                 kind: RequestKind::Control,
             };
@@ -697,7 +747,7 @@ mod tests {
         assert_eq!(work.request.kind(), RequestKind::Refresh);
         work.reply
             .send(MqttReply::Refresh {
-                request_id: work.request.request_id().as_str().to_owned(),
+                request_id: work.request.request_id().clone(),
                 status: gafctl_api::DeviceRefreshStatus::Fresh,
             })
             .ok()

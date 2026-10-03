@@ -155,6 +155,9 @@ replacement and rejects snapshots with obsolete ownership descriptors.
 
 Each registry entry owns its descriptor and runtime. Re-registration updates
 the descriptor while retaining state, locks, and generation tracking.
+Runtime observations are unknown, an available state, or a typed unavailable
+reason. Snapshot projection derives inventory status and error text and checks
+freshness before cloning an available payload.
 API commands define their required capability, and capabilities define their
 backend. Registry dispatch checks both before selecting a runtime. The configured
 QuickConnect backend translates API commands into provider writes and rechecks
@@ -162,6 +165,9 @@ the original command's permission before sending.
 Control history stores command identities and outcomes; the service constructs
 correlated responses for callers. MQTT intake owns admission and reply tasks
 under one lock, which is released before shutdown awaits those tasks.
+MQTT publications distinguish retained, untracked, and acknowledged delivery
+with enum variants. Refresh and rejection replies retain validated command IDs
+through serialization.
 
 MQTT number controls share setting bounds, units, and command fields, with
 explicit backend differences. Discovery publication and cleanup topics use

@@ -34,7 +34,6 @@ async fn detail_failure_keeps_device_registered_while_other_state_and_ble_remain
         failed_snapshot.inventory_status,
         crate::backend::DeviceInventoryStatus::Present
     );
-    assert_eq!(failed_snapshot.last_successful_state, None);
     assert_eq!(live.state().await.unwrap().temperature_f, Some(78.0));
     assert_eq!(
         live.snapshot().await.inventory_status,
@@ -111,7 +110,6 @@ async fn invalid_inventory_marks_only_that_accounts_current_state_unavailable() 
         crate::backend::DeviceInventoryStatus::Unavailable
     );
     assert!(failed.state.is_none());
-    assert!(failed.last_successful_state.is_some());
     let unaffected = second_runtime.snapshot().await;
     assert_eq!(
         unaffected.inventory_status,
