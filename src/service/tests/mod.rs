@@ -1,7 +1,7 @@
 use super::test_support::*;
 use super::*;
 use crate::api::router;
-use crate::test_support::identity_store_path;
+use crate::test_support::identity_store_fixture;
 use axum::{
     body::Body,
     http::{Request, StatusCode},
@@ -13,10 +13,7 @@ use gafctl_api::{
     DeviceState, StateProvenance, unix_millis,
 };
 use http_body_util::BodyExt;
-use std::{
-    fs,
-    time::{Duration, SystemTime},
-};
+use std::time::{Duration, SystemTime};
 #[cfg(feature = "mqtt")]
 use tokio::sync::watch;
 use tower::ServiceExt;

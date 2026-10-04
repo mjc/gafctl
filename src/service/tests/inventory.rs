@@ -1,17 +1,16 @@
 use super::*;
-use crate::test_support::identity_store_path;
+use crate::test_support::identity_store_fixture;
 use crate::{api::router, backend::DeviceRegistry};
 use axum::{
     body::Body,
     http::{Request, StatusCode},
 };
 use http_body_util::BodyExt;
-use std::fs;
 use tower::ServiceExt;
 
 #[tokio::test]
 async fn source_route_persists_owner_and_rejects_split_or_unconfigured_mqtt() {
-    let path = identity_store_path();
+    let (_directory, path) = identity_store_fixture();
     let state = DeviceService::with_ble_device(
         "no-physical-device".to_owned(),
         DeviceRegistry::load(&path).unwrap(),
@@ -54,5 +53,4 @@ async fn source_route_persists_owner_and_rejects_split_or_unconfigured_mqtt() {
             .unwrap();
         assert_eq!(response.status(), expected);
     }
-    fs::remove_dir_all(path.parent().unwrap()).unwrap();
 }

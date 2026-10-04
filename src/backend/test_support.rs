@@ -1,10 +1,14 @@
 use super::*;
 use std::path::PathBuf;
-pub(super) fn registry_path() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("target/backend-tests")
-        .join(format!("gafctl-identities-{}", uuid::Uuid::new_v4()))
-        .join("identities.json")
+pub(super) fn registry_fixture() -> (tempfile::TempDir, PathBuf) {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target/backend-tests");
+    std::fs::create_dir_all(&root).unwrap();
+    let directory = tempfile::Builder::new()
+        .prefix("gafctl-identities-")
+        .tempdir_in(root)
+        .unwrap();
+    let path = directory.path().join("identities.json");
+    (directory, path)
 }
 
 pub(super) fn cloud_device(provider_id: &str, name: &str) -> CloudDeviceInput {

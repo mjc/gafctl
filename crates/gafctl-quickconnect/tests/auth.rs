@@ -498,6 +498,37 @@ async fn reads_retry_bounded_server_errors_and_writes_are_never_retried() {
 }
 
 #[tokio::test]
+async fn retry_after_does_not_extend_exhausted_read_or_login_budget() {
+    use futures_util::{StreamExt, stream};
+
+    stream::iter([false, true])
+        .for_each(|fail_login| async move {
+            let attempts = Arc::new(AtomicUsize::new(0));
+            let app = Router::new()
+                .route("/cognito/login", post(|State((attempts, fail_login)): State<(Arc<AtomicUsize>, bool)>| async move {
+                    if fail_login {
+                        attempts.fetch_add(1, Ordering::SeqCst);
+                        (StatusCode::SERVICE_UNAVAILABLE, [(header::RETRY_AFTER, "0")], Json(json!({}))).into_response()
+                    } else {
+                        successful_login().await.into_response()
+                    }
+                }))
+                .route("/gaf/device/deviceList", get(|State((attempts, _)): State<(Arc<AtomicUsize>, bool)>| async move {
+                    attempts.fetch_add(1, Ordering::SeqCst);
+                    (StatusCode::SERVICE_UNAVAILABLE, [(header::RETRY_AFTER, "0")], Json(json!({})))
+                }))
+                .with_state((Arc::clone(&attempts), fail_login));
+            let (base_url, server) = start_server(app).await;
+            let client = test_client(base_url, Credentials::new("user", "password", AccountRole::Contractor));
+            let result = tokio::time::timeout(std::time::Duration::from_secs(2), client.list_devices()).await;
+            server.abort();
+            assert_eq!(result.unwrap().unwrap_err(), gafctl_quickconnect::ClientError::HttpStatus(503));
+            assert_eq!(attempts.load(Ordering::SeqCst), 3);
+        })
+        .await;
+}
+
+#[tokio::test]
 async fn timed_out_settings_write_is_not_replayed() {
     let write_count = Arc::new(AtomicUsize::new(0));
     let app = Router::new()

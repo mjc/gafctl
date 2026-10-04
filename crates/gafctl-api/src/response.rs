@@ -161,8 +161,9 @@ pub struct DeviceControlV2Response {
 }
 
 /// Backend outcome. Unrecognized future statuses retain their wire value.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, strum::AsRefStr, strum::Display)]
 #[serde(from = "String", into = "String")]
+#[strum(serialize_all = "snake_case")]
 pub enum ControlStatus {
     Confirmed,
     Unconfirmed,
@@ -179,6 +180,7 @@ pub enum ControlStatus {
     Busy,
     ControlFailed,
     InvalidRequestId,
+    #[strum(transparent)]
     Unknown(String),
 }
 
@@ -189,24 +191,7 @@ impl ControlStatus {
     }
 
     pub fn as_str(&self) -> &str {
-        match self {
-            Self::Confirmed => "confirmed",
-            Self::Unconfirmed => "unconfirmed",
-            Self::Rejected => "rejected",
-            Self::SubmittedUnconfirmed => "submitted_unconfirmed",
-            Self::ReadbackMismatch => "readback_mismatch",
-            Self::ReadbackUnavailable => "readback_unavailable",
-            Self::UnsupportedCommand => "unsupported_command",
-            Self::StaleRequest => "stale_request",
-            Self::RequestIdReused => "request_id_reused",
-            Self::UnknownDevice => "unknown_device",
-            Self::DeviceUnavailable => "device_unavailable",
-            Self::BackendUnavailable => "backend_unavailable",
-            Self::Busy => "busy",
-            Self::ControlFailed => "control_failed",
-            Self::InvalidRequestId => "invalid_request_id",
-            Self::Unknown(value) => value,
-        }
+        self.as_ref()
     }
 }
 
@@ -248,12 +233,6 @@ impl From<ControlStatus> for String {
 impl PartialEq<&str> for ControlStatus {
     fn eq(&self, other: &&str) -> bool {
         self.as_str() == *other
-    }
-}
-
-impl std::fmt::Display for ControlStatus {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str(self.as_str())
     }
 }
 

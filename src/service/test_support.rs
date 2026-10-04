@@ -1,7 +1,7 @@
 use super::quickconnect::QuickConnectBackend;
 use super::*;
 use crate::api::router;
-use crate::test_support::identity_store_path;
+use crate::test_support::identity_store_fixture;
 use axum::{
     Json, Router,
     body::Body,
@@ -13,10 +13,7 @@ use futures_util::{StreamExt, stream};
 use gafctl_api::DeviceId;
 use gafctl_protocol::DeviceSnapshot;
 use http_body_util::BodyExt;
-use std::{
-    path::PathBuf,
-    time::{Duration, Instant, SystemTime},
-};
+use std::time::{Duration, Instant, SystemTime};
 use tower::ServiceExt;
 #[derive(Default)]
 pub(super) struct CloudPollFixture {
@@ -72,9 +69,9 @@ pub(super) async fn cloud_poll_fixture(
     DeviceService,
     Arc<CloudPollFixture>,
     tokio::task::JoinHandle<()>,
-    PathBuf,
+    tempfile::TempDir,
 ) {
-    let path = identity_store_path();
+    let (directory, path) = identity_store_fixture();
     let registry = DeviceRegistry::load(&path).unwrap();
     let fixture = Arc::new(CloudPollFixture {
         devices: devices.iter().map(|id| (*id).to_owned()).collect(),
@@ -108,7 +105,7 @@ pub(super) async fn cloud_poll_fixture(
         client,
         "synthetic-account",
     ));
-    (state, fixture, server, path)
+    (state, fixture, server, directory)
 }
 
 pub(super) async fn mock_quickconnect_client() -> (
@@ -209,9 +206,9 @@ pub(crate) async fn refresh_fixture() -> (
     DeviceId,
     Arc<RefreshFixture>,
     tokio::task::JoinHandle<()>,
-    PathBuf,
+    tempfile::TempDir,
 ) {
-    let path = identity_store_path();
+    let (directory, path) = identity_store_fixture();
     let mut registry = DeviceRegistry::load(&path).unwrap();
     let id = registry
         .reconcile_quickconnect(
@@ -241,7 +238,7 @@ pub(crate) async fn refresh_fixture() -> (
         client,
         "synthetic-account",
     ));
-    (state, id, fixture, server, path)
+    (state, id, fixture, server, directory)
 }
 
 pub(super) async fn refresh_fixture_detail(

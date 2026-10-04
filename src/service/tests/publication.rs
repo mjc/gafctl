@@ -1,19 +1,19 @@
 use super::*;
 use crate::service::test_support::*;
-use crate::test_support::identity_store_path;
+use crate::test_support::identity_store_fixture;
 use crate::{api::router, backend::DeviceRegistry};
 use axum::{
     body::Body,
     http::{Request, StatusCode},
 };
 use gafctl_api::EntitySource;
-use std::{fs, time::Duration};
+use std::time::Duration;
 use tower::ServiceExt;
 
 #[cfg(feature = "mqtt")]
 #[tokio::test]
 async fn mqtt_snapshot_collection_serializes_sibling_publications() {
-    let (mut state, id, fixture, server, path) = refresh_fixture().await;
+    let (mut state, id, fixture, server, _directory) = refresh_fixture().await;
     fixture.release.notify_one();
     state.refresh_device(&id).await.unwrap();
     state
@@ -84,7 +84,6 @@ async fn mqtt_snapshot_collection_serializes_sibling_publications() {
         "collection allowed concurrent stale publication"
     );
     server.abort();
-    fs::remove_file(path).unwrap();
 }
 
 #[tokio::test]
@@ -115,7 +114,7 @@ async fn stale_mqtt_snapshot_cannot_restore_previous_entity_owner() {
 #[tokio::test]
 #[cfg(feature = "mqtt")]
 async fn source_route_accepts_persistent_mqtt_owner_with_offline_broker() {
-    let path = identity_store_path();
+    let (_directory, path) = identity_store_fixture();
     let mut state = DeviceService::with_ble_device(
         "no-physical-device".to_owned(),
         DeviceRegistry::load(&path).unwrap(),
@@ -158,7 +157,6 @@ async fn source_route_accepts_persistent_mqtt_owner_with_offline_broker() {
         restored.descriptors().next().unwrap().command_source,
         EntitySource::Mqtt
     );
-    fs::remove_dir_all(path.parent().unwrap()).unwrap();
 }
 
 #[test]
@@ -201,7 +199,7 @@ async fn cloud_only_periodic_state_publication_refreshes_the_mqtt_snapshot() {
 #[tokio::test]
 #[cfg(feature = "mqtt")]
 async fn mqtt_discovery_start_preserves_per_device_ownership() {
-    let path = identity_store_path();
+    let (_directory, path) = identity_store_fixture();
     let mut registry = DeviceRegistry::load(&path).unwrap();
     let ids = registry
         .reconcile_quickconnect(
@@ -248,5 +246,4 @@ async fn mqtt_discovery_start_preserves_per_device_ownership() {
             && device.state_source == EntitySource::Http
             && device.command_source == EntitySource::Http
     }));
-    fs::remove_dir_all(path.parent().unwrap()).ok();
 }

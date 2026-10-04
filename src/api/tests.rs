@@ -1,11 +1,10 @@
 use super::*;
 use crate::backend::DeviceRegistry;
-use crate::test_support::identity_store_path;
+use crate::test_support::identity_store_fixture;
 use axum::{body::Body, http::Request};
 use gafctl_api::unix_millis;
 use http_body_util::BodyExt;
 use std::{
-    fs,
     sync::Arc,
     time::{Duration, SystemTime},
 };
@@ -174,7 +173,7 @@ async fn startup_without_ble_has_empty_inventory_and_no_configured_state() {
 
 #[tokio::test]
 async fn cloud_only_and_mixed_startup_never_alias_cloud_devices_to_configured() {
-    let path = identity_store_path();
+    let (_directory, path) = identity_store_fixture();
     let mut cloud_registry = DeviceRegistry::load(&path).unwrap();
     let cloud_ids = cloud_registry
         .reconcile_quickconnect(
@@ -241,12 +240,11 @@ async fn cloud_only_and_mixed_startup_never_alias_cloud_devices_to_configured() 
     let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
     assert_eq!(body["devices"].as_array().unwrap().len(), 3);
     assert!(!body.to_string().contains("provider-private"));
-    fs::remove_dir_all(path.parent().unwrap()).ok();
 }
 
 #[tokio::test]
 async fn v2_discovery_lists_backends_and_rejects_cloud_command_for_ble() {
-    let path = identity_store_path();
+    let (_directory, path) = identity_store_fixture();
     let mut registry = DeviceRegistry::load(&path).unwrap();
     let cloud_ids = registry
         .reconcile_quickconnect(
@@ -331,8 +329,6 @@ async fn v2_discovery_lists_backends_and_rejects_cloud_command_for_ble() {
     assert_eq!(outcome["request_id"], "reject-cloud-on-ble");
     assert_eq!(outcome["status"], "unsupported_command");
     assert_eq!(cloud_ids.len(), 2);
-
-    fs::remove_dir_all(path.parent().unwrap()).ok();
 }
 
 #[tokio::test]

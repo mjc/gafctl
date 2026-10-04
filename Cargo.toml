@@ -19,6 +19,7 @@ http = [
     "dep:thiserror",
     "dep:gafctl-quickconnect",
     "dep:uuid",
+    "dep:tempfile",
 ]
 mqtt = ["http", "dep:rumqttc"]
 cli = [
@@ -58,6 +59,7 @@ panic = "deny"
 
 [workspace.dependencies]
 anyhow = "1.0.104"
+backon = { version = "1.6.0", default-features = false }
 axum = { version = "0.8.9", default-features = false, features = ["http1", "json", "tokio", "tracing"] }
 btleplug = "0.13.3"
 bytes = "1.12.1"
@@ -73,6 +75,8 @@ serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 base64 = "0.23.1"
 thiserror = "2.0.21"
+tempfile = "3.27.0"
+strum = { version = "0.28.0", default-features = false, features = ["derive"] }
 tokio = { version = "1.53.1", default-features = false }
 tower = { version = "0.5", default-features = false }
 tracing = "0.1.44"
@@ -95,6 +99,7 @@ tracing-subscriber.workspace = true
 rumqttc = { workspace = true, optional = true }
 thiserror = { workspace = true, optional = true }
 uuid = { workspace = true, optional = true }
+tempfile = { workspace = true, optional = true }
 gafctl-bluetooth = { path = "crates/gafctl-bluetooth" }
 gafctl-quickconnect = { path = "crates/gafctl-quickconnect", optional = true }
 gafctl-protocol = { path = "crates/gafctl-protocol" }
@@ -117,6 +122,7 @@ path = "tests/cli.rs"
 required-features = ["http", "cli"]
 
 [dev-dependencies]
+tempfile.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
 assert_cmd.workspace = true
 bytes.workspace = true

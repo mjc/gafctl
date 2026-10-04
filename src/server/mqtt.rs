@@ -49,7 +49,7 @@ mod tests {
     use super::*;
     use crate::service::test_support::refresh_fixture;
     use gafctl_api::{CommandId, DeviceRefreshStatus, unix_millis};
-    use std::{fs, time::SystemTime};
+    use std::time::SystemTime;
     use tokio::sync::mpsc;
 
     #[tokio::test(start_paused = true)]
@@ -72,7 +72,7 @@ mod tests {
 
     #[tokio::test]
     async fn mqtt_shutdown_closes_intake_and_drains_an_accepted_request() {
-        let (state, id, fixture, server, path) = refresh_fixture().await;
+        let (state, id, fixture, server, _directory) = refresh_fixture().await;
         let (sender, receiver) = mpsc::channel(2);
         let intake = MqttRequestIntake::new(sender);
         let requests = tokio::spawn(run_device_requests(state, receiver));
@@ -114,6 +114,5 @@ mod tests {
         assert_eq!(status, DeviceRefreshStatus::Fresh);
         assert!(runtime.requests.is_finished());
         server.abort();
-        fs::remove_dir_all(path.parent().unwrap()).unwrap();
     }
 }

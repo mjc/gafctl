@@ -18,9 +18,25 @@ pub(crate) async fn mock_client(app: Router) -> (QuickConnectClient, tokio::task
     (client, server)
 }
 
-pub(crate) fn identity_store_path() -> std::path::PathBuf {
-    std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("target/test-fixtures")
-        .join(format!("gafctl-api-identities-{}", uuid::Uuid::new_v4()))
-        .join("identities.json")
+pub(crate) fn identity_store_fixture() -> (tempfile::TempDir, std::path::PathBuf) {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("target/test-fixtures");
+    std::fs::create_dir_all(&root).unwrap();
+    let directory = tempfile::Builder::new()
+        .prefix("gafctl-api-identities-")
+        .tempdir_in(root)
+        .unwrap();
+    let path = directory.path().join("identities.json");
+    (directory, path)
+}
+
+#[test]
+fn identity_store_fixture_stays_under_target_and_cleans_up_on_drop() {
+    let (directory, path) = identity_store_fixture();
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("target/test-fixtures");
+    assert_eq!(directory.path().parent(), Some(root.as_path()));
+    assert_eq!(path.parent(), Some(directory.path()));
+    std::fs::write(&path, b"synthetic fixture").unwrap();
+    assert!(path.is_file());
+    drop(directory);
+    assert!(!path.parent().unwrap().exists());
 }

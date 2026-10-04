@@ -5,7 +5,7 @@ use gafctl_api::{
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, HashSet},
-    fs::{self, OpenOptions},
+    fs,
     io::{self, Write},
     path::{Path, PathBuf},
 };
@@ -177,18 +177,13 @@ impl IdentityStore {
             bindings,
         })
         .map_err(DeviceRegistryError::Encoding)?;
-        let temporary_path = temporary_path(path);
-        let mut options = OpenOptions::new();
-        options.write(true).create_new(true);
-        #[cfg(unix)]
-        options.mode(0o600);
-        let mut file = options
-            .open(&temporary_path)
-            .map_err(DeviceRegistryError::Io)?;
+        let mut file = tempfile::NamedTempFile::new_in(parent).map_err(DeviceRegistryError::Io)?;
         file.write_all(&contents)
-            .and_then(|()| file.sync_all())
+            .and_then(|()| file.as_file().sync_all())
             .map_err(DeviceRegistryError::Io)?;
-        fs::rename(temporary_path, path).map_err(DeviceRegistryError::Io)
+        file.persist(path)
+            .map(drop)
+            .map_err(|error| DeviceRegistryError::Io(error.error))
     }
 }
 
@@ -254,21 +249,47 @@ fn valid_identity(value: &str) -> bool {
     !value.is_empty() && value.len() <= 256 && !value.chars().any(char::is_control)
 }
 
-fn temporary_path(path: &Path) -> PathBuf {
-    path.with_extension(format!("{}.tmp", uuid::Uuid::new_v4().simple()))
-}
-
-#[cfg(unix)]
-use std::os::unix::fs::OpenOptionsExt;
-
 #[cfg(test)]
 mod tests {
     use super::super::{DeviceRegistry, test_support::*};
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn failed_identity_replacement_removes_staging_files() {
+        let (directory, path) = registry_fixture();
+        let store = IdentityStore::load(path.clone()).unwrap();
+        fs::remove_file(&path).unwrap();
+        fs::create_dir(&path).unwrap();
+
+        assert!(store.save(&store.bindings, &store.sources).is_err());
+        let entries = fs::read_dir(directory.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .collect::<Vec<_>>();
+        assert_eq!(entries, [path]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn identity_replacement_keeps_private_file_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let (_directory, path) = registry_fixture();
+        let store = IdentityStore::load(path.clone()).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+        store.save(&store.bindings, &store.sources).unwrap();
+
+        assert_eq!(
+            fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        assert_eq!(IdentityStore::load(path).unwrap().proxy_id, store.proxy_id);
+    }
+
     #[test]
     fn identity_store_rejects_dangling_sources_and_invalid_proxy_ids() {
-        let path = registry_path();
+        let (_directory, path) = registry_fixture();
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         [
             (
@@ -291,12 +312,12 @@ mod tests {
             .unwrap();
             assert!(DeviceRegistry::load(&path).is_err_and(is_invalid_store));
         });
-        fs::remove_dir_all(path.parent().unwrap()).unwrap();
     }
 
     #[test]
     fn failed_source_persistence_preserves_live_and_saved_ownership() {
-        let path = registry_path();
+        let (_directory, path) = registry_fixture();
+        let path = path.with_file_name("store").join("identities.json");
         let mut registry = DeviceRegistry::load(&path).unwrap();
         registry.register_configured_ble();
         let parent = path.parent().unwrap();
@@ -330,12 +351,11 @@ mod tests {
             restored.descriptors().next().unwrap().state_source,
             EntitySource::Http
         );
-        fs::remove_dir_all(parent).unwrap();
     }
 
     #[test]
     fn entity_sources_survive_restart_for_ble_and_cloud() {
-        let path = registry_path();
+        let (_directory, path) = registry_fixture();
         let mut registry = DeviceRegistry::load(&path).unwrap();
         registry.register_configured_ble();
         let cloud = registry
@@ -379,12 +399,11 @@ mod tests {
         assert_eq!(ble.command_source, EntitySource::Mqtt);
         let cloud = restored.descriptors().find(|d| d.id == cloud).unwrap();
         assert_eq!(cloud.command_source, EntitySource::Http);
-        fs::remove_dir_all(path.parent().unwrap()).unwrap();
     }
 
     #[test]
     fn proxy_identity_is_persisted_before_devices_are_registered() {
-        let path = registry_path();
+        let (_directory, path) = registry_fixture();
         let mut registry = DeviceRegistry::load(&path).unwrap();
         let first: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
         registry.register_configured_ble();
@@ -400,12 +419,11 @@ mod tests {
         restored.register_configured_ble();
         let restored = serde_json::to_value(restored.descriptors().next().unwrap()).unwrap();
         assert_eq!(restored["proxy_id"], descriptor["proxy_id"]);
-        fs::remove_dir_all(path.parent().unwrap()).unwrap();
     }
 
     #[test]
     fn cloud_identity_survives_order_rename_restart_and_coexists_with_ble() {
-        let path = registry_path();
+        let (_directory, path) = registry_fixture();
         let mut registry = DeviceRegistry::load(&path).unwrap();
         registry.register_configured_ble();
         registry
@@ -444,12 +462,11 @@ mod tests {
                 !payload.contains("provider-private") && !payload.contains("account-private")
             })
         }));
-        fs::remove_dir_all(path.parent().unwrap()).ok();
     }
 
     #[test]
     fn provider_identifiers_are_scoped_to_their_account() {
-        let path = registry_path();
+        let (_directory, path) = registry_fixture();
         let mut registry = DeviceRegistry::load(&path).unwrap();
         let first = registry
             .reconcile_quickconnect("account-a", &[cloud_device("same-provider-id", "One")])
@@ -481,12 +498,11 @@ mod tests {
                 0o600
             );
         }
-        fs::remove_dir_all(path.parent().unwrap()).ok();
     }
 
     #[test]
     fn identity_store_rejects_the_reserved_configured_device_id() {
-        let path = registry_path();
+        let (_directory, path) = registry_fixture();
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(
             &path,
@@ -495,12 +511,11 @@ mod tests {
         .unwrap();
 
         assert!(DeviceRegistry::load(&path).is_err_and(is_invalid_store));
-        fs::remove_dir_all(path.parent().unwrap()).ok();
     }
 
     #[test]
     fn duplicate_provider_ids_reject_the_inventory_before_saving() {
-        let path = registry_path();
+        let (_directory, path) = registry_fixture();
         let mut registry = DeviceRegistry::load(&path).unwrap();
         let result = registry.reconcile_quickconnect(
             "account-a",
@@ -510,6 +525,5 @@ mod tests {
         assert_eq!(registry.identity_count(), 0);
         let stored: IdentityFile = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
         assert!(stored.bindings.is_empty());
-        fs::remove_dir_all(path.parent().unwrap()).ok();
     }
 }

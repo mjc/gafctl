@@ -289,7 +289,6 @@ mod tests {
     use super::super::{DeviceRegistry, test_support::*};
     use super::*;
     use gafctl_api::{DeviceBackend, DeviceSettings, QuickConnectModeStatus, StateProvenance};
-    use std::fs;
     fn observed_state(fetched_at_unix_ms: Option<u64>) -> DeviceState {
         DeviceState {
             temperature_f: Some(102.0),
@@ -501,7 +500,7 @@ mod tests {
 
     #[tokio::test]
     async fn each_device_owns_independent_state_and_transaction_lock() {
-        let path = registry_path();
+        let (_directory, path) = registry_fixture();
         let mut registry = DeviceRegistry::load(&path).unwrap();
         let ids = registry
             .reconcile_quickconnect(
@@ -559,6 +558,5 @@ mod tests {
             .collect::<Vec<_>>();
         assert!(first.try_reserve_control().is_none());
         drop(permits);
-        fs::remove_dir_all(path.parent().unwrap()).ok();
     }
 }

@@ -372,7 +372,6 @@ mod tests {
     use super::test_support::*;
     use super::*;
     use gafctl_api::{DeviceSettings, DeviceState, QuickConnectModeStatus, StateProvenance};
-    use std::fs;
 
     fn command_families() -> impl Iterator<Item = (DeviceCommand, DeviceBackend)> {
         [
@@ -423,7 +422,7 @@ mod tests {
 
     #[test]
     fn dispatch_checks_command_family_and_enabled_capabilities() {
-        let path = registry_path();
+        let (_directory, path) = registry_fixture();
         let mut registry = DeviceRegistry::load(&path).unwrap();
         registry.register_configured_ble();
         let ble = DeviceId::configured_ble();
@@ -463,12 +462,11 @@ mod tests {
             assert!(registry.dispatch(&ble, command).is_err(), "{command:?}");
             assert!(registry.dispatch(&cloud, command).is_err(), "{command:?}");
         });
-        fs::remove_dir_all(path.parent().unwrap()).unwrap();
     }
 
     #[test]
     fn cloud_control_targets_require_account_read_and_write_permissions() {
-        let path = registry_path();
+        let (_directory, path) = registry_fixture();
         let mut registry = DeviceRegistry::load(&path).unwrap();
         let id = registry
             .reconcile_quickconnect("account-a", &[cloud_device("provider-a", "Fan")])
@@ -522,12 +520,11 @@ mod tests {
                     })
             );
         });
-        fs::remove_dir_all(path.parent().unwrap()).unwrap();
     }
 
     #[test]
     fn descriptors_resolve_registered_ids_and_follow_renames() {
-        let path = registry_path();
+        let (_directory, path) = registry_fixture();
         let mut registry = DeviceRegistry::load(&path).unwrap();
         registry.register_configured_ble();
         let id = registry
@@ -552,12 +549,11 @@ mod tests {
             .reconcile_quickconnect("account-a", &[cloud_device("provider-a", "Renamed")])
             .unwrap();
         assert_eq!(registry.descriptor(&id).unwrap().name, "Renamed");
-        fs::remove_dir_all(path.parent().unwrap()).unwrap();
     }
 
     #[tokio::test]
     async fn reregistering_a_device_updates_its_descriptor_and_preserves_its_runtime() {
-        let path = registry_path();
+        let (_directory, path) = registry_fixture();
         let mut registry = DeviceRegistry::load(&path).unwrap();
         let id = registry
             .reconcile_quickconnect("account-a", &[cloud_device("provider-a", "Original")])
@@ -601,12 +597,11 @@ mod tests {
 
         drop(transaction);
         assert!(current.try_acquire_transaction().is_some());
-        fs::remove_dir_all(path.parent().unwrap()).unwrap();
     }
 
     #[test]
     fn inactive_backend_ownership_does_not_require_mqtt() {
-        let path = registry_path();
+        let (_directory, path) = registry_fixture();
         let mut registry = DeviceRegistry::load(&path).unwrap();
         registry.register_configured_ble();
         let cloud = registry
@@ -629,12 +624,11 @@ mod tests {
             .unwrap();
         assert!(!registry.mqtt_ownership_required(false, None));
         assert!(registry.mqtt_ownership_required(true, None));
-        fs::remove_dir_all(path.parent().unwrap()).unwrap();
     }
 
     #[test]
     fn state_and_command_entity_sources_are_selected_per_device() {
-        let path = registry_path();
+        let (_directory, path) = registry_fixture();
         let mut registry = DeviceRegistry::load(&path).unwrap();
         registry.register_configured_ble();
         let cloud_id = registry
@@ -666,6 +660,5 @@ mod tests {
                 .state_source,
             EntitySource::Http
         );
-        fs::remove_dir_all(path.parent().unwrap()).ok();
     }
 }

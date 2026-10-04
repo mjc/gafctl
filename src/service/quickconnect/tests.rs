@@ -1,10 +1,9 @@
 use super::*;
 use crate::service::test_support::*;
-use std::fs;
 
 #[tokio::test]
 async fn cloud_poll_skips_transaction_queued_read_superseded_by_control() {
-    let (state, fixture, server, path) = cloud_poll_fixture(&["vent"], &[]).await;
+    let (state, fixture, server, _directory) = cloud_poll_fixture(&["vent"], &[]).await;
     let cloud = state.quickconnect.as_ref().unwrap();
     let mut registry = state.registry.write().await;
     registry
@@ -34,7 +33,6 @@ async fn cloud_poll_skips_transaction_queued_read_superseded_by_control() {
     drop(transaction);
     polling.await.unwrap();
     server.abort();
-    fs::remove_file(path).unwrap();
     assert_eq!(blocked_reads, 0, "poll bypassed the device transaction");
     assert_eq!(
         fixture.reads.load(std::sync::atomic::Ordering::SeqCst),
@@ -61,7 +59,7 @@ async fn superseded_detail_result_is_ignored(failed: bool, polling: bool) {
     use gafctl_api::{DeviceSettings, QuickConnectModeStatus, StateProvenance};
     use std::sync::atomic::Ordering::SeqCst;
 
-    let (state, id, fixture, server, path) = refresh_fixture().await;
+    let (state, id, fixture, server, _directory) = refresh_fixture().await;
     fixture.fail.store(failed, SeqCst);
     let cloud = state.quickconnect.as_ref().unwrap();
     let (runtime, provider_id) = state
@@ -127,5 +125,4 @@ async fn superseded_detail_result_is_ignored(failed: bool, polling: bool) {
     );
     assert_eq!(snapshot.last_error, None);
     server.abort();
-    fs::remove_dir_all(path.parent().unwrap()).unwrap();
 }

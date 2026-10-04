@@ -1,8 +1,17 @@
-use std::{fmt, sync::Arc, time::Duration, time::SystemTime};
+use std::{
+    fmt,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::Duration,
+    time::SystemTime,
+};
 
+use backon::{ExponentialBuilder, Retryable};
 use base64::{Engine, engine::general_purpose::STANDARD};
 use bytes::BytesMut;
-use futures_util::{StreamExt, TryStreamExt, stream};
+use futures_util::TryStreamExt;
 use reqwest::{Client, StatusCode, Url, header::RETRY_AFTER, redirect::Policy};
 use serde::Serialize;
 use serde_json::Value;
@@ -240,35 +249,17 @@ impl QuickConnectClient {
     }
 
     async fn get_url_with_retry(&self, url: Url) -> Result<Value, ClientError> {
-        stream::iter(0..=MAX_READ_RETRIES)
-            .fold(ReadRetryState::default(), |state, attempt| {
-                let url = url.clone();
-                async move {
-                    if state.result.is_some() {
-                        return state;
-                    }
-                    match self.get_once(&url, !state.reauthenticated).await {
-                        Ok(value) => ReadRetryState {
-                            result: Some(Ok(value)),
-                            ..state
-                        },
-                        Err(failure) if failure.retryable && attempt < MAX_READ_RETRIES => {
-                            sleep(retry_delay(attempt, failure.retry_after)).await;
-                            ReadRetryState {
-                                reauthenticated: state.reauthenticated || failure.reauthenticated,
-                                ..state
-                            }
-                        }
-                        Err(failure) => ReadRetryState {
-                            result: Some(Err(failure.error)),
-                            ..state
-                        },
-                    }
-                }
+        let reauthenticated = AtomicBool::new(false);
+        (|| self.get_once(&url, !reauthenticated.load(Ordering::Relaxed)))
+            .retry(read_backoff())
+            .sleep(sleep)
+            .when(|failure| failure.retryable)
+            .notify(|failure, _| {
+                reauthenticated.fetch_or(failure.reauthenticated, Ordering::Relaxed);
             })
+            .adjust(retry_delay)
             .await
-            .result
-            .unwrap_or(Err(ClientError::Transport))
+            .map_err(|failure| failure.error)
     }
 
     async fn get_once(
@@ -353,22 +344,12 @@ impl QuickConnectClient {
     }
 
     async fn login_with_retry(&self) -> Result<String, RequestFailure> {
-        stream::iter(0..=MAX_READ_RETRIES)
-            .fold(None, |previous, attempt| async move {
-                if previous.is_some() {
-                    return previous;
-                }
-                match self.login_once().await {
-                    Ok(token) => Some(Ok(token)),
-                    Err(failure) if failure.retryable && attempt < MAX_READ_RETRIES => {
-                        sleep(retry_delay(attempt, failure.retry_after)).await;
-                        None
-                    }
-                    Err(failure) => Some(Err(failure)),
-                }
-            })
+        (|| self.login_once())
+            .retry(read_backoff())
+            .sleep(sleep)
+            .when(|failure| failure.retryable)
+            .adjust(retry_delay)
             .await
-            .unwrap_or_else(|| Err(RequestFailure::final_error(ClientError::Authentication)))
     }
 
     async fn login_once(&self) -> Result<String, RequestFailure> {
@@ -443,12 +424,6 @@ struct RequestFailure {
     error: ClientError,
     retryable: bool,
     retry_after: Option<Duration>,
-    reauthenticated: bool,
-}
-
-#[derive(Default)]
-struct ReadRetryState {
-    result: Option<Result<Value, ClientError>>,
     reauthenticated: bool,
 }
 
@@ -624,11 +599,18 @@ fn parse_retry_after(value: &str, now: SystemTime) -> Option<Duration> {
         })
 }
 
-fn retry_delay(attempt: u8, retry_after: Option<Duration>) -> Duration {
-    retry_after.map_or_else(
-        || Duration::from_millis(100 * 2_u64.pow(u32::from(attempt))),
-        |delay| delay.min(MAX_RETRY_AFTER),
-    )
+fn read_backoff() -> ExponentialBuilder {
+    ExponentialBuilder::default()
+        .with_min_delay(Duration::from_millis(100))
+        .with_max_times(usize::from(MAX_READ_RETRIES))
+}
+
+fn retry_delay(failure: &RequestFailure, backoff: Option<Duration>) -> Option<Duration> {
+    backoff.map(|delay| {
+        failure
+            .retry_after
+            .map_or(delay, |retry_after| retry_after.min(MAX_RETRY_AFTER))
+    })
 }
 
 fn is_unauthorized(status: StatusCode) -> bool {
@@ -647,11 +629,18 @@ mod tests {
 
     #[test]
     fn retry_after_is_bounded_and_invalid_values_use_backoff() {
+        let failure =
+            RequestFailure::retryable(ClientError::HttpStatus(503), Some(Duration::from_secs(100)));
         assert_eq!(
-            retry_delay(0, Some(Duration::from_secs(100))),
-            MAX_RETRY_AFTER
+            retry_delay(&failure, Some(Duration::from_millis(100))),
+            Some(MAX_RETRY_AFTER)
         );
-        assert_eq!(retry_delay(1, None), Duration::from_millis(200));
+        assert_eq!(retry_delay(&failure, None), None);
+        let failure = RequestFailure::retryable(ClientError::HttpStatus(503), None);
+        assert_eq!(
+            retry_delay(&failure, Some(Duration::from_millis(200))),
+            Some(Duration::from_millis(200))
+        );
         assert_eq!(retry_after(&reqwest::header::HeaderMap::new()), None);
     }
 

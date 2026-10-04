@@ -85,6 +85,54 @@ fn request_ids_round_trip_and_commands_keep_the_v2_wire_shape() {
 }
 
 #[test]
+fn control_status_formats_exact_wire_names_through_borrowed_strings() {
+    for (status, wire) in [
+        (ControlStatus::Confirmed, "confirmed"),
+        (ControlStatus::Unconfirmed, "unconfirmed"),
+        (ControlStatus::Rejected, "rejected"),
+        (ControlStatus::SubmittedUnconfirmed, "submitted_unconfirmed"),
+        (ControlStatus::ReadbackMismatch, "readback_mismatch"),
+        (ControlStatus::ReadbackUnavailable, "readback_unavailable"),
+        (ControlStatus::UnsupportedCommand, "unsupported_command"),
+        (ControlStatus::StaleRequest, "stale_request"),
+        (ControlStatus::RequestIdReused, "request_id_reused"),
+        (ControlStatus::UnknownDevice, "unknown_device"),
+        (ControlStatus::DeviceUnavailable, "device_unavailable"),
+        (ControlStatus::BackendUnavailable, "backend_unavailable"),
+        (ControlStatus::Busy, "busy"),
+        (ControlStatus::ControlFailed, "control_failed"),
+        (ControlStatus::InvalidRequestId, "invalid_request_id"),
+    ] {
+        let borrowed: &str = status.as_ref();
+        assert_eq!(borrowed, wire);
+        assert_eq!(status.as_str(), wire);
+        assert_eq!(status.to_string(), wire);
+        assert_eq!(ControlStatus::from(wire), status);
+        assert_eq!(serde_json::to_value(&status).unwrap(), wire);
+    }
+}
+
+#[test]
+fn unknown_control_status_keeps_owned_storage_and_borrows_it_for_display() {
+    for wire in ["CONFIRMED", "Confirmed", "future_backend_outcome"] {
+        let input = wire.to_owned();
+        let storage = input.as_ptr();
+        let status = ControlStatus::from(input);
+        let ControlStatus::Unknown(value) = &status else {
+            unreachable!("only exact wire names are recognized");
+        };
+        assert_eq!(value.as_ptr(), storage);
+        let borrowed: &str = status.as_ref();
+        assert_eq!(borrowed.as_ptr(), storage);
+        assert_eq!(borrowed, wire);
+        assert_eq!(status.as_str().as_ptr(), storage);
+        assert_eq!(status.to_string(), wire);
+        assert!(!status.is_confirmed());
+        assert_eq!(serde_json::to_value(&status).unwrap(), wire);
+    }
+}
+
+#[test]
 fn unknown_control_status_is_preserved_without_becoming_confirmed() {
     let status: ControlStatus = serde_json::from_value(json!("new_backend_outcome")).unwrap();
     assert!(!status.is_confirmed());

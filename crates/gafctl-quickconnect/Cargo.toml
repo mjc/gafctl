@@ -8,6 +8,7 @@ description = "QuickConnect cloud API client for GAF Master Flow attic fans"
 workspace = true
 
 [dependencies]
+backon.workspace = true
 base64.workspace = true
 bytes.workspace = true
 futures-util.workspace = true
