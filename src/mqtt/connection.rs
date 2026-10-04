@@ -15,6 +15,8 @@ use tokio::{
     sync::{Semaphore, watch},
     time::sleep,
 };
+#[cfg(test)]
+use tokio_stream::wrappers::UnboundedReceiverStream;
 use tokio_stream::wrappers::WatchStream;
 
 use super::{
@@ -133,7 +135,7 @@ async fn handle_mqtt_event(
 pub(super) fn observed_client(
     client_id: &str,
     port: u16,
-) -> (AsyncClient, mpsc::UnboundedReceiver<Publish>) {
+) -> (AsyncClient, UnboundedReceiverStream<Publish>) {
     let (client, eventloop) =
         AsyncClient::builder(super::test_support::test_mqtt_options(client_id, port))
             .capacity(16)
@@ -154,7 +156,7 @@ pub(super) fn observed_client(
                 future::ready(())
             }),
     );
-    (client, received)
+    (client, UnboundedReceiverStream::new(received))
 }
 
 #[cfg(test)]
