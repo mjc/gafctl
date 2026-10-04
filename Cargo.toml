@@ -21,7 +21,7 @@ http = [
     "dep:uuid",
     "dep:tempfile",
 ]
-mqtt = ["http", "dep:rumqttc_next", "dep:tokio-util"]
+mqtt = ["http", "dep:rumqttc_next", "dep:tokio-util", "dep:tokio-stream"]
 cli = [
     "dep:clap",
     "dep:clap_complete",
@@ -79,6 +79,7 @@ tempfile = "3.27.0"
 strum = { version = "0.28.0", default-features = false, features = ["derive"] }
 tokio = { version = "1.53.1", default-features = false }
 tokio-util = { version = "0.7.18", default-features = false, features = ["rt"] }
+tokio-stream = { version = "0.1.19", default-features = false, features = ["sync"] }
 tower = { version = "0.5", default-features = false }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter", "json"] }
@@ -99,6 +100,7 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 rumqttc_next = { workspace = true, optional = true }
 tokio-util = { workspace = true, optional = true }
+tokio-stream = { workspace = true, optional = true }
 thiserror = { workspace = true, optional = true }
 uuid = { workspace = true, optional = true }
 tempfile = { workspace = true, optional = true }

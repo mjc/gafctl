@@ -1,33 +1,18 @@
 use crate::service::{DeviceService, ServiceError, control::v2_request_is_fresh};
-use futures_util::{Stream, StreamExt, stream};
+use futures_util::StreamExt;
 use gafctl_api::DeviceId;
 use tokio::sync::mpsc;
+use tokio_stream::wrappers::ReceiverStream;
 
 pub(crate) async fn run_device_requests(
     state: DeviceService,
     controls: mpsc::Receiver<crate::mqtt::MqttDeviceWork>,
 ) {
-    device_requests(controls)
+    ReceiverStream::new(controls)
         .for_each_concurrent(Some(crate::mqtt::CONTROL_QUEUE_CAPACITY), |work| {
             reply_to_device_request(&state, work)
         })
         .await;
-}
-
-fn device_requests(
-    controls: mpsc::Receiver<crate::mqtt::MqttDeviceWork>,
-) -> impl Stream<Item = crate::mqtt::MqttDeviceWork> {
-    stream::unfold(controls, receive_device_request)
-}
-
-async fn receive_device_request(
-    mut controls: mpsc::Receiver<crate::mqtt::MqttDeviceWork>,
-) -> Option<(
-    crate::mqtt::MqttDeviceWork,
-    mpsc::Receiver<crate::mqtt::MqttDeviceWork>,
-)> {
-    let work = controls.recv().await?;
-    Some((work, controls))
 }
 
 async fn reply_to_device_request(state: &DeviceService, work: crate::mqtt::MqttDeviceWork) {

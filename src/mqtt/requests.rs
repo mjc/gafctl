@@ -1,4 +1,5 @@
 use std::{
+    future::Future,
     sync::{Arc, Mutex},
     time::Duration,
 };
@@ -8,6 +9,7 @@ use gafctl_api::{CommandId, DeviceControlV2Request, DeviceControlV2Response};
 use serde::{Deserialize, Serialize};
 use tokio::{
     sync::{OwnedSemaphorePermit, Semaphore, mpsc, oneshot},
+    task::JoinSet,
     time::timeout,
 };
 
@@ -127,7 +129,7 @@ pub(crate) struct MqttRequestIntake {
 
 struct IntakeState {
     sender: Option<mpsc::Sender<MqttDeviceWork>>,
-    replies: Vec<tokio::task::JoinHandle<()>>,
+    replies: JoinSet<()>,
 }
 
 impl MqttRequestIntake {
@@ -135,7 +137,7 @@ impl MqttRequestIntake {
         Self {
             state: Arc::new(Mutex::new(IntakeState {
                 sender: Some(sender),
-                replies: Vec::new(),
+                replies: JoinSet::new(),
             })),
         }
     }
@@ -149,36 +151,38 @@ impl MqttRequestIntake {
     }
 
     pub(crate) async fn drain_replies(&self, deadline: tokio::time::Instant) {
-        let replies = {
+        let mut replies = {
             let mut state = self.state.lock().expect("MQTT intake lock poisoned");
             std::mem::take(&mut state.replies)
         };
-        stream::iter(replies)
-            .for_each(|mut reply| async move {
-                if tokio::time::timeout_at(deadline, &mut reply).await.is_err() {
-                    reply.abort();
-                    let _ = reply.await;
-                    tracing::warn!("MQTT reply acknowledgement deadline exceeded");
-                }
-            })
-            .await;
+        if tokio::time::timeout_at(
+            deadline,
+            stream::poll_fn(|cx| replies.poll_join_next(cx)).for_each(|_| std::future::ready(())),
+        )
+        .await
+        .is_err()
+        {
+            replies.shutdown().await;
+            tracing::warn!("MQTT reply acknowledgement deadline exceeded");
+        }
     }
 
-    fn try_send_with_reply(
+    fn try_send_with_reply<F>(
         &self,
         work: MqttDeviceWork,
-        spawn_reply: impl FnOnce() -> tokio::task::JoinHandle<()>,
-    ) -> Result<(), mpsc::error::TrySendError<MqttDeviceWork>> {
+        reply: impl FnOnce() -> F,
+    ) -> Result<(), mpsc::error::TrySendError<MqttDeviceWork>>
+    where
+        F: Future<Output = ()> + Send + 'static,
+    {
         let mut state = self.state.lock().expect("MQTT intake lock poisoned");
         let Some(sender) = state.sender.as_ref() else {
             return Err(mpsc::error::TrySendError::Closed(work));
         };
         sender.try_send(work)?;
-        // Keep admission locked until the accepted request's publisher is owned.
-        // close() therefore fences both work admission and reply registration.
-        let reply = spawn_reply();
-        state.replies.retain(|task| !task.is_finished());
-        state.replies.push(reply);
+        // Admission and reply ownership share the close() fence.
+        std::iter::from_fn(|| state.replies.try_join_next()).for_each(drop);
+        state.replies.spawn(reply());
         Ok(())
     }
 
@@ -298,16 +302,7 @@ fn enqueue_control(
             request,
             reply,
         },
-        || {
-            tokio::spawn(publish_control_reply(
-                client.clone(),
-                topics,
-                device,
-                response,
-                uncertain,
-                permit,
-            ))
-        },
+        || publish_control_reply(client.clone(), topics, device, response, uncertain, permit),
     ) {
         Ok(()) => {}
         Err(mpsc::error::TrySendError::Full(work)) => {
@@ -542,15 +537,14 @@ mod tests {
         let (release, released) = std::sync::mpsc::channel();
         let (published, publication) = oneshot::channel();
         let admitting = intake.clone();
-        let runtime = tokio::runtime::Handle::current();
         let admission = tokio::task::spawn_blocking(move || {
             admitting
                 .try_send_with_reply(work, || {
                     entered.send(()).unwrap();
                     released.recv().unwrap();
-                    runtime.spawn(async {
+                    async {
                         publication.await.unwrap();
-                    })
+                    }
                 })
                 .unwrap();
         });
@@ -574,6 +568,30 @@ mod tests {
         );
         published.send(()).unwrap();
         drain.await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn dropping_intake_cancels_pending_device_replies() {
+        let (client, _event_loop) =
+            AsyncClient::builder(MqttOptions::new("test", ("localhost", 1883)))
+                .capacity(1)
+                .build();
+        let (sender, mut queued) = mpsc::channel(1);
+        let intake = MqttRequestIntake::new(sender);
+        dispatch_request(
+            &client,
+            Topics(ProxyId::default()),
+            &intake,
+            &Arc::new(Semaphore::new(1)),
+            DeviceId::configured_ble(),
+            RequestKind::Control,
+            Publish::new("unused", QoS::AtLeastOnce, request("cancelled"), None),
+        );
+        let mut work = queued.recv().await.expect("control was admitted");
+        drop(intake);
+        timeout(Duration::from_secs(1), work.reply.closed())
+            .await
+            .expect("dropping intake must cancel its pending reply task");
     }
 
     #[tokio::test]

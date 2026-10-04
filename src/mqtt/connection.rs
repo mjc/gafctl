@@ -1,6 +1,8 @@
 use std::{sync::Arc, time::Duration};
 
-use futures_util::{Stream, StreamExt, future, stream};
+#[cfg(test)]
+use futures_util::stream;
+use futures_util::{StreamExt, future};
 #[cfg(test)]
 use rumqttc_next::Publish;
 use rumqttc_next::{
@@ -13,6 +15,7 @@ use tokio::{
     sync::{Semaphore, watch},
     time::sleep,
 };
+use tokio_stream::wrappers::WatchStream;
 
 use super::{
     MqttConfig,
@@ -39,18 +42,10 @@ pub(super) async fn setup_connection(
     topics: Topics,
     connected: watch::Receiver<bool>,
 ) {
-    connection_changes(connected)
+    WatchStream::from_changes(connected)
         .filter(|active| future::ready(*active))
         .for_each(|_| initialize_connection(&client, topics))
         .await;
-}
-
-fn connection_changes(connected: watch::Receiver<bool>) -> impl Stream<Item = bool> {
-    stream::unfold(connected, |mut connected| async {
-        connected.changed().await.ok()?;
-        let active = *connected.borrow_and_update();
-        Some((active, connected))
-    })
 }
 
 async fn initialize_connection(client: &AsyncClient, topics: Topics) {

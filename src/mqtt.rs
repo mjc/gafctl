@@ -9,9 +9,11 @@ mod topics;
 
 use std::sync::Arc;
 
-use futures_util::{StreamExt, stream};
 use rumqttc_next::{AsyncClient, DisconnectProperties, DisconnectReasonCode};
-use tokio::sync::{mpsc, watch};
+use tokio::{
+    sync::{mpsc, watch},
+    task::JoinSet,
+};
 use tokio_util::task::AbortOnDropHandle;
 
 use crate::service::publication::StateSnapshot;
@@ -25,17 +27,13 @@ use topics::Topics;
 pub(crate) struct MqttTasks {
     client: AsyncClient,
     event_loop: AbortOnDropHandle<()>,
-    publishers: [AbortOnDropHandle<()>; 2],
+    publishers: JoinSet<()>,
 }
 
 impl MqttTasks {
     pub(crate) async fn stop(self, deadline: tokio::time::Instant) {
-        self.publishers.iter().for_each(AbortOnDropHandle::abort);
-        stream::iter(self.publishers)
-            .for_each(|task| async move {
-                let _ = tokio::time::timeout_at(deadline, task).await;
-            })
-            .await;
+        let mut publishers = self.publishers;
+        let _ = tokio::time::timeout_at(deadline, publishers.shutdown()).await;
         let mut event_loop = self.event_loop;
         let disconnect = async {
             self.client
@@ -91,7 +89,8 @@ pub(crate) fn start(config: MqttConfig, initial_state: StateSnapshot) -> MqttBri
     let (client, eventloop) = AsyncClient::builder(connection::mqtt_options(config, topics))
         .capacity(32)
         .build();
-    let setup = tokio::spawn(connection::setup_connection(
+    let mut publishers = JoinSet::new();
+    publishers.spawn(connection::setup_connection(
         client.clone(),
         topics,
         connected_rx.clone(),
@@ -103,7 +102,7 @@ pub(crate) fn start(config: MqttConfig, initial_state: StateSnapshot) -> MqttBri
         connected_tx,
         intake.clone(),
     ));
-    let states = tokio::spawn(state::publish_state_updates(
+    publishers.spawn(state::publish_state_updates(
         client.clone(),
         topics,
         state_rx,
@@ -114,7 +113,7 @@ pub(crate) fn start(config: MqttConfig, initial_state: StateSnapshot) -> MqttBri
         tasks: MqttTasks {
             client,
             event_loop: AbortOnDropHandle::new(event_loop),
-            publishers: [setup, states].map(AbortOnDropHandle::new),
+            publishers,
         },
         state_updates: state_tx,
         device_requests: control_rx,
@@ -165,7 +164,7 @@ mod tests {
         let tasks = MqttTasks {
             client,
             event_loop: AbortOnDropHandle::new(event_loop),
-            publishers: std::array::from_fn(|_| AbortOnDropHandle::new(tokio::spawn(async {}))),
+            publishers: (0..2).map(|_| async {}).collect(),
         };
         tasks
             .stop(tokio::time::Instant::now() + Duration::from_secs(1))
@@ -183,9 +182,7 @@ mod tests {
         let tasks = MqttTasks {
             client: client.clone(),
             event_loop: AbortOnDropHandle::new(event_loop),
-            publishers: std::array::from_fn(|_| {
-                AbortOnDropHandle::new(tokio::spawn(std::future::pending()))
-            }),
+            publishers: (0..2).map(|_| std::future::pending()).collect(),
         };
         let started = tokio::time::Instant::now();
         tasks.stop(started + Duration::from_secs(3)).await;
