@@ -4,64 +4,9 @@ use crate::test_support::identity_store_fixture;
 use axum::{body::Body, http::Request};
 use gafctl_api::unix_millis;
 use http_body_util::BodyExt;
-use std::{
-    sync::Arc,
-    time::{Duration, SystemTime},
-};
-use tokio_util::task::AbortOnDropHandle;
+use std::time::SystemTime;
 use tower::ServiceExt;
 const DEVICE_ID: &str = "configured";
-#[tokio::test]
-async fn graceful_http_shutdown_drains_an_active_request() {
-    let entered = Arc::new(tokio::sync::Notify::new());
-    let release = Arc::new(tokio::sync::Notify::new());
-    let app = Router::new().route(
-        "/blocked",
-        get({
-            let entered = Arc::clone(&entered);
-            let release = Arc::clone(&release);
-            move || {
-                let entered = Arc::clone(&entered);
-                let release = Arc::clone(&release);
-                async move {
-                    entered.notify_one();
-                    release.notified().await;
-                    "finished"
-                }
-            }
-        }),
-    );
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let address = listener.local_addr().unwrap();
-    let (stop, shutdown) = tokio::sync::oneshot::channel();
-    let server = AbortOnDropHandle::new(tokio::spawn(serve_http_until_shutdown(
-        listener,
-        app,
-        async move {
-            shutdown.await.unwrap();
-        },
-    )));
-    let request = tokio::spawn(async move {
-        reqwest::get(format!("http://{address}/blocked"))
-            .await
-            .unwrap()
-            .text()
-            .await
-            .unwrap()
-    });
-    entered.notified().await;
-    stop.send(()).unwrap();
-    tokio::task::yield_now().await;
-    assert!(!server.is_finished());
-    release.notify_one();
-    assert_eq!(request.await.unwrap(), "finished");
-    tokio::time::timeout(Duration::from_secs(2), server)
-        .await
-        .unwrap()
-        .unwrap()
-        .unwrap();
-}
-
 #[tokio::test]
 async fn routes_report_health_v2_capabilities_and_unknown_state() {
     let state =

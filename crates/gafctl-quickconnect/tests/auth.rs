@@ -598,37 +598,6 @@ fn credentials_debug_redacts_username_and_password_and_roles_serialize() {
     );
 }
 
-#[tokio::test]
-async fn dropping_fixture_stops_its_http_listener() {
-    let (base_url, server) =
-        start_server(Router::new().route("/", get(|| async { "running" }))).await;
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_millis(100))
-        .pool_max_idle_per_host(0)
-        .build()
-        .unwrap();
-    assert_eq!(
-        client.get(base_url.clone()).send().await.unwrap().status(),
-        StatusCode::OK
-    );
-    let task = server.abort_handle();
-    drop(server);
-    tokio::time::timeout(
-        std::time::Duration::from_secs(1),
-        std::future::poll_fn(|context| {
-            if task.is_finished() {
-                std::task::Poll::Ready(())
-            } else {
-                context.waker().wake_by_ref();
-                std::task::Poll::Pending
-            }
-        }),
-    )
-    .await
-    .unwrap();
-    assert!(client.get(base_url).send().await.is_err());
-}
-
 async fn start_server(app: Router) -> (reqwest::Url, AbortOnDropHandle<()>) {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();

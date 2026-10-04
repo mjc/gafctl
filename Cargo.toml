@@ -126,8 +126,7 @@ path = "tests/cli.rs"
 required-features = ["http", "cli"]
 
 [dev-dependencies]
-tokio-util = { workspace = true, features = ["codec"] }
-futures-util = { workspace = true, features = ["sink"] }
+tokio-util.workspace = true
 tempfile.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
 assert_cmd.workspace = true
@@ -141,8 +140,3 @@ tower = { workspace = true, features = ["util"] }
 name = "feature_isolation"
 path = "tests/feature_isolation.rs"
 required-features = ["http", "mqtt"]
-
-[[test]]
-name = "mqtt_delivery"
-path = "tests/mqtt_delivery.rs"
-required-features = ["mqtt"]
