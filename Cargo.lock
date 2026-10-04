@@ -1623,6 +1623,7 @@ dependencies = [
  "bytes",
  "fixedbitset",
  "flume",
+ "futures-core",
  "futures-util",
  "log",
  "mqttbytes-core-next",

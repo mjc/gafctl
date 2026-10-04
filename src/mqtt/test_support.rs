@@ -9,7 +9,7 @@ use gafctl_api::{
     DeviceInventoryStatus, DeviceSettings, DeviceState, DeviceStateV2Response,
     QuickConnectModeStatus, StateProvenance, unix_millis,
 };
-use rumqttc::{MqttOptions, MqttOptionsBuilder, mqttbytes::v5::Publish};
+use rumqttc_next::{MqttOptions, MqttOptionsBuilder, Publish};
 use serde_json::json;
 use tokio::{
     net::{TcpListener, TcpStream},
@@ -18,7 +18,7 @@ use tokio::{
 };
 
 use super::MqttConfig;
-pub(super) use super::connection::{observed_client, test_connection};
+pub(super) use super::connection::observed_client;
 use gafctl_api::{
     DeviceBackend, DeviceCapabilities, DeviceDescriptor, DeviceId, EntitySource, ProxyId,
 };

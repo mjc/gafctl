@@ -5,15 +5,15 @@ use std::{
 
 use futures_util::{StreamExt, stream};
 use gafctl_api::{CommandId, DeviceControlV2Request, DeviceControlV2Response};
-use rumqttc::mqttbytes::v5::Publish;
 use serde::{Deserialize, Serialize};
 use tokio::{
     sync::{OwnedSemaphorePermit, Semaphore, mpsc, oneshot},
     time::timeout,
 };
 
-use super::connection::MqttConnection;
+use super::topics::Topics;
 use gafctl_api::DeviceId;
+use rumqttc_next::{AsyncClient, Publish, PublishOptions};
 
 pub(crate) const CONTROL_QUEUE_CAPACITY: usize = 8;
 pub(super) const MAX_PENDING_CONTROL_RESULTS: usize = 32;
@@ -195,8 +195,65 @@ impl MqttRequestIntake {
     }
 }
 
+async fn publish_result(
+    client: &AsyncClient,
+    topics: Topics,
+    device: &DeviceId,
+    response: &MqttReply,
+) {
+    let payload = match serde_json::to_vec(response) {
+        Ok(payload) => payload,
+        Err(error) => {
+            tracing::error!(%error, "could not serialize MQTT control result");
+            return;
+        }
+    };
+    match client
+        .publish_tracked(
+            topics.device(device, response.kind().result_suffix()),
+            payload,
+            PublishOptions::at_least_once(),
+        )
+        .await
+    {
+        Ok(notice) => {
+            if let Err(error) = notice.wait_completion_async().await {
+                tracing::warn!(%error, "could not acknowledge MQTT control result");
+            }
+        }
+        Err(error) => tracing::warn!(%error, "could not enqueue MQTT control result"),
+    }
+}
+
+fn reject(
+    client: &AsyncClient,
+    topics: Topics,
+    device: &DeviceId,
+    request: &MqttRequest,
+    status: &'static str,
+) {
+    let response = MqttReply::Rejected {
+        request_id: request.request_id().clone(),
+        status,
+        kind: request.kind(),
+    };
+    match serde_json::to_vec(&response) {
+        Ok(payload) => {
+            if let Err(error) = client.try_publish(
+                topics.device(device, response.kind().result_suffix()),
+                payload,
+                PublishOptions::at_least_once(),
+            ) {
+                tracing::warn!(%error, "could not enqueue MQTT control rejection");
+            }
+        }
+        Err(error) => tracing::error!(%error, "could not serialize MQTT control rejection"),
+    }
+}
+
 pub(super) fn dispatch_request(
-    connection: &MqttConnection,
+    client: &AsyncClient,
+    topics: Topics,
     controls: &MqttRequestIntake,
     pending_results: &Arc<Semaphore>,
     device: DeviceId,
@@ -207,22 +264,23 @@ pub(super) fn dispatch_request(
         return;
     };
     if message.retain {
-        connection.reject(&device, &request, "retained_request");
+        reject(client, topics, &device, &request, "retained_request");
         return;
     }
     if !crate::service::control::v2_request_is_fresh(request.issued_at_unix_ms()) {
-        connection.reject(&device, &request, "stale_request");
+        reject(client, topics, &device, &request, "stale_request");
         return;
     }
     let Ok(permit) = Arc::clone(pending_results).try_acquire_owned() else {
-        connection.reject(&device, &request, "control_results_busy");
+        reject(client, topics, &device, &request, "control_results_busy");
         return;
     };
-    enqueue_control(connection, controls, device, request, permit);
+    enqueue_control(client, topics, controls, device, request, permit);
 }
 
 fn enqueue_control(
-    connection: &MqttConnection,
+    client: &AsyncClient,
+    topics: Topics,
     controls: &MqttRequestIntake,
     device: DeviceId,
     request: MqttRequest,
@@ -242,7 +300,8 @@ fn enqueue_control(
         },
         || {
             tokio::spawn(publish_control_reply(
-                connection.clone(),
+                client.clone(),
+                topics,
                 device,
                 response,
                 uncertain,
@@ -252,16 +311,21 @@ fn enqueue_control(
     ) {
         Ok(()) => {}
         Err(mpsc::error::TrySendError::Full(work)) => {
-            connection.reject(&work.device_id, &work.request, "queue_full")
+            reject(client, topics, &work.device_id, &work.request, "queue_full")
         }
-        Err(mpsc::error::TrySendError::Closed(work)) => {
-            connection.reject(&work.device_id, &work.request, "control_worker_unavailable")
-        }
+        Err(mpsc::error::TrySendError::Closed(work)) => reject(
+            client,
+            topics,
+            &work.device_id,
+            &work.request,
+            "control_worker_unavailable",
+        ),
     }
 }
 
 async fn publish_control_reply(
-    connection: MqttConnection,
+    client: AsyncClient,
+    topics: Topics,
     device: DeviceId,
     response: oneshot::Receiver<MqttReply>,
     uncertain: MqttReply,
@@ -270,7 +334,7 @@ async fn publish_control_reply(
     let result = wait_for_device_reply(response, uncertain).await;
     if timeout(
         Duration::from_secs(30),
-        connection.publish_result(&device, &result),
+        publish_result(&client, topics, &device, &result),
     )
     .await
     .is_err()
@@ -295,14 +359,14 @@ mod tests {
         start,
         test_support::{
             config, mqtt_device, observed_client, receive_topic, request, snapshot,
-            start_native_broker, test_connection,
+            start_native_broker,
         },
         topics::Topics,
     };
     use super::*;
     use gafctl_api::ProxyId;
     use gafctl_api::unix_millis;
-    use rumqttc::{AsyncClient, MqttOptions, PublishOptions, mqttbytes::QoS};
+    use rumqttc_next::{MqttOptions, QoS};
     use serde_json::{Value, json};
     use std::time::SystemTime;
 
@@ -518,14 +582,14 @@ mod tests {
             AsyncClient::builder(MqttOptions::new("test", ("localhost", 1883)))
                 .capacity(1)
                 .build();
-        let (connection, publisher) = test_connection(client, Topics(ProxyId::default()));
-        let _publisher = tokio_util::task::AbortOnDropHandle::new(publisher);
+        let topics = Topics(ProxyId::default());
         let (controls, mut queued) = mpsc::channel(CONTROL_QUEUE_CAPACITY);
         let controls = MqttRequestIntake::new(controls);
         let pending = Arc::new(Semaphore::new(2));
         for index in 0..2 {
             dispatch_request(
-                &connection,
+                &client,
+                topics,
                 &controls,
                 &pending,
                 DeviceId::configured_ble(),
@@ -548,7 +612,8 @@ mod tests {
             tokio::task::yield_now().await;
         }
         dispatch_request(
-            &connection,
+            &client,
+            topics,
             &controls,
             &pending,
             DeviceId::configured_ble(),

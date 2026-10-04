@@ -11,7 +11,7 @@ use std::{
 
 use bytes::BytesMut;
 use futures_util::{StreamExt, future, stream};
-use rumqttc::{
+use rumqttc_next::{
     AsyncClient, Broker, ConnAck, ConnectReturnCode, EventLoop, MqttOptions, Packet, PubAck,
     PubAckReason, Publish, PublishNotice, PublishNoticeError, PublishOptions, SessionMode,
     mqttbytes::Error,
@@ -95,13 +95,14 @@ async fn acknowledge(socket: &mut TcpStream, publish: &Publish, reason: PubAckRe
 
 fn poll_client(eventloop: EventLoop) -> AbortOnDropHandle<()> {
     AbortOnDropHandle::new(tokio::spawn(
-        stream::unfold(eventloop, |mut eventloop| async {
-            if eventloop.poll().await.is_err() {
-                sleep(Duration::from_millis(10)).await;
-            }
-            Some(((), eventloop))
-        })
-        .for_each(|()| future::ready(())),
+        eventloop
+            .into_stream()
+            .then(|event| async move {
+                if event.is_err() {
+                    sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .for_each(|()| future::ready(())),
     ))
 }
 
@@ -358,7 +359,7 @@ async fn failed_first_publish_write_preserves_the_receipt_for_session_resume() {
         move |host, network_options| {
             let failed_pkid = Arc::clone(&failed_pkid);
             async move {
-                let socket = rumqttc::default_socket_connect(host, network_options).await?;
+                let socket = rumqttc_next::default_socket_connect(host, network_options).await?;
                 Ok(FailFirstPublish {
                     socket,
                     failed_pkid,

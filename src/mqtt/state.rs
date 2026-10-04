@@ -3,9 +3,10 @@ use std::{collections::HashSet, sync::Arc};
 use crate::service::publication::StateSnapshot;
 use futures_util::{Stream, StreamExt, future, stream};
 use gafctl_api::DeviceStateV2Response;
+use rumqttc_next::{AsyncClient, PublishOptions};
 use tokio::sync::watch;
 
-use super::{connection::MqttConnection, discovery, topics::Topics};
+use super::{discovery, topics::Topics};
 use gafctl_api::{DeviceBackend, DeviceId};
 
 struct StateSubscriptions {
@@ -38,25 +39,40 @@ async fn receive_state_update(
 }
 
 pub(super) async fn publish_state_updates(
-    connection: MqttConnection,
+    client: AsyncClient,
+    topics: Topics,
     state: watch::Receiver<Arc<StateSnapshot>>,
     connected: watch::Receiver<bool>,
     discovery_enabled: bool,
 ) {
     state_payloads(state, connected)
         .fold(HashSet::new(), |previous_topics, snapshot| {
-            let connection = &connection;
+            let client = &client;
             async move {
-                let active =
-                    publish_discovery(connection, &snapshot, discovery_enabled, previous_topics)
-                        .await;
+                let active = publish_discovery(
+                    client,
+                    topics,
+                    &snapshot,
+                    discovery_enabled,
+                    previous_topics,
+                )
+                .await;
                 stream::iter(snapshot.publications.iter())
-                    .for_each(|publication| publish_device_state(connection, publication))
+                    .for_each(|publication| publish_device_state(client, topics, publication))
                     .await;
                 active
             }
         })
         .await;
+}
+
+async fn publish_retained(client: &AsyncClient, topic: String, payload: Vec<u8>) {
+    if let Err(error) = client
+        .publish(topic, payload, PublishOptions::at_least_once().retained())
+        .await
+    {
+        tracing::warn!(%error, "could not publish retained MQTT message");
+    }
 }
 
 fn state_messages(
@@ -79,11 +95,15 @@ fn state_messages(
     ])
 }
 
-async fn publish_device_state(connection: &MqttConnection, publication: &DeviceStateV2Response) {
-    match state_messages(connection.topics(), publication) {
+async fn publish_device_state(
+    client: &AsyncClient,
+    topics: Topics,
+    publication: &DeviceStateV2Response,
+) {
+    match state_messages(topics, publication) {
         Ok(messages) => {
             stream::iter(messages)
-                .for_each(|(topic, payload)| connection.publish_retained(topic, payload))
+                .for_each(|(topic, payload)| publish_retained(client, topic, payload))
                 .await
         }
         Err(error) => tracing::error!(%error, "could not serialize device state for MQTT"),
@@ -105,7 +125,8 @@ fn inactive_discovery_topics(
 }
 
 async fn publish_discovery(
-    connection: &MqttConnection,
+    client: &AsyncClient,
+    topics: Topics,
     snapshot: &StateSnapshot,
     enabled: bool,
     previous: HashSet<String>,
@@ -118,26 +139,22 @@ async fn publish_discovery(
         .map(|(topic, _)| topic.clone())
         .collect::<HashSet<_>>();
     stream::iter(inactive_discovery_topics(
-        connection.topics(),
+        topics,
         &snapshot.discovery_identities,
         previous,
         &active,
     ))
-    .for_each(|topic| connection.publish_retained(topic, Vec::new()))
+    .for_each(|topic| publish_retained(client, topic, Vec::new()))
     .await;
     stream::iter(configs)
-        .for_each(|(topic, config)| publish_discovery_config(connection, topic, config))
+        .for_each(|(topic, config)| publish_discovery_config(client, topic, config))
         .await;
     active
 }
 
-async fn publish_discovery_config(
-    connection: &MqttConnection,
-    topic: String,
-    config: serde_json::Value,
-) {
+async fn publish_discovery_config(client: &AsyncClient, topic: String, config: serde_json::Value) {
     match serde_json::to_vec(&config) {
-        Ok(payload) => connection.publish_retained(topic, payload).await,
+        Ok(payload) => publish_retained(client, topic, payload).await,
         Err(error) => tracing::error!(%error, "could not serialize MQTT discovery config"),
     }
 }
@@ -148,12 +165,12 @@ mod tests {
         start,
         test_support::{
             config, mqtt_device, observed_client, receive_topic, request, snapshot,
-            start_native_broker, test_connection,
+            start_native_broker,
         },
     };
     use super::*;
     use gafctl_api::{DeviceDescriptor, EntitySource, ProxyId};
-    use rumqttc::{PublishOptions, mqttbytes::QoS};
+    use rumqttc_next::QoS;
     use serde_json::Value;
     use std::time::Duration;
     use tokio::time::{sleep, timeout};
@@ -270,10 +287,9 @@ mod tests {
         changed.command_source = EntitySource::Http;
         // This fresh publisher has no in-memory discovery history.
         let (client, _) = observed_client("restarted-publisher", broker.port);
-        let (connection, _publisher) = test_connection(client, topics);
         let mut inactive = snapshot(changed);
         inactive.descriptors.clear();
-        publish_discovery(&connection, &inactive, true, HashSet::new()).await;
+        publish_discovery(&client, topics, &inactive, true, HashSet::new()).await;
         let tombstone = receive_topic(&mut received, &discovery_topic).await;
         assert!(tombstone.payload.is_empty());
         drop(bridge);
