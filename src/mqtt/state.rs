@@ -153,7 +153,7 @@ mod tests {
     };
     use super::*;
     use gafctl_api::{DeviceDescriptor, EntitySource, ProxyId};
-    use rumqttc::v5::mqttbytes::QoS;
+    use rumqttc::{PublishOptions, mqttbytes::QoS};
     use serde_json::Value;
     use std::time::Duration;
     use tokio::time::{sleep, timeout};
@@ -302,9 +302,8 @@ mod tests {
         observer
             .publish(
                 topics.device(&first.id, "control/set"),
-                QoS::AtLeastOnce,
-                false,
                 request("first-only"),
+                PublishOptions::at_least_once(),
             )
             .await
             .unwrap();

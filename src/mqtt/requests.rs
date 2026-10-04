@@ -5,7 +5,7 @@ use std::{
 
 use futures_util::{StreamExt, stream};
 use gafctl_api::{CommandId, DeviceControlV2Request, DeviceControlV2Response};
-use rumqttc::v5::mqttbytes::v5::Publish;
+use rumqttc::mqttbytes::v5::Publish;
 use serde::{Deserialize, Serialize};
 use tokio::{
     sync::{OwnedSemaphorePermit, Semaphore, mpsc, oneshot},
@@ -302,7 +302,7 @@ mod tests {
     use super::*;
     use gafctl_api::ProxyId;
     use gafctl_api::unix_millis;
-    use rumqttc::v5::{AsyncClient, MqttOptions, mqttbytes::QoS};
+    use rumqttc::{AsyncClient, MqttOptions, PublishOptions, mqttbytes::QoS};
     use serde_json::{Value, json};
     use std::time::SystemTime;
 
@@ -514,8 +514,12 @@ mod tests {
 
     #[tokio::test]
     async fn stalled_results_bound_accepted_controls() {
-        let (client, eventloop) = AsyncClient::new(MqttOptions::new("test", "localhost", 1883), 1);
-        let (connection, _publisher) = test_connection(client, Topics(ProxyId::default()));
+        let (client, eventloop) =
+            AsyncClient::builder(MqttOptions::new("test", ("localhost", 1883)))
+                .capacity(1)
+                .build();
+        let (connection, publisher) = test_connection(client, Topics(ProxyId::default()));
+        let _publisher = tokio_util::task::AbortOnDropHandle::new(publisher);
         let (controls, mut queued) = mpsc::channel(CONTROL_QUEUE_CAPACITY);
         let controls = MqttRequestIntake::new(controls);
         let pending = Arc::new(Semaphore::new(2));
@@ -577,9 +581,8 @@ mod tests {
         observer
             .publish(
                 topics.device(&device.id, "control/set"),
-                QoS::AtLeastOnce,
-                true,
                 request("retained"),
+                PublishOptions::at_least_once().retained(),
             )
             .await
             .unwrap();
@@ -593,9 +596,8 @@ mod tests {
         observer
             .publish(
                 topics.device(&device.id, "control/set"),
-                QoS::AtLeastOnce,
-                false,
                 serde_json::to_vec(&stale).unwrap(),
+                PublishOptions::at_least_once(),
             )
             .await
             .unwrap();
@@ -608,9 +610,8 @@ mod tests {
         observer
             .publish(
                 topics.device(&device.id, "control/set"),
-                QoS::AtLeastOnce,
-                false,
                 request("confirmed"),
+                PublishOptions::at_least_once(),
             )
             .await
             .unwrap();
@@ -656,9 +657,8 @@ mod tests {
         observer
             .publish(
                 topics.device(&device.id, "control/set"),
-                QoS::AtLeastOnce,
-                false,
                 request("shutdown-reply"),
+                PublishOptions::at_least_once(),
             )
             .await
             .unwrap();
@@ -723,12 +723,11 @@ mod tests {
             observer
                 .publish(
                     topics.device(&device.id, "refresh/set"),
-                    QoS::AtLeastOnce,
-                    retain,
                     serde_json::to_vec(
                         &json!({"request_id":request_id,"issued_at_unix_ms":issued_at_unix_ms}),
                     )
                     .unwrap(),
+                    PublishOptions::at_least_once().retain(retain),
                 )
                 .await
                 .unwrap();
@@ -738,8 +737,18 @@ mod tests {
             assert_eq!(result["status"], expected);
             assert!(bridge.device_requests.try_recv().is_err());
         }
-        observer.publish(topics.device(&device.id, "refresh/set"), QoS::AtLeastOnce, false,
-            serde_json::to_vec(&json!({"request_id":"read-confirmed","issued_at_unix_ms":unix_millis(SystemTime::now()).unwrap()})).unwrap()).await.unwrap();
+        observer
+            .publish(
+                topics.device(&device.id, "refresh/set"),
+                serde_json::to_vec(&json!({
+                    "request_id":"read-confirmed",
+                    "issued_at_unix_ms":unix_millis(SystemTime::now()).unwrap()
+                }))
+                .unwrap(),
+                PublishOptions::at_least_once(),
+            )
+            .await
+            .unwrap();
         let work = timeout(Duration::from_secs(5), bridge.device_requests.recv())
             .await
             .unwrap()

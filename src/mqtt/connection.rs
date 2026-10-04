@@ -1,20 +1,14 @@
-use std::{
-    collections::{HashMap, VecDeque},
-    sync::Arc,
-    time::Duration,
-};
+use std::{sync::Arc, time::Duration};
 
 use futures_util::{Stream, StreamExt, future, stream};
 #[cfg(test)]
-use rumqttc::v5::mqttbytes::v5::Publish;
+use rumqttc::mqttbytes::v5::Publish;
 use rumqttc::{
-    Outgoing,
-    v5::{
-        AsyncClient, ConnectionError, Event, EventLoop, MqttOptions,
-        mqttbytes::{
-            QoS,
-            v5::{Filter, LastWill, Packet},
-        },
+    AsyncClient, ConnectionError, Event, EventLoop, MqttOptions, MqttOptionsBuilder, PublishNotice,
+    PublishNoticeError, PublishOptions,
+    mqttbytes::{
+        QoS,
+        v5::{LastWill, Packet, SubscribeFilter as Filter},
     },
 };
 use tokio::{
@@ -40,18 +34,8 @@ struct PublishRequest {
 enum Delivery {
     Retained,
     Untracked,
-    Acknowledged(oneshot::Sender<()>),
+    Acknowledged(oneshot::Sender<PublishNotice>),
 }
-
-#[derive(Default)]
-struct PublishReceipts {
-    queued: VecDeque<Option<oneshot::Sender<()>>>,
-    sent: HashMap<u16, Option<oneshot::Sender<()>>>,
-    colliding: HashMap<u16, Option<oneshot::Sender<()>>>,
-    pending_unsent: usize,
-}
-
-type ReceiptTracker = Arc<std::sync::Mutex<PublishReceipts>>;
 
 #[derive(Clone)]
 pub(super) struct MqttConnection {
@@ -65,13 +49,9 @@ impl MqttConnection {
         self.topics
     }
 
-    fn new(
-        client: AsyncClient,
-        topics: Topics,
-        receipts: ReceiptTracker,
-    ) -> (Self, tokio::task::JoinHandle<()>) {
+    fn new(client: AsyncClient, topics: Topics) -> (Self, tokio::task::JoinHandle<()>) {
         let (publications, receiver) = mpsc::channel(32);
-        let publisher = tokio::spawn(publish_requests(client.clone(), receiver, receipts));
+        let publisher = tokio::spawn(publish_requests(client.clone(), receiver));
         (
             Self {
                 client,
@@ -110,9 +90,12 @@ impl MqttConnection {
                     })
                     .await
                     .is_err()
-                    || acknowledged.await.is_err()
                 {
-                    tracing::warn!("could not acknowledge MQTT control result");
+                    tracing::warn!("could not enqueue MQTT control result");
+                    return;
+                }
+                if let Err(error) = publication_completed(acknowledged).await {
+                    tracing::warn!(%error, "could not acknowledge MQTT control result");
                 }
             }
             Err(error) => tracing::error!(%error, "could not serialize MQTT control result"),
@@ -140,13 +123,14 @@ impl MqttConnection {
     }
 }
 
-async fn publish_requests(
-    client: AsyncClient,
-    receiver: mpsc::Receiver<PublishRequest>,
-    receipts: ReceiptTracker,
-) {
+async fn publication_completed(
+    receipt: oneshot::Receiver<PublishNotice>,
+) -> Result<(), PublishNoticeError> {
+    receipt.await?.wait_completion_async().await
+}
+
+async fn publish_requests(client: AsyncClient, receiver: mpsc::Receiver<PublishRequest>) {
     let client = &client;
-    let receipts = &receipts;
     stream::unfold(receiver, |mut receiver| async {
         receiver.recv().await.map(|request| (request, receiver))
     })
@@ -156,78 +140,39 @@ async fn publish_requests(
             Delivery::Untracked => (false, None),
             Delivery::Acknowledged(receipt) => (false, Some(receipt)),
         };
-        receipts
-            .lock()
-            .expect("MQTT receipts lock poisoned")
-            .queued
-            .push_back(receipt);
-        if let Err(error) = client
-            .publish(request.topic, QoS::AtLeastOnce, retain, request.payload)
-            .await
-        {
-            receipts
-                .lock()
-                .expect("MQTT receipts lock poisoned")
-                .queued
-                .pop_back();
+        let options = PublishOptions::at_least_once().retain(retain);
+        let publication = match receipt {
+            Some(receipt) => client
+                .publish_tracked(request.topic, request.payload, options)
+                .await
+                .map(|notice| {
+                    let _ = receipt.send(notice);
+                }),
+            None => {
+                client
+                    .publish(request.topic, request.payload, options)
+                    .await
+            }
+        };
+        if let Err(error) = publication {
             tracing::warn!(%error, "could not enqueue MQTT publication");
         }
     })
     .await;
 }
 
-fn acknowledge_publication(event: &Result<Event, ConnectionError>, receipts: &ReceiptTracker) {
-    let mut receipts = receipts.lock().expect("MQTT receipts lock poisoned");
-    match event {
-        Ok(Event::Incoming(Packet::ConnAck(ack))) if !ack.session_present => {
-            receipts.sent.clear();
-            receipts.colliding.clear();
-            let discarded = receipts.pending_unsent.min(receipts.queued.len());
-            receipts.queued.drain(..discarded);
-            receipts.pending_unsent = 0;
-        }
-        Ok(Event::Outgoing(Outgoing::AwaitAck(id))) => {
-            // rumqttc stores this publication separately from its pending queue.
-            if let Some(receipt) = receipts.queued.pop_front() {
-                receipts.colliding.insert(*id, receipt);
-            }
-        }
-        Ok(Event::Outgoing(Outgoing::Publish(id))) if !receipts.sent.contains_key(id) => {
-            let receipt = receipts
-                .colliding
-                .remove(id)
-                .or_else(|| receipts.queued.pop_front());
-            if let Some(receipt) = receipt {
-                receipts.sent.insert(*id, receipt);
-            }
-        }
-        Ok(Event::Incoming(Packet::PubAck(ack))) => {
-            if let Some(Some(receipt)) = receipts.sent.remove(&ack.pkid) {
-                match ack.reason {
-                    rumqttc::v5::mqttbytes::v5::PubAckReason::Success
-                    | rumqttc::v5::mqttbytes::v5::PubAckReason::NoMatchingSubscribers => {
-                        let _ = receipt.send(());
-                    }
-                    _ => tracing::warn!(reason = ?ack.reason, "broker rejected MQTT publication"),
-                }
-            }
-        }
-        _ => {}
-    }
-}
-
 fn mqtt_options(config: MqttConfig, topics: Topics) -> MqttOptions {
-    let mut options = MqttOptions::new(topics.client_id(), config.host, config.port);
-    options.set_keep_alive(Duration::from_secs(30));
-    options.set_credentials(config.username, config.password);
-    options.set_last_will(LastWill::new(
-        topics.process_availability(),
-        "offline",
-        QoS::AtLeastOnce,
-        true,
-        None,
-    ));
-    options
+    MqttOptionsBuilder::new(topics.client_id(), (config.host, config.port))
+        .keep_alive(30)
+        .credentials(config.username, config.password)
+        .last_will(LastWill::new(
+            topics.process_availability(),
+            "offline",
+            QoS::AtLeastOnce,
+            true,
+            None,
+        ))
+        .build()
 }
 
 fn control_subscription(topics: Topics) -> Filter {
@@ -271,43 +216,10 @@ async fn initialize_connection(connection: &MqttConnection) {
         .await;
 }
 
-fn tracked_mqtt_events(
-    eventloop: EventLoop,
-    receipts: ReceiptTracker,
-) -> impl Stream<Item = Result<Event, ConnectionError>> {
-    stream::unfold((eventloop, receipts), |(mut eventloop, receipts)| async {
+fn mqtt_events(eventloop: EventLoop) -> impl Stream<Item = Result<Event, ConnectionError>> {
+    stream::unfold(eventloop, |mut eventloop| async {
         let event = eventloop.poll().await;
-        if let Ok(Event::Incoming(Packet::ConnAck(ack))) = &event
-            && !ack.session_present
-        {
-            // rumqttc 0.25.1 clean() preserves collisions, but a fresh broker
-            // session cannot acknowledge the old packet needed to release one.
-            eventloop.state.collision = None;
-        }
-        if event.is_err() {
-            let mut tracked = receipts.lock().expect("MQTT receipts lock poisoned");
-            // A network write can fail after rumqttc assigned an ID but before it
-            // returned Outgoing::Publish. Preserve that ticket for retransmission.
-            eventloop.pending.iter().for_each(|request| {
-                if let rumqttc::v5::Request::Publish(publish) = request
-                    && publish.pkid != 0
-                    && !tracked.sent.contains_key(&publish.pkid)
-                    && let Some(receipt) = tracked.queued.pop_front()
-                {
-                    tracked.sent.insert(publish.pkid, receipt);
-                }
-            });
-            // rumqttc drops pending packets when the broker starts a fresh session.
-            tracked.pending_unsent = eventloop
-                .pending
-                .iter()
-                .filter(|request| match request {
-                    rumqttc::v5::Request::Publish(publish) => publish.pkid == 0,
-                    _ => false,
-                })
-                .count();
-        }
-        Some((event, (eventloop, receipts)))
+        Some((event, eventloop))
     })
 }
 
@@ -316,12 +228,10 @@ async fn run_event_loop(
     connection: MqttConnection,
     connected: watch::Sender<bool>,
     controls: MqttRequestIntake,
-    receipts: ReceiptTracker,
 ) {
     let pending_results = Arc::new(Semaphore::new(MAX_PENDING_CONTROL_RESULTS));
-    tracked_mqtt_events(eventloop, receipts.clone())
+    mqtt_events(eventloop)
         .for_each(|event| {
-            acknowledge_publication(&event, &receipts);
             handle_mqtt_event(event, &connection, &connected, &controls, &pending_results)
         })
         .await;
@@ -361,16 +271,16 @@ pub(super) fn start(
     connected_tx: watch::Sender<bool>,
     connected_rx: watch::Receiver<bool>,
 ) -> (MqttConnection, [tokio::task::JoinHandle<()>; 3]) {
-    let (client, eventloop) = AsyncClient::new(mqtt_options(config, topics), 32);
-    let receipts = ReceiptTracker::default();
-    let (connection, publisher) = MqttConnection::new(client, topics, receipts.clone());
+    let (client, eventloop) = AsyncClient::builder(mqtt_options(config, topics))
+        .capacity(32)
+        .build();
+    let (connection, publisher) = MqttConnection::new(client, topics);
     let setup = tokio::spawn(setup_connection(connection.clone(), connected_rx));
     let event_loop = tokio::spawn(run_event_loop(
         eventloop,
         connection.clone(),
         connected_tx,
         controls,
-        receipts,
     ));
     (connection, [setup, event_loop, publisher])
 }
@@ -380,7 +290,7 @@ pub(super) fn test_connection(
     client: AsyncClient,
     topics: Topics,
 ) -> (MqttConnection, tokio::task::JoinHandle<()>) {
-    MqttConnection::new(client, topics, ReceiptTracker::default())
+    MqttConnection::new(client, topics)
 }
 
 #[cfg(test)]
@@ -389,10 +299,12 @@ pub(super) fn observed_client(
     port: u16,
 ) -> (AsyncClient, mpsc::UnboundedReceiver<Publish>) {
     let (client, eventloop) =
-        AsyncClient::new(super::test_support::test_mqtt_options(client_id, port), 16);
+        AsyncClient::builder(super::test_support::test_mqtt_options(client_id, port))
+            .capacity(16)
+            .build();
     let (messages, received) = mpsc::unbounded_channel();
     tokio::spawn(
-        tracked_mqtt_events(eventloop, ReceiptTracker::default())
+        mqtt_events(eventloop)
             .filter_map(|event| async move { event.ok() })
             .filter_map(|event| async move {
                 match event {
@@ -415,7 +327,6 @@ mod tests {
     };
     use super::*;
     use gafctl_api::ProxyId;
-    use rumqttc::v5::mqttbytes::v5::Publish;
     use tokio::time::timeout;
 
     #[tokio::test]
@@ -425,7 +336,9 @@ mod tests {
         use gafctl_api::{CommandId, DeviceRefreshStatus};
         let topics = Topics(ProxyId::default());
         let device = DeviceId::configured_ble();
-        let (client, _eventloop) = AsyncClient::new(test_mqtt_options("queue-modes", 1), 4);
+        let (client, eventloop) = AsyncClient::builder(test_mqtt_options("queue-modes", 1))
+            .capacity(4)
+            .build();
         let (publications, mut queued) = mpsc::channel(4);
         let connection = MqttConnection {
             client,
@@ -479,189 +392,164 @@ mod tests {
             publication.as_mut().now_or_never().is_none(),
             "queue admission must not complete receipt delivery"
         );
-        receipt.send(()).unwrap();
-        publication.await;
+        let notice = connection
+            .client
+            .publish_tracked(
+                "synthetic/result",
+                b"result",
+                PublishOptions::at_least_once(),
+            )
+            .await
+            .unwrap();
+        receipt.send(notice).unwrap();
+        assert!(
+            publication.as_mut().now_or_never().is_none(),
+            "notice admission must not complete broker acknowledgement"
+        );
+        drop(eventloop);
     }
 
     #[test]
     fn subscriptions_preserve_retained_request_metadata() {
         let filter = control_subscription(Topics(ProxyId::default()));
-        let subscription = rumqttc::v5::mqttbytes::v5::Subscribe::new(filter, None);
+        let mut subscription = rumqttc::mqttbytes::v5::Subscribe::new(filter, None);
+        subscription.pkid = 1;
         let mut encoded = bytes::BytesMut::new();
         subscription.write(&mut encoded).unwrap();
         assert_eq!(encoded.last(), Some(&0x09));
     }
 
     #[tokio::test]
-    async fn native_broker_fresh_session_resumes_after_an_eventloop_collision() {
-        use rumqttc::v5::{Request, mqttbytes::v5::PubAck};
-        let broker = start_native_broker().await;
-        let mut options = test_mqtt_options("collision-reconnect", broker.port);
-        options.set_outgoing_inflight_upper_limit(2);
-        let (client, mut eventloop) = AsyncClient::new(options, 8);
-        let connected = timeout(Duration::from_secs(5), eventloop.poll())
+    async fn publisher_admits_later_results_without_waiting_for_earlier_acknowledgements() {
+        use futures_util::FutureExt;
+        use tokio_util::task::AbortOnDropHandle;
+
+        let (client, eventloop) = AsyncClient::builder(test_mqtt_options("concurrent-results", 1))
+            .capacity(4)
+            .build();
+        let (connection, publisher) = MqttConnection::new(client, Topics(ProxyId::default()));
+        let _publisher = AbortOnDropHandle::new(publisher);
+        let (first, first_notice) = oneshot::channel();
+        let (second, second_notice) = oneshot::channel();
+        for (payload, receipt) in [(b"first".to_vec(), first), (b"second".to_vec(), second)] {
+            connection
+                .publications
+                .send(PublishRequest {
+                    topic: "synthetic/result".to_owned(),
+                    payload,
+                    delivery: Delivery::Acknowledged(receipt),
+                })
+                .await
+                .unwrap();
+        }
+        let first = timeout(Duration::from_secs(1), first_notice)
             .await
             .unwrap()
             .unwrap();
-        let Event::Incoming(Packet::ConnAck(initial)) = connected else {
-            unreachable!("broker must acknowledge connection");
+        let second = timeout(Duration::from_secs(1), second_notice)
+            .await
+            .unwrap()
+            .unwrap();
+        let completions = async {
+            tokio::join!(
+                first.wait_completion_async(),
+                second.wait_completion_async()
+            )
         };
-        assert!(!initial.session_present);
-        // Drive the pinned EventLoop's real state into AwaitAck deterministically:
-        // packet 2 is acknowledged before packet 1, so the third publish collides.
-        for _ in 0..2 {
-            eventloop
-                .state
-                .handle_outgoing_packet(Request::Publish(Publish::new(
-                    "collision/test",
-                    QoS::AtLeastOnce,
-                    "old",
-                    None,
-                )))
-                .unwrap();
-        }
-        eventloop
-            .state
-            .handle_incoming_packet(Packet::PubAck(PubAck::new(2, None)))
-            .unwrap();
-        eventloop
-            .state
-            .handle_outgoing_packet(Request::Publish(Publish::new(
-                "collision/test",
-                QoS::AtLeastOnce,
-                "colliding",
-                None,
-            )))
-            .unwrap();
-        assert_eq!(
-            eventloop.state.events.pop_back(),
-            Some(Event::Outgoing(Outgoing::AwaitAck(1)))
-        );
-        eventloop.state.events.clear();
-        eventloop.clean();
-        assert!(eventloop.state.collision.is_some());
-        client
-            .publish("collision/test", QoS::AtLeastOnce, false, "resumed")
+        tokio::pin!(completions);
+        assert!(completions.as_mut().now_or_never().is_none());
+        drop(eventloop);
+    }
+
+    #[tokio::test]
+    async fn native_broker_fresh_session_fails_old_notices_and_completes_new_publications() {
+        use rumqttc::{Outgoing, PublishNoticeError};
+        use tokio_util::task::AbortOnDropHandle;
+
+        let broker = start_native_broker().await;
+        let (client, mut eventloop) =
+            AsyncClient::builder(test_mqtt_options("fresh-notices", broker.port))
+                .capacity(8)
+                .build();
+        let Event::Incoming(Packet::ConnAck(_)) = timeout(Duration::from_secs(5), eventloop.poll())
+            .await
+            .unwrap()
+            .unwrap()
+        else {
+            unreachable!("native broker must acknowledge the initial connection");
+        };
+        let sent = client
+            .publish_tracked(
+                "synthetic/result",
+                "sent-before-reset",
+                PublishOptions::at_least_once(),
+            )
             .await
             .unwrap();
-        let events = tracked_mqtt_events(eventloop, ReceiptTracker::default());
-        tokio::pin!(events);
-        let resumed = timeout(
-            Duration::from_secs(5),
-            events
-                .as_mut()
-                .filter_map(|event| {
-                    future::ready(match event {
-                        Ok(Event::Incoming(Packet::PubAck(ack))) => Some(ack),
-                        _ => None,
-                    })
-                })
-                .next(),
-        )
-        .await
-        .expect("fresh connection must send and acknowledge the queued publication")
-        .unwrap();
-        assert!(
-            resumed.reason == rumqttc::v5::mqttbytes::v5::PubAckReason::Success
-                || resumed.reason
-                    == rumqttc::v5::mqttbytes::v5::PubAckReason::NoMatchingSubscribers
-        );
-    }
-
-    #[test]
-    fn publish_receipts_collision_then_fresh_session_does_not_ack_a_dropped_reply() {
-        use rumqttc::v5::{
-            MqttState, Request,
-            mqttbytes::v5::{ConnAck, ConnectReturnCode, PubAck},
-        };
-        let receipts = ReceiptTracker::default();
-        let mut state = MqttState::new(2, false);
-        for id in [1, 2] {
-            receipts.lock().unwrap().queued.push_back(None);
-            let packet = state
-                .handle_outgoing_packet(Request::Publish(Publish::new(
-                    "result",
-                    QoS::AtLeastOnce,
-                    "old",
-                    None,
-                )))
-                .unwrap();
-            assert!(packet.is_some());
-            acknowledge_publication(&Ok(Event::Outgoing(Outgoing::Publish(id))), &receipts);
-        }
-        state
-            .handle_incoming_packet(Packet::PubAck(PubAck::new(2, None)))
-            .unwrap();
-        acknowledge_publication(
-            &Ok(Event::Incoming(Packet::PubAck(PubAck::new(2, None)))),
-            &receipts,
-        );
-        let (colliding, mut collision_result) = oneshot::channel();
-        receipts.lock().unwrap().queued.push_back(Some(colliding));
-        assert!(
-            state
-                .handle_outgoing_packet(Request::Publish(Publish::new(
-                    "result",
-                    QoS::AtLeastOnce,
-                    "collision",
-                    None
-                )))
-                .unwrap()
-                .is_none()
-        );
-        acknowledge_publication(&Ok(Event::Outgoing(Outgoing::AwaitAck(1))), &receipts);
-        // The pinned client retains the colliding publication outside clean()'s pending list.
-        let pending = state.clean();
-        assert_eq!(pending.len(), 1);
-        let (dropped, mut dropped_result) = oneshot::channel();
-        let (new, mut new_result) = oneshot::channel();
         {
-            let mut tracked = receipts.lock().unwrap();
-            tracked.queued.push_back(Some(dropped));
-            tracked.pending_unsent = 1;
-            // Enqueued after clean(), so this publication survives the new session.
-            tracked.queued.push_back(Some(new));
+            let events = stream::unfold(&mut eventloop, |eventloop| async {
+                Some((eventloop.poll().await, eventloop))
+            })
+            .filter_map(|event| {
+                future::ready(match event {
+                    Ok(Event::Outgoing(Outgoing::Publish(id))) => Some(id),
+                    _ => None,
+                })
+            });
+            tokio::pin!(events);
+            timeout(Duration::from_secs(5), events.next())
+                .await
+                .unwrap()
+                .unwrap();
         }
-        acknowledge_publication(
-            &Ok(Event::Incoming(Packet::ConnAck(ConnAck {
-                session_present: false,
-                code: ConnectReturnCode::Success,
-                properties: None,
-            }))),
-            &receipts,
-        );
-        acknowledge_publication(&Ok(Event::Outgoing(Outgoing::Publish(1))), &receipts);
-        acknowledge_publication(
-            &Ok(Event::Incoming(Packet::PubAck(PubAck::new(1, None)))),
-            &receipts,
+        let unsent = client
+            .publish_tracked(
+                "synthetic/result",
+                "queued-before-reset",
+                PublishOptions::at_least_once(),
+            )
+            .await
+            .unwrap();
+        eventloop.clean();
+        let fresh = client
+            .publish_tracked(
+                "synthetic/result",
+                "queued-after-reset",
+                PublishOptions::at_least_once(),
+            )
+            .await
+            .unwrap();
+        let _events = AbortOnDropHandle::new(tokio::spawn(
+            mqtt_events(eventloop).for_each(|_| future::ready(())),
+        ));
+        assert_eq!(
+            timeout(Duration::from_secs(5), sent.wait_completion_async())
+                .await
+                .unwrap(),
+            Err(PublishNoticeError::SessionReset)
         );
         assert_eq!(
-            collision_result.try_recv(),
-            Err(oneshot::error::TryRecvError::Closed)
+            timeout(Duration::from_secs(5), unsent.wait_completion_async())
+                .await
+                .unwrap(),
+            Err(PublishNoticeError::SessionReset)
         );
-        assert_eq!(
-            dropped_result.try_recv(),
-            Err(oneshot::error::TryRecvError::Closed)
-        );
-        assert_eq!(new_result.try_recv(), Ok(()));
-    }
-
-    #[test]
-    fn publish_receipts_discard_old_session_ids_before_packet_id_reuse() {
-        let receipts = ReceiptTracker::default();
-        let (old, mut old_result) = oneshot::channel();
-        receipts.lock().unwrap().sent.insert(1, Some(old));
-        let connack = rumqttc::v5::mqttbytes::v5::ConnAck {
-            session_present: false,
-            code: rumqttc::v5::mqttbytes::v5::ConnectReturnCode::Success,
-            properties: None,
-        };
-        acknowledge_publication(&Ok(Event::Incoming(Packet::ConnAck(connack))), &receipts);
-        assert!(receipts.lock().unwrap().sent.is_empty());
-        assert_eq!(
-            old_result.try_recv(),
-            Err(oneshot::error::TryRecvError::Closed)
-        );
+        timeout(Duration::from_secs(5), fresh.wait_completion_async())
+            .await
+            .unwrap()
+            .unwrap();
+        let next = client
+            .publish_tracked(
+                "synthetic/result",
+                "after-reset-ack",
+                PublishOptions::at_least_once(),
+            )
+            .await
+            .unwrap();
+        timeout(Duration::from_secs(5), next.wait_completion_async())
+            .await
+            .unwrap()
+            .unwrap();
     }
 
     #[tokio::test]
@@ -677,16 +565,16 @@ mod tests {
             .await
             .unwrap();
         let (client, eventloop) =
-            AsyncClient::new(mqtt_options(config(broker.port, false), topics), 16);
+            AsyncClient::builder(mqtt_options(config(broker.port, false), topics))
+                .capacity(16)
+                .build();
         let (connected, mut connection_events) = mpsc::unbounded_channel();
-        let task = tokio::spawn(
-            tracked_mqtt_events(eventloop, ReceiptTracker::default()).for_each(move |event| {
-                if let Ok(Event::Incoming(Packet::ConnAck(_))) = event {
-                    let _ = connected.send(());
-                }
-                future::ready(())
-            }),
-        );
+        let task = tokio::spawn(mqtt_events(eventloop).for_each(move |event| {
+            if let Ok(Event::Incoming(Packet::ConnAck(_))) = event {
+                let _ = connected.send(());
+            }
+            future::ready(())
+        }));
         timeout(Duration::from_secs(5), connection_events.recv())
             .await
             .unwrap()
@@ -694,9 +582,8 @@ mod tests {
         client
             .publish(
                 topics.process_availability(),
-                QoS::AtLeastOnce,
-                true,
                 "online",
+                PublishOptions::at_least_once().retained(),
             )
             .await
             .unwrap();

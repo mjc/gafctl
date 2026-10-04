@@ -9,7 +9,7 @@ use gafctl_api::{
     DeviceInventoryStatus, DeviceSettings, DeviceState, DeviceStateV2Response,
     QuickConnectModeStatus, StateProvenance, unix_millis,
 };
-use rumqttc::v5::{MqttOptions, mqttbytes::v5::Publish};
+use rumqttc::{MqttOptions, MqttOptionsBuilder, mqttbytes::v5::Publish};
 use serde_json::json;
 use tokio::{
     net::{TcpListener, TcpStream},
@@ -82,10 +82,10 @@ async fn wait_for_native_broker(port: u16) {
 }
 
 pub(super) fn test_mqtt_options(client_id: &str, port: u16) -> MqttOptions {
-    let mut options = MqttOptions::new(client_id, "127.0.0.1", port);
-    options.set_keep_alive(Duration::from_secs(5));
-    options.set_credentials("gafctl-test", "gafctl-test");
-    options
+    MqttOptionsBuilder::new(client_id, ("127.0.0.1", port))
+        .keep_alive(5)
+        .credentials("gafctl-test", "gafctl-test")
+        .build()
 }
 
 pub(super) async fn receive_topic(
