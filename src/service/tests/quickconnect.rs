@@ -120,16 +120,15 @@ async fn invalid_inventory_marks_only_that_accounts_current_state_unavailable() 
 async fn cloud_poll_publishes_fast_device_before_blocked_sibling() {
     let (mut state, fixture, _server, _directory) =
         cloud_poll_fixture(&["slow", "fast"], &["slow"]).await;
-    let (updates, observed) = watch::channel(Arc::new(state.state_snapshot().await.unwrap()));
+    let (updates, mut observed) = watch::channel(Arc::new(state.state_snapshot().await.unwrap()));
     state.attach_state_publication(updates, false);
     let polling = tokio::spawn({
         let state = state.clone();
         async move { state.poll_quickconnect().await }
     });
-    let publications = stream::unfold(observed, |mut observed| async move {
-        observed.changed().await.ok()?;
-        let ready = {
-            let snapshot = observed.borrow_and_update();
+    let fast_published = tokio::time::timeout(
+        Duration::from_secs(2),
+        observed.wait_for(|snapshot| {
             snapshot
                 .descriptors
                 .iter()
@@ -140,16 +139,10 @@ async fn cloud_poll_publishes_fast_device_before_blocked_sibling() {
                         .iter()
                         .any(|item| item.id == device.id && item.available)
                 })
-        };
-        Some((ready, observed))
-    })
-    .filter_map(|ready| futures_util::future::ready(ready.then_some(())));
-    tokio::pin!(publications);
-    let fast_published = tokio::time::timeout(Duration::from_secs(2), publications.next())
-        .await
-        .ok()
-        .flatten()
-        .is_some();
+        }),
+    )
+    .await
+    .is_ok_and(|publication| publication.is_ok());
     fixture.release();
     polling.await.unwrap();
     assert!(

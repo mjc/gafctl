@@ -248,7 +248,7 @@ fn control_configs(device: &DeviceDescriptor) -> impl Iterator<Item = (String, V
         .commands
         .iter()
         .filter_map(|capability| match capability {
-            CommandCapability::LegacyPreset(preset) => Some(preset.as_str()),
+            CommandCapability::LegacyPreset(preset) => Some(<&'static str>::from(preset)),
             CommandCapability::LegacyAutomaticTemperature
             | CommandCapability::LegacyAutomaticHumidity
             | CommandCapability::LegacyTimer

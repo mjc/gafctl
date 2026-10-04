@@ -4,12 +4,13 @@ use crate::{
     service::DeviceService,
 };
 use anyhow::{Context, Result};
-use futures_util::{Stream, StreamExt, stream};
+use futures_util::StreamExt;
 use std::time::Duration;
 use tokio::{
     net::TcpListener,
-    time::{Interval, MissedTickBehavior, interval},
+    time::{MissedTickBehavior, interval},
 };
+use tokio_stream::wrappers::IntervalStream;
 
 pub(crate) mod cli;
 pub(crate) mod config;
@@ -130,23 +131,38 @@ async fn shutdown_signal() {
 
 async fn poll_device(state: DeviceService, poll_interval: Duration) {
     poll_ticks(poll_interval)
-        .for_each(|()| state.poll_and_publish_state())
+        .for_each(|_| state.poll_and_publish_state())
         .await;
 }
 
 async fn poll_quickconnect_device(state: DeviceService, poll_interval: Duration) {
     poll_ticks(poll_interval)
-        .for_each(|()| state.poll_quickconnect())
+        .for_each(|_| state.poll_quickconnect())
         .await;
 }
 
-fn poll_ticks(poll_interval: Duration) -> impl Stream<Item = ()> {
+fn poll_ticks(poll_interval: Duration) -> IntervalStream {
     let mut ticker = interval(poll_interval);
     ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
-    stream::unfold(ticker, wait_for_poll_tick)
+    IntervalStream::new(ticker)
 }
 
-async fn wait_for_poll_tick(mut ticker: Interval) -> Option<((), Interval)> {
-    ticker.tick().await;
-    Some(((), ticker))
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test(start_paused = true)]
+    async fn polling_starts_immediately_and_skips_missed_ticks() {
+        let started = tokio::time::Instant::now();
+        let ticks = poll_ticks(Duration::from_secs(30));
+        tokio::pin!(ticks);
+        ticks.next().await.unwrap();
+        assert_eq!(started.elapsed(), Duration::ZERO);
+
+        tokio::time::sleep(Duration::from_secs(75)).await;
+        ticks.next().await.unwrap();
+        let resumed = tokio::time::Instant::now();
+        ticks.next().await.unwrap();
+        assert_eq!(resumed.elapsed(), Duration::from_secs(15));
+    }
 }

@@ -85,6 +85,58 @@ fn request_ids_round_trip_and_commands_keep_the_v2_wire_shape() {
 }
 
 #[test]
+fn request_ids_preserve_borrowed_and_owned_deserializer_contracts() {
+    use serde::{
+        Deserialize,
+        de::value::{BorrowedStrDeserializer, Error, StringDeserializer},
+    };
+
+    for value in ["request_1", "", "../device", "space here", "é"] {
+        let borrowed = CommandId::deserialize(BorrowedStrDeserializer::<Error>::new(value));
+        let owned = CommandId::deserialize(StringDeserializer::<Error>::new(value.to_owned()));
+        assert_eq!(
+            borrowed.as_ref().map(CommandId::as_str),
+            owned.as_ref().map(CommandId::as_str)
+        );
+        if value == "request_1" {
+            assert_eq!(borrowed.unwrap().as_str(), value);
+            assert_eq!(owned.unwrap().as_str(), value);
+        } else {
+            assert_eq!(
+                borrowed.unwrap_err().to_string(),
+                "invalid control request ID"
+            );
+            assert_eq!(owned.unwrap_err().to_string(), "invalid control request ID");
+        }
+    }
+}
+
+#[test]
+fn control_presets_format_exact_serde_wire_names() {
+    use gafctl_api::ControlPreset;
+
+    for (preset, wire) in [
+        (
+            ControlPreset::Automatic105F30Percent,
+            "automatic105_f30_percent",
+        ),
+        (
+            ControlPreset::Automatic105_1F30_1Percent,
+            "automatic105_1_f30_1_percent",
+        ),
+        (ControlPreset::TimerClear, "timer_clear"),
+        (ControlPreset::TimerOneMinute, "timer_one_minute"),
+    ] {
+        assert_eq!(<&'static str>::from(preset), wire);
+        assert_eq!(serde_json::to_value(preset).unwrap(), wire);
+        assert_eq!(
+            serde_json::from_value::<ControlPreset>(json!(wire)).unwrap(),
+            preset
+        );
+    }
+}
+
+#[test]
 fn control_status_formats_exact_wire_names_through_borrowed_strings() {
     for (status, wire) in [
         (ControlStatus::Confirmed, "confirmed"),

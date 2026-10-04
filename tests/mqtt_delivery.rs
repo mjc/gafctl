@@ -10,54 +10,49 @@ use std::{
 };
 
 use bytes::BytesMut;
-use futures_util::{StreamExt, future, stream};
+use futures_util::{SinkExt, StreamExt, future};
 use rumqttc_next::{
     AsyncClient, Broker, ConnAck, ConnectReturnCode, EventLoop, MqttOptions, Packet, PubAck,
     PubAckReason, Publish, PublishNotice, PublishNoticeError, PublishOptions, SessionMode,
-    mqttbytes::Error,
+    mqttbytes::v5::Codec,
 };
 use tokio::{
-    io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf},
+    io::{AsyncRead, AsyncWrite, ReadBuf},
     net::{TcpListener, TcpStream},
     sync::oneshot,
     time::{sleep, timeout},
 };
-use tokio_util::task::AbortOnDropHandle;
+use tokio_util::{codec::Framed, task::AbortOnDropHandle};
 
 const DEADLINE: Duration = Duration::from_secs(5);
 
-async fn packet(socket: &mut TcpStream) -> Packet {
-    let packets = stream::unfold((socket, BytesMut::new()), |(socket, mut buffer)| async {
-        buffer.extend_from_slice(&[socket.read_u8().await.expect("broker packet byte")]);
-        let packet = match Packet::read(&mut buffer, Some(1024)) {
-            Err(Error::InsufficientBytes(_)) => None,
-            result => Some(result),
-        };
-        Some((packet, (socket, buffer)))
-    })
-    .filter_map(future::ready);
-    tokio::pin!(packets);
-    timeout(DEADLINE, packets.next())
+async fn packet(socket: &mut Framed<TcpStream, Codec>) -> Packet {
+    timeout(DEADLINE, socket.next())
         .await
         .expect("broker packet deadline")
         .expect("broker packet stream")
         .expect("valid broker packet")
 }
 
-async fn send(socket: &mut TcpStream, packet: Packet) {
-    let mut encoded = BytesMut::new();
-    packet.write(&mut encoded, Some(1024)).unwrap();
-    timeout(DEADLINE, socket.write_all(&encoded))
+async fn send(socket: &mut Framed<TcpStream, Codec>, packet: Packet) {
+    timeout(DEADLINE, socket.send(packet))
         .await
         .expect("broker write deadline")
         .expect("broker packet write");
 }
 
-async fn accept(listener: &TcpListener, session_present: bool) -> TcpStream {
-    let (mut socket, _) = timeout(DEADLINE, listener.accept())
+async fn accept(listener: &TcpListener, session_present: bool) -> Framed<TcpStream, Codec> {
+    let (socket, _) = timeout(DEADLINE, listener.accept())
         .await
         .expect("client connection deadline")
         .expect("client connection");
+    let mut socket = Framed::new(
+        socket,
+        Codec {
+            max_incoming_size: Some(1024),
+            max_outgoing_size: Some(1024),
+        },
+    );
     let Packet::Connect(_, _, _) = packet(&mut socket).await else {
         unreachable!("client must start with CONNECT")
     };
@@ -73,7 +68,7 @@ async fn accept(listener: &TcpListener, session_present: bool) -> TcpStream {
     socket
 }
 
-async fn publication(socket: &mut TcpStream) -> Publish {
+async fn publication(socket: &mut Framed<TcpStream, Codec>) -> Publish {
     let Packet::Publish(publish) = packet(socket).await else {
         unreachable!("expected PUBLISH")
     };
@@ -81,7 +76,11 @@ async fn publication(socket: &mut TcpStream) -> Publish {
     publish
 }
 
-async fn acknowledge(socket: &mut TcpStream, publish: &Publish, reason: PubAckReason) {
+async fn acknowledge(
+    socket: &mut Framed<TcpStream, Codec>,
+    publish: &Publish,
+    reason: PubAckReason,
+) {
     send(
         socket,
         Packet::PubAck(PubAck {
@@ -270,14 +269,7 @@ async fn aborting_the_event_loop_fails_its_unacknowledged_delivery_notice() {
         let mut socket = accept(&listener, false).await;
         publication(&mut socket).await;
         received.send(()).unwrap();
-        let mut byte = [0];
-        assert_eq!(
-            timeout(DEADLINE, socket.read(&mut byte))
-                .await
-                .unwrap()
-                .unwrap(),
-            0
-        );
+        assert!(timeout(DEADLINE, socket.next()).await.unwrap().is_none());
         closed.send(()).unwrap();
     }));
     let notice = publish(&client, "unfinished-request-id").await;
@@ -372,13 +364,8 @@ async fn failed_first_publish_write_preserves_the_receipt_for_session_resume() {
     let observed_pkid = Arc::clone(&failed_pkid);
     let broker = AbortOnDropHandle::new(tokio::spawn(async move {
         let mut socket = accept(&listener, false).await;
-        let mut byte = [0];
-        assert_eq!(
-            timeout(DEADLINE, socket.read(&mut byte))
-                .await
-                .unwrap()
-                .unwrap(),
-            0,
+        assert!(
+            timeout(DEADLINE, socket.next()).await.unwrap().is_none(),
             "failed first PUBLISH must not reach the broker"
         );
         drop(socket);

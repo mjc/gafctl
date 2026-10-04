@@ -6,8 +6,6 @@ use axum::{
     body::Body,
     http::{Request, StatusCode},
 };
-#[cfg(feature = "mqtt")]
-use futures_util::{StreamExt, stream};
 use gafctl_api::{
     DeviceBackend, DeviceId, DeviceRefreshStatus, DeviceRefreshV2Response, DeviceSettings,
     DeviceState, StateProvenance, unix_millis,
