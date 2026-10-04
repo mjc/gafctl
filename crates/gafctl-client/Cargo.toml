@@ -15,6 +15,7 @@ thiserror.workspace = true
 gafctl-api = { path = "../gafctl-api" }
 
 [dev-dependencies]
+tokio-util.workspace = true
 axum.workspace = true
 bytes.workspace = true
 futures-util.workspace = true

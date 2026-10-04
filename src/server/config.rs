@@ -240,25 +240,21 @@ mod tests {
     fn quickconnect_uses_private_password_file_and_keeps_writes_disabled_by_default() {
         use std::os::unix::fs::PermissionsExt;
 
-        let password_path = std::env::temp_dir().join(format!(
-            "gafctl-quickconnect-{}-{}",
-            std::process::id(),
-            uuid::Uuid::new_v4()
-        ));
+        let (_directory, path) = crate::test_support::identity_store_fixture();
+        let password_path = path.with_file_name("password");
         std::fs::write(&password_path, "private-token\n").unwrap();
         std::fs::set_permissions(&password_path, std::fs::Permissions::from_mode(0o600)).unwrap();
 
         let config = quickconnect_config_from(
             Some(" account ".into()),
             None,
-            Some(password_path.clone()),
+            Some(password_path),
             "consumer",
             false,
         )
         .unwrap()
         .unwrap();
 
-        std::fs::remove_file(password_path).unwrap();
         assert!(!config.writes_enabled);
         assert_eq!(config.account_id, "consumer:account");
         assert!(!format!("{:?}", config.credentials).contains("private-token"));
@@ -268,23 +264,19 @@ mod tests {
     fn quickconnect_password_files_reject_group_or_other_access() {
         use std::os::unix::fs::PermissionsExt;
 
-        let password_path = std::env::temp_dir().join(format!(
-            "gafctl-quickconnect-open-{}-{}",
-            std::process::id(),
-            uuid::Uuid::new_v4()
-        ));
+        let (_directory, path) = crate::test_support::identity_store_fixture();
+        let password_path = path.with_file_name("password");
         std::fs::write(&password_path, "private-token").unwrap();
         std::fs::set_permissions(&password_path, std::fs::Permissions::from_mode(0o640)).unwrap();
 
         let result = quickconnect_config_from(
             Some("account".into()),
             None,
-            Some(password_path.clone()),
+            Some(password_path),
             "consumer",
             false,
         );
 
-        std::fs::remove_file(password_path).unwrap();
         assert!(result.is_err());
     }
 

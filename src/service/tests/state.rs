@@ -4,6 +4,7 @@ use crate::{api::router, backend::DeviceRegistry};
 use gafctl_api::DeviceId;
 use std::time::Instant;
 use tokio::net::TcpListener;
+use tokio_util::task::AbortOnDropHandle;
 
 #[tokio::test]
 async fn state_route_reports_normalized_state_and_expired_state_as_unavailable() {
@@ -62,9 +63,9 @@ async fn reusable_client_reads_the_actual_service_router_without_physical_access
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("http://{}", listener.local_addr().unwrap());
     let app = router(state);
-    let task = tokio::spawn(async move {
+    let _task = AbortOnDropHandle::new(tokio::spawn(async move {
         axum::serve(listener, app).await.unwrap();
-    });
+    }));
     let client = gafctl_client::Client::new(
         url.parse().unwrap(),
         gafctl_client::ClientOptions::default(),
@@ -81,5 +82,4 @@ async fn reusable_client_reads_the_actual_service_router_without_physical_access
     let serialized = serde_json::to_string(&snapshot).unwrap();
     assert!(!serialized.contains("private-suffix"));
     assert!(!serialized.contains("private-peripheral-id"));
-    task.abort();
 }

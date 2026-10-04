@@ -78,6 +78,7 @@ thiserror = "2.0.21"
 tempfile = "3.27.0"
 strum = { version = "0.28.0", default-features = false, features = ["derive"] }
 tokio = { version = "1.53.1", default-features = false }
+tokio-util = { version = "0.7.18", default-features = false, features = ["rt"] }
 tower = { version = "0.5", default-features = false }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter", "json"] }
@@ -122,6 +123,7 @@ path = "tests/cli.rs"
 required-features = ["http", "cli"]
 
 [dev-dependencies]
+tokio-util.workspace = true
 tempfile.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
 assert_cmd.workspace = true

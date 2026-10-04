@@ -15,6 +15,7 @@ use axum::{
 use gafctl_api::{ControlPreset, DeviceCommand, DeviceControlV2Request, DeviceId};
 use gafctl_client::{Client, ClientOptions, ServerUrl};
 use serde_json::{Value, json};
+use tokio_util::task::AbortOnDropHandle;
 
 #[derive(Clone)]
 struct Service {
@@ -105,12 +106,7 @@ fn device_id() -> DeviceId {
 
 struct Running {
     url: String,
-    task: tokio::task::JoinHandle<()>,
-}
-impl Drop for Running {
-    fn drop(&mut self) {
-        self.task.abort();
-    }
+    _task: AbortOnDropHandle<()>,
 }
 
 async fn start(service: Service) -> Running {
@@ -120,12 +116,7 @@ async fn start(service: Service) -> Running {
         .route("/prefix/api/v2/devices/{id}/refresh", post(refresh))
         .route("/prefix/api/v2/devices/{id}/control", post(control))
         .with_state(service);
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let url = format!("http://{}/prefix", listener.local_addr().unwrap());
-    let task = tokio::spawn(async move {
-        axum::serve(listener, app).await.unwrap();
-    });
-    Running { url, task }
+    start_router(app).await
 }
 
 #[test]
@@ -348,7 +339,10 @@ async fn start_router(app: Router) -> Running {
     let task = tokio::spawn(async move {
         axum::serve(listener, app).await.unwrap();
     });
-    Running { url, task }
+    Running {
+        url,
+        _task: AbortOnDropHandle::new(task),
+    }
 }
 
 #[tokio::test]

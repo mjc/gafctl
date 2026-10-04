@@ -604,8 +604,8 @@ mod tests {
         device_id: DeviceId,
         registry: Arc<RwLock<DeviceRegistry>>,
         mock: MockState,
-        server: tokio::task::JoinHandle<()>,
-        store_path: std::path::PathBuf,
+        _server: tokio_util::task::AbortOnDropHandle<()>,
+        _directory: tempfile::TempDir,
     }
 
     async fn control_fixture(
@@ -636,9 +636,7 @@ mod tests {
             .route("/gaf/deviceMode/provider-fan", post(save_settings))
             .with_state(mock.clone());
         let (client, server) = crate::test_support::mock_client(app).await;
-        let store_path = std::env::temp_dir()
-            .join(format!("gafctl-control-{}", uuid::Uuid::new_v4()))
-            .join("identities.json");
+        let (directory, store_path) = crate::test_support::identity_store_fixture();
         let mut registry = DeviceRegistry::load(&store_path).unwrap();
         let device_id = registry
             .reconcile_quickconnect(
@@ -665,8 +663,8 @@ mod tests {
             device_id,
             registry,
             mock,
-            server,
-            store_path,
+            _server: server,
+            _directory: directory,
         }
     }
 
@@ -687,11 +685,6 @@ mod tests {
         }
     }
 
-    fn clean_up(fixture: ControlFixture) {
-        fixture.server.abort();
-        std::fs::remove_dir_all(fixture.store_path.parent().unwrap()).ok();
-    }
-
     #[tokio::test]
     async fn conditional_off_of_inactive_mode_confirms_without_writing() {
         let fixture = control_fixture(QuickConnectControlPolicy::for_test(), true).await;
@@ -707,7 +700,6 @@ mod tests {
         assert_eq!(status, QuickConnectControlStatus::Confirmed);
         assert_eq!(fixture.mock.settings_writes.load(Ordering::SeqCst), 0);
         assert_eq!(fixture.mock.detail_reads.load(Ordering::SeqCst), 1);
-        clean_up(fixture);
     }
 
     #[tokio::test]
@@ -726,7 +718,6 @@ mod tests {
         assert_eq!(status, QuickConnectControlStatus::ReadbackMismatch);
         assert_eq!(fixture.mock.settings_writes.load(Ordering::SeqCst), 1);
         assert_eq!(fixture.mock.detail_reads.load(Ordering::SeqCst), 2);
-        clean_up(fixture);
     }
 
     #[tokio::test]
@@ -740,7 +731,6 @@ mod tests {
         assert_eq!(status, QuickConnectControlStatus::Rejected);
         assert_eq!(fixture.mock.settings_writes.load(Ordering::SeqCst), 0);
         assert_eq!(fixture.mock.detail_reads.load(Ordering::SeqCst), 0);
-        clean_up(fixture);
     }
 
     #[tokio::test]
@@ -757,7 +747,6 @@ mod tests {
 
         assert_eq!(status, QuickConnectControlStatus::Rejected);
         assert_eq!(fixture.mock.settings_writes.load(Ordering::SeqCst), 0);
-        clean_up(fixture);
     }
 
     #[tokio::test]
@@ -780,7 +769,6 @@ mod tests {
 
         assert_eq!(status, QuickConnectControlStatus::Rejected);
         assert_eq!(fixture.mock.settings_writes.load(Ordering::SeqCst), 0);
-        clean_up(fixture);
     }
 
     #[tokio::test]
@@ -798,7 +786,6 @@ mod tests {
         assert_eq!(status, QuickConnectControlStatus::Confirmed);
         assert_eq!(fixture.mock.settings_writes.load(Ordering::SeqCst), 1);
         assert_eq!(fixture.mock.detail_reads.load(Ordering::SeqCst), 2);
-        clean_up(fixture);
     }
 
     #[tokio::test]
@@ -813,7 +800,6 @@ mod tests {
 
         assert_eq!(status, QuickConnectControlStatus::SubmittedUnconfirmed);
         assert_eq!(fixture.mock.settings_writes.load(Ordering::SeqCst), 1);
-        clean_up(fixture);
     }
 
     #[tokio::test]
@@ -832,7 +818,6 @@ mod tests {
         assert_eq!(status, QuickConnectControlStatus::ReadbackUnavailable);
         assert_eq!(fixture.mock.settings_writes.load(Ordering::SeqCst), 1);
         assert!(fixture.mock.detail_reads.load(Ordering::SeqCst) >= 2);
-        clean_up(fixture);
     }
 
     #[tokio::test]
@@ -888,7 +873,6 @@ mod tests {
         );
         assert_eq!(second.unwrap(), QuickConnectControlStatus::Confirmed);
         assert_eq!(fixture.mock.settings_writes.load(Ordering::SeqCst), 2);
-        clean_up(fixture);
     }
 
     #[tokio::test]
@@ -939,7 +923,6 @@ mod tests {
         );
         assert_eq!(second, QuickConnectControlStatus::SubmittedUnconfirmed);
         assert_eq!(fixture.mock.settings_writes.load(Ordering::SeqCst), 2);
-        clean_up(fixture);
     }
 
     #[tokio::test]
@@ -986,7 +969,6 @@ mod tests {
         assert_eq!(first.await.unwrap(), QuickConnectControlStatus::Rejected);
         assert_eq!(second, QuickConnectControlStatus::Confirmed);
         assert_eq!(fixture.mock.settings_writes.load(Ordering::SeqCst), 1);
-        clean_up(fixture);
     }
 
     async fn login(State(state): State<MockState>) -> Json<Value> {

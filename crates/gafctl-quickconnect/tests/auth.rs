@@ -18,6 +18,7 @@ use gafctl_quickconnect::{
     build_settings_body,
 };
 use serde_json::{Value, json};
+use tokio_util::task::AbortOnDropHandle;
 
 type LoginCapture = Arc<tokio::sync::Mutex<Option<Value>>>;
 type AuthorizationCapture = Arc<tokio::sync::Mutex<Option<String>>>;
@@ -51,7 +52,7 @@ async fn login_trims_username_encodes_utf8_password_and_sends_literal_token_head
             Arc::clone(&captured_login),
             Arc::clone(&captured_authorization),
         ));
-    let (base_url, server) = start_server(app).await;
+    let (base_url, _server) = start_server(app).await;
     let client = QuickConnectClient::new(
         Credentials::new("  fan@example.invalid  ", "café", AccountRole::Consumer),
         QuickConnectConfig::new(
@@ -76,7 +77,6 @@ async fn login_trims_username_encodes_utf8_password_and_sends_literal_token_head
         captured_authorization.lock().await.as_deref(),
         Some("SYNTHETIC_TOKEN_DO_NOT_USE")
     );
-    server.abort();
 }
 
 #[test]
@@ -131,7 +131,7 @@ async fn read_only_poll_keeps_inventory_when_one_detail_fetch_fails() {
         .route("/gaf/device/deviceList", get(two_device_inventory))
         .route("/gaf/device", get(detail_by_id))
         .with_state(Arc::clone(&failed_detail_requests));
-    let (base_url, server) = start_server(app).await;
+    let (base_url, _server) = start_server(app).await;
     let client = test_client(
         base_url,
         Credentials::new("user", "password", AccountRole::Contractor),
@@ -160,7 +160,6 @@ async fn read_only_poll_keeps_inventory_when_one_detail_fetch_fails() {
     assert!(successful.fetched_at_unix_ms.is_some());
     assert_eq!(successful.observed_at_unix_ms, None);
     assert_eq!(failed_detail_requests.load(Ordering::SeqCst), 3);
-    server.abort();
 }
 
 #[tokio::test]
@@ -170,7 +169,7 @@ async fn concurrent_unauthorized_reads_share_one_replacement_login() {
         .route("/cognito/login", post(count_login))
         .route("/gaf/device/deviceList", get(authorize_by_token))
         .with_state(Arc::clone(&login_count));
-    let (base_url, server) = start_server(app).await;
+    let (base_url, _server) = start_server(app).await;
     let client = QuickConnectClient::new(
         Credentials::new(
             "fan@example.invalid",
@@ -189,7 +188,6 @@ async fn concurrent_unauthorized_reads_share_one_replacement_login() {
     assert!(first.is_ok());
     assert!(second.is_ok());
     assert_eq!(login_count.load(Ordering::SeqCst), 2);
-    server.abort();
 }
 
 #[tokio::test]
@@ -200,7 +198,7 @@ async fn repeated_auth_rejection_stops_after_one_retry() {
         .route("/cognito/login", post(count_login_pair))
         .route("/gaf/device/deviceList", get(reject_every_read))
         .with_state((Arc::clone(&login_count), Arc::clone(&device_requests)));
-    let (base_url, server) = start_server(app).await;
+    let (base_url, _server) = start_server(app).await;
     let client = test_client(
         base_url,
         Credentials::new("user", "password", AccountRole::Contractor),
@@ -212,7 +210,6 @@ async fn repeated_auth_rejection_stops_after_one_retry() {
     );
     assert_eq!(login_count.load(Ordering::SeqCst), 2);
     assert_eq!(device_requests.load(Ordering::SeqCst), 2);
-    server.abort();
 }
 
 #[tokio::test]
@@ -223,7 +220,7 @@ async fn transient_failures_do_not_reset_the_single_reauthentication_allowance()
         .route("/cognito/login", post(count_login_pair))
         .route("/gaf/device/deviceList", get(auth_then_transient_then_auth))
         .with_state((Arc::clone(&login_count), Arc::clone(&device_requests)));
-    let (base_url, server) = start_server(app).await;
+    let (base_url, _server) = start_server(app).await;
     let client = test_client(
         base_url,
         Credentials::new("user", "password", AccountRole::Contractor),
@@ -235,7 +232,6 @@ async fn transient_failures_do_not_reset_the_single_reauthentication_allowance()
     );
     assert_eq!(login_count.load(Ordering::SeqCst), 2);
     assert_eq!(device_requests.load(Ordering::SeqCst), 3);
-    server.abort();
 }
 
 #[tokio::test]
@@ -246,7 +242,7 @@ async fn malformed_oversized_and_application_error_responses_are_distinct() {
         .route("/gaf/device/bad-json", get(malformed_json))
         .route("/gaf/device/large", get(oversized_json))
         .route("/gaf/device/service-error", get(service_error));
-    let (base_url, server) = start_server(app).await;
+    let (base_url, _server) = start_server(app).await;
     let credentials = Credentials::new("user", "password", AccountRole::Contractor);
     let client = QuickConnectClient::new(
         credentials,
@@ -276,7 +272,6 @@ async fn malformed_oversized_and_application_error_responses_are_distinct() {
             .to_string()
             .contains("private service response")
     );
-    server.abort();
 }
 
 #[tokio::test]
@@ -284,7 +279,7 @@ async fn settings_rejection_keeps_the_provider_service_status() {
     let app = Router::new()
         .route("/cognito/login", post(successful_login))
         .route("/gaf/deviceMode/fan", post(reject_settings));
-    let (base_url, server) = start_server(app).await;
+    let (base_url, _server) = start_server(app).await;
     let client = test_client(
         base_url,
         Credentials::new("user", "password", AccountRole::Contractor),
@@ -297,12 +292,11 @@ async fn settings_rejection_keeps_the_provider_service_status() {
             .unwrap_err(),
         gafctl_quickconnect::ClientError::ServiceStatus(4444)
     );
-    server.abort();
 }
 
 #[tokio::test]
 async fn untrusted_paths_cannot_change_the_api_origin() {
-    let (base_url, server) = start_server(Router::new()).await;
+    let (base_url, _server) = start_server(Router::new()).await;
     let client = test_client(
         base_url,
         Credentials::new("user", "password", AccountRole::Contractor),
@@ -330,7 +324,6 @@ async fn untrusted_paths_cannot_change_the_api_origin() {
         client.get_json("device/%2e%2e/collect").await.unwrap_err(),
         gafctl_quickconnect::ClientError::InvalidEndpoint
     );
-    server.abort();
 }
 
 #[tokio::test]
@@ -340,7 +333,7 @@ async fn transient_refresh_login_failure_is_retried_within_its_budget() {
         .route("/cognito/login", post(transient_refresh_login))
         .route("/gaf/device/deviceList", get(reject_then_accept))
         .with_state(Arc::clone(&login_count));
-    let (base_url, server) = start_server(app).await;
+    let (base_url, _server) = start_server(app).await;
     let client = test_client(
         base_url,
         Credentials::new("user", "password", AccountRole::Contractor),
@@ -348,7 +341,6 @@ async fn transient_refresh_login_failure_is_retried_within_its_budget() {
 
     assert!(client.list_devices().await.is_ok());
     assert_eq!(login_count.load(Ordering::SeqCst), 3);
-    server.abort();
 }
 
 #[tokio::test]
@@ -359,7 +351,7 @@ async fn exhausted_refresh_retries_return_the_original_transient_failure() {
         .route("/cognito/login", post(failing_refresh_login))
         .route("/gaf/device/deviceList", get(reject_initial_token))
         .with_state((Arc::clone(&login_count), Arc::clone(&device_requests)));
-    let (base_url, server) = start_server(app).await;
+    let (base_url, _server) = start_server(app).await;
     let client = test_client(
         base_url,
         Credentials::new("user", "password", AccountRole::Contractor),
@@ -371,7 +363,6 @@ async fn exhausted_refresh_retries_return_the_original_transient_failure() {
     );
     assert_eq!(login_count.load(Ordering::SeqCst), 4);
     assert_eq!(device_requests.load(Ordering::SeqCst), 1);
-    server.abort();
 }
 
 #[tokio::test]
@@ -382,7 +373,7 @@ async fn exhausted_initial_login_retries_do_not_restart_the_login_budget() {
         .route("/cognito/login", post(failing_initial_login))
         .route("/gaf/device/deviceList", get(count_device_request))
         .with_state((Arc::clone(&login_count), Arc::clone(&device_requests)));
-    let (base_url, server) = start_server(app).await;
+    let (base_url, _server) = start_server(app).await;
     let client = test_client(
         base_url,
         Credentials::new("user", "password", AccountRole::Contractor),
@@ -394,7 +385,6 @@ async fn exhausted_initial_login_retries_do_not_restart_the_login_budget() {
     );
     assert_eq!(login_count.load(Ordering::SeqCst), 3);
     assert_eq!(device_requests.load(Ordering::SeqCst), 0);
-    server.abort();
 }
 
 #[tokio::test]
@@ -402,7 +392,7 @@ async fn successful_http_response_with_unknown_inventory_shape_is_a_schema_error
     let app = Router::new()
         .route("/cognito/login", post(successful_login))
         .route("/gaf/device/deviceList", get(invalid_inventory));
-    let (base_url, server) = start_server(app).await;
+    let (base_url, _server) = start_server(app).await;
     let client = test_client(
         base_url,
         Credentials::new("user", "password", AccountRole::Contractor),
@@ -412,7 +402,6 @@ async fn successful_http_response_with_unknown_inventory_shape_is_a_schema_error
         client.list_devices().await.unwrap_err(),
         gafctl_quickconnect::ClientError::InvalidEnvelope
     );
-    server.abort();
 }
 
 #[tokio::test]
@@ -422,7 +411,7 @@ async fn device_detail_encodes_provider_identifier_as_a_query_value() {
         .route("/cognito/login", post(successful_login))
         .route("/gaf/device", get(capture_detail_query))
         .with_state(Arc::clone(&captured_query));
-    let (base_url, server) = start_server(app).await;
+    let (base_url, _server) = start_server(app).await;
     let client = test_client(
         base_url,
         Credentials::new("user", "password", AccountRole::Contractor),
@@ -434,13 +423,12 @@ async fn device_detail_encodes_provider_identifier_as_a_query_value() {
         captured_query.lock().await.as_deref(),
         Some("deviceId=fan%26other%3Dsecret")
     );
-    server.abort();
 }
 
 #[tokio::test]
 async fn missing_login_token_is_an_authentication_error() {
     let app = Router::new().route("/cognito/login", post(login_without_token));
-    let (base_url, server) = start_server(app).await;
+    let (base_url, _server) = start_server(app).await;
     let client = test_client(
         base_url,
         Credentials::new("user", "password", AccountRole::Contractor),
@@ -450,13 +438,12 @@ async fn missing_login_token_is_an_authentication_error() {
         client.list_devices().await.unwrap_err(),
         gafctl_quickconnect::ClientError::Authentication
     );
-    server.abort();
 }
 
 #[tokio::test]
 async fn login_client_error_status_is_an_authentication_error() {
     let app = Router::new().route("/cognito/login", post(reject_login));
-    let (base_url, server) = start_server(app).await;
+    let (base_url, _server) = start_server(app).await;
     let client = test_client(
         base_url,
         Credentials::new("user", "password", AccountRole::Contractor),
@@ -466,7 +453,6 @@ async fn login_client_error_status_is_an_authentication_error() {
         client.list_devices().await.unwrap_err(),
         gafctl_quickconnect::ClientError::Authentication
     );
-    server.abort();
 }
 
 #[tokio::test]
@@ -478,7 +464,7 @@ async fn reads_retry_bounded_server_errors_and_writes_are_never_retried() {
         .route("/gaf/device/deviceList", get(retry_read))
         .route("/gaf/deviceMode/fan", post(fail_write))
         .with_state((Arc::clone(&read_count), Arc::clone(&write_count)));
-    let (base_url, server) = start_server(app).await;
+    let (base_url, _server) = start_server(app).await;
     let client = test_client(
         base_url,
         Credentials::new("user", "password", AccountRole::Contractor),
@@ -494,7 +480,6 @@ async fn reads_retry_bounded_server_errors_and_writes_are_never_retried() {
         gafctl_quickconnect::ClientError::HttpStatus(500)
     );
     assert_eq!(write_count.load(Ordering::SeqCst), 1);
-    server.abort();
 }
 
 #[tokio::test]
@@ -518,10 +503,9 @@ async fn retry_after_does_not_extend_exhausted_read_or_login_budget() {
                     (StatusCode::SERVICE_UNAVAILABLE, [(header::RETRY_AFTER, "0")], Json(json!({})))
                 }))
                 .with_state((Arc::clone(&attempts), fail_login));
-            let (base_url, server) = start_server(app).await;
+            let (base_url, _server) = start_server(app).await;
             let client = test_client(base_url, Credentials::new("user", "password", AccountRole::Contractor));
             let result = tokio::time::timeout(std::time::Duration::from_secs(2), client.list_devices()).await;
-            server.abort();
             assert_eq!(result.unwrap().unwrap_err(), gafctl_quickconnect::ClientError::HttpStatus(503));
             assert_eq!(attempts.load(Ordering::SeqCst), 3);
         })
@@ -535,7 +519,7 @@ async fn timed_out_settings_write_is_not_replayed() {
         .route("/cognito/login", post(successful_login))
         .route("/gaf/deviceMode/fan", post(slow_write))
         .with_state(Arc::clone(&write_count));
-    let (base_url, server) = start_server(app).await;
+    let (base_url, _server) = start_server(app).await;
     let credentials = Credentials::new("user", "password", AccountRole::Contractor);
     let config = QuickConnectConfig::new(
         base_url.join("cognito/").unwrap(),
@@ -552,7 +536,6 @@ async fn timed_out_settings_write_is_not_replayed() {
         gafctl_quickconnect::ClientError::Transport
     );
     assert_eq!(write_count.load(Ordering::SeqCst), 1);
-    server.abort();
 }
 
 #[tokio::test]
@@ -562,7 +545,7 @@ async fn timed_out_reads_use_the_finite_retry_budget() {
         .route("/cognito/login", post(successful_login))
         .route("/gaf/device/deviceList", get(slow_read))
         .with_state(Arc::clone(&read_count));
-    let (base_url, server) = start_server(app).await;
+    let (base_url, _server) = start_server(app).await;
     let credentials = Credentials::new("user", "password", AccountRole::Contractor);
     let config = QuickConnectConfig::new(
         base_url.join("cognito/").unwrap(),
@@ -576,7 +559,6 @@ async fn timed_out_reads_use_the_finite_retry_budget() {
         gafctl_quickconnect::ClientError::Transport
     );
     assert_eq!(read_count.load(Ordering::SeqCst), 3);
-    server.abort();
 }
 
 #[tokio::test]
@@ -587,7 +569,7 @@ async fn redirects_are_not_followed_with_account_authorization() {
         .route("/gaf/device/deviceList", get(redirect_read))
         .route("/gaf/collect", get(collect_redirect))
         .with_state(Arc::clone(&redirected_requests));
-    let (base_url, server) = start_server(app).await;
+    let (base_url, _server) = start_server(app).await;
     let client = test_client(
         base_url,
         Credentials::new("user", "password", AccountRole::Contractor),
@@ -598,7 +580,6 @@ async fn redirects_are_not_followed_with_account_authorization() {
         gafctl_quickconnect::ClientError::HttpStatus(302)
     );
     assert_eq!(redirected_requests.load(Ordering::SeqCst), 0);
-    server.abort();
 }
 
 #[test]
@@ -617,7 +598,38 @@ fn credentials_debug_redacts_username_and_password_and_roles_serialize() {
     );
 }
 
-async fn start_server(app: Router) -> (reqwest::Url, tokio::task::JoinHandle<()>) {
+#[tokio::test]
+async fn dropping_fixture_stops_its_http_listener() {
+    let (base_url, server) =
+        start_server(Router::new().route("/", get(|| async { "running" }))).await;
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_millis(100))
+        .pool_max_idle_per_host(0)
+        .build()
+        .unwrap();
+    assert_eq!(
+        client.get(base_url.clone()).send().await.unwrap().status(),
+        StatusCode::OK
+    );
+    let task = server.abort_handle();
+    drop(server);
+    tokio::time::timeout(
+        std::time::Duration::from_secs(1),
+        std::future::poll_fn(|context| {
+            if task.is_finished() {
+                std::task::Poll::Ready(())
+            } else {
+                context.waker().wake_by_ref();
+                std::task::Poll::Pending
+            }
+        }),
+    )
+    .await
+    .unwrap();
+    assert!(client.get(base_url).send().await.is_err());
+}
+
+async fn start_server(app: Router) -> (reqwest::Url, AbortOnDropHandle<()>) {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     let server = tokio::spawn(async move {
@@ -625,7 +637,7 @@ async fn start_server(app: Router) -> (reqwest::Url, tokio::task::JoinHandle<()>
     });
     (
         reqwest::Url::parse(&format!("http://{address}/")).unwrap(),
-        server,
+        AbortOnDropHandle::new(server),
     )
 }
 

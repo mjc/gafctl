@@ -14,6 +14,7 @@ use gafctl_api::DeviceId;
 use gafctl_protocol::DeviceSnapshot;
 use http_body_util::BodyExt;
 use std::time::{Duration, Instant, SystemTime};
+use tokio_util::task::AbortOnDropHandle;
 use tower::ServiceExt;
 #[derive(Default)]
 pub(super) struct CloudPollFixture {
@@ -68,7 +69,7 @@ pub(super) async fn cloud_poll_fixture(
 ) -> (
     DeviceService,
     Arc<CloudPollFixture>,
-    tokio::task::JoinHandle<()>,
+    AbortOnDropHandle<()>,
     tempfile::TempDir,
 ) {
     let (directory, path) = identity_store_fixture();
@@ -110,7 +111,7 @@ pub(super) async fn cloud_poll_fixture(
 
 pub(super) async fn mock_quickconnect_client() -> (
     gafctl_quickconnect::QuickConnectClient,
-    tokio::task::JoinHandle<()>,
+    AbortOnDropHandle<()>,
 ) {
     let app = Router::new()
         .route("/cognito/login", post(mock_login))
@@ -121,7 +122,7 @@ pub(super) async fn mock_quickconnect_client() -> (
 
 pub(super) async fn mock_duplicate_inventory_client() -> (
     gafctl_quickconnect::QuickConnectClient,
-    tokio::task::JoinHandle<()>,
+    AbortOnDropHandle<()>,
 ) {
     let app = Router::new()
         .route("/cognito/login", post(mock_login))
@@ -205,7 +206,7 @@ pub(crate) async fn refresh_fixture() -> (
     DeviceService,
     DeviceId,
     Arc<RefreshFixture>,
-    tokio::task::JoinHandle<()>,
+    AbortOnDropHandle<()>,
     tempfile::TempDir,
 ) {
     let (directory, path) = identity_store_fixture();

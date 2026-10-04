@@ -89,7 +89,7 @@ mod tests {
 
     #[tokio::test]
     async fn mqtt_refresh_uses_device_reader_and_rechecks_queued_freshness() {
-        let (state, id, fixture, server, _directory) = refresh_fixture().await;
+        let (state, id, fixture, _server, _directory) = refresh_fixture().await;
         let (sender, receiver) = mpsc::channel(2);
         let intake = MqttRequestIntake::new(sender);
         let request = |request_id, issued_at_unix_ms| {
@@ -130,7 +130,6 @@ mod tests {
         assert!(state.state(&id).await.unwrap().available);
         intake.close();
         worker.await.unwrap();
-        server.abort();
     }
 
     #[test]

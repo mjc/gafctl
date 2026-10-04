@@ -14,6 +14,7 @@ use axum::{
     routing::{get, post},
 };
 use serde_json::{Value, json};
+use tokio_util::task::AbortOnDropHandle;
 
 struct ServerProcess(std::process::Child);
 
@@ -228,12 +229,7 @@ async fn control(
 
 struct Running {
     url: String,
-    task: tokio::task::JoinHandle<()>,
-}
-impl Drop for Running {
-    fn drop(&mut self) {
-        self.task.abort();
-    }
+    _task: AbortOnDropHandle<()>,
 }
 
 async fn start(service: Service) -> Running {
@@ -242,12 +238,19 @@ async fn start(service: Service) -> Running {
         .route("/api/v2/devices/configured/state", get(state))
         .route("/api/v2/devices/configured/control", post(control))
         .with_state(service);
+    start_router(app).await
+}
+
+async fn start_router(app: Router) -> Running {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("http://{}", listener.local_addr().unwrap());
     let task = tokio::spawn(async move {
         axum::serve(listener, app).await.unwrap();
     });
-    Running { url, task }
+    Running {
+        url,
+        _task: AbortOnDropHandle::new(task),
+    }
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -372,11 +375,7 @@ async fn unavailable_state_retains_backend_error_in_text_and_json_without_failin
             }))
         }),
     );
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let server = Running {
-        url: format!("http://{}", listener.local_addr().unwrap()),
-        task: tokio::spawn(async move { axum::serve(listener, app).await.unwrap() }),
-    };
+    let server = start_router(app).await;
     for format in ["text", "json"] {
         let url = server.url.clone();
         let output = tokio::task::spawn_blocking(move || {
@@ -414,11 +413,7 @@ async fn json_errors_keep_http_status_and_service_logs_use_stderr() {
         "/api/v2/devices",
         get(|| async { (StatusCode::BAD_GATEWAY, "upstream unavailable") }),
     );
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let url = format!("http://{}", listener.local_addr().unwrap());
-    let task = tokio::spawn(async move {
-        axum::serve(listener, app).await.unwrap();
-    });
+    let Running { url, _task } = start_router(app).await;
     let output = tokio::task::spawn_blocking(move || {
         cargo_bin_cmd!("gafctl")
             .args(["devices", "--format", "json"])
@@ -432,7 +427,6 @@ async fn json_errors_keep_http_status_and_service_logs_use_stderr() {
     })
     .await
     .unwrap();
-    task.abort();
     let value: Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(value["error"]["http_status"], 502);
     assert!(String::from_utf8_lossy(&output.stderr).contains("running control CLI command"));
@@ -444,11 +438,7 @@ async fn empty_inventory_from_environment_is_successful_and_contains_one_newline
         "/api/v2/devices",
         get(|| async { Json(json!({"devices":[]})) }),
     );
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let url = format!("http://{}", listener.local_addr().unwrap());
-    let task = tokio::spawn(async move {
-        axum::serve(listener, app).await.unwrap();
-    });
+    let Running { url, _task } = start_router(app).await;
     let output = tokio::task::spawn_blocking(move || {
         cargo_bin_cmd!("gafctl")
             .args(["devices", "--format", "json"])
@@ -463,7 +453,6 @@ async fn empty_inventory_from_environment_is_successful_and_contains_one_newline
     })
     .await
     .unwrap();
-    task.abort();
     assert_eq!(output, b"{\"devices\":[]}\n");
 }
 
@@ -498,11 +487,7 @@ async fn all_cloud_control_shapes_are_posted_through_the_service() {
                 assert_eq!(request["request_id"].as_str().unwrap().len(),32);
                 Json(json!({"request_id":request["request_id"],"status":"confirmed"}))
             }}));
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let url = format!("http://{}", listener.local_addr().unwrap());
-        let task = tokio::spawn(async move {
-            axum::serve(listener, app).await.unwrap();
-        });
+        let Running { url, _task } = start_router(app).await;
         let output = tokio::task::spawn_blocking(move || {
             cargo_bin_cmd!("gafctl")
                 .args(["control", "qc-local"])
@@ -517,7 +502,6 @@ async fn all_cloud_control_shapes_are_posted_through_the_service() {
         })
         .await
         .unwrap();
-        task.abort();
         let value: Value = serde_json::from_slice(&output).unwrap();
         assert_eq!(value["status"], "confirmed");
         assert_eq!(value["http_status"], 200);
@@ -539,11 +523,7 @@ async fn timed_out_control_keeps_request_id_and_reports_unknown_outcome_without_
             }
         }),
     );
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let url = format!("http://{}", listener.local_addr().unwrap());
-    let task = tokio::spawn(async move {
-        axum::serve(listener, app).await.unwrap();
-    });
+    let Running { url, _task } = start_router(app).await;
     let output = tokio::task::spawn_blocking(move || {
         cargo_bin_cmd!("gafctl")
             .args([
@@ -569,7 +549,6 @@ async fn timed_out_control_keeps_request_id_and_reports_unknown_outcome_without_
     })
     .await
     .unwrap();
-    task.abort();
     let value: Value = serde_json::from_slice(&output).unwrap();
     assert_eq!(value["error"]["kind"], "timeout");
     assert_eq!(value["error"]["request_id"], "uncertain-cli");

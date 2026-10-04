@@ -8,6 +8,7 @@ use std::{
     sync::Arc,
     time::{Duration, SystemTime},
 };
+use tokio_util::task::AbortOnDropHandle;
 use tower::ServiceExt;
 const DEVICE_ID: &str = "configured";
 #[tokio::test]
@@ -33,9 +34,13 @@ async fn graceful_http_shutdown_drains_an_active_request() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     let (stop, shutdown) = tokio::sync::oneshot::channel();
-    let server = tokio::spawn(serve_http_until_shutdown(listener, app, async move {
-        shutdown.await.unwrap();
-    }));
+    let server = AbortOnDropHandle::new(tokio::spawn(serve_http_until_shutdown(
+        listener,
+        app,
+        async move {
+            shutdown.await.unwrap();
+        },
+    )));
     let request = tokio::spawn(async move {
         reqwest::get(format!("http://{address}/blocked"))
             .await

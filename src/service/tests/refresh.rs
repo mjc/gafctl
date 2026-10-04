@@ -32,7 +32,7 @@ async fn refresh_deadline_releases_worker_without_starting_a_second_ble_owner() 
 
 #[tokio::test]
 async fn refresh_survives_cancelled_caller_and_coalesces_overlapping_reads() {
-    let (state, id, fixture, server, _directory) = refresh_fixture().await;
+    let (state, id, fixture, _server, _directory) = refresh_fixture().await;
     let first_state = state.clone();
     let first_id = id.clone();
     let first = tokio::spawn(async move { first_state.refresh_device(&first_id).await });
@@ -54,12 +54,11 @@ async fn refresh_survives_cancelled_caller_and_coalesces_overlapping_reads() {
     let response = state.refresh_device(&id).await.unwrap();
     assert_eq!(response.status, DeviceRefreshStatus::Fresh);
     assert_eq!(fixture.reads.load(std::sync::atomic::Ordering::SeqCst), 2);
-    server.abort();
 }
 
 #[tokio::test]
 async fn refresh_uses_transaction_lock_and_does_not_publish_superseded_read() {
-    let (state, id, fixture, server, _directory) = refresh_fixture().await;
+    let (state, id, fixture, _server, _directory) = refresh_fixture().await;
     let runtime = state.registry.read().await.runtime(&id).unwrap();
     let transaction = runtime.acquire_transaction().await;
     let request = state.refresh_device(&id);
@@ -77,12 +76,11 @@ async fn refresh_uses_transaction_lock_and_does_not_publish_superseded_read() {
     let response = request.await.unwrap();
     assert_eq!(response.status, DeviceRefreshStatus::Superseded);
     assert!(runtime.state().await.is_none());
-    server.abort();
 }
 
 #[tokio::test]
 async fn refresh_route_reports_failed_read_instead_of_reusing_success() {
-    let (state, id, fixture, server, _directory) = refresh_fixture().await;
+    let (state, id, fixture, _server, _directory) = refresh_fixture().await;
     fixture.release.notify_one();
     assert_eq!(
         state.refresh_device(&id).await.unwrap().status,
@@ -108,7 +106,6 @@ async fn refresh_route_reports_failed_read_instead_of_reusing_success() {
     assert_eq!(response.status, DeviceRefreshStatus::Failed);
     assert!(!response.device.available);
     assert!(response.device.last_error.is_some());
-    server.abort();
 }
 
 #[tokio::test]

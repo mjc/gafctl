@@ -13,7 +13,7 @@ use tower::ServiceExt;
 #[cfg(feature = "mqtt")]
 #[tokio::test]
 async fn mqtt_snapshot_collection_serializes_sibling_publications() {
-    let (mut state, id, fixture, server, _directory) = refresh_fixture().await;
+    let (mut state, id, fixture, _server, _directory) = refresh_fixture().await;
     fixture.release.notify_one();
     state.refresh_device(&id).await.unwrap();
     state
@@ -83,7 +83,6 @@ async fn mqtt_snapshot_collection_serializes_sibling_publications() {
         collection_holds_publication_lock,
         "collection allowed concurrent stale publication"
     );
-    server.abort();
 }
 
 #[tokio::test]
