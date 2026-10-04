@@ -161,7 +161,18 @@ pub struct DeviceControlV2Response {
 }
 
 /// Backend outcome. Unrecognized future statuses retain their wire value.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, strum::AsRefStr, strum::Display)]
+#[derive(
+    Clone,
+    Debug,
+    Deserialize,
+    Eq,
+    PartialEq,
+    Serialize,
+    strum::AsRefStr,
+    strum::Display,
+    strum::EnumString,
+    strum::EnumIter,
+)]
 #[serde(from = "String", into = "String")]
 #[strum(serialize_all = "snake_case")]
 pub enum ControlStatus {
@@ -180,7 +191,7 @@ pub enum ControlStatus {
     Busy,
     ControlFailed,
     InvalidRequestId,
-    #[strum(transparent)]
+    #[strum(default, transparent)]
     Unknown(String),
 }
 
@@ -197,30 +208,12 @@ impl ControlStatus {
 
 impl From<String> for ControlStatus {
     fn from(value: String) -> Self {
-        match value.as_str() {
-            "confirmed" => Self::Confirmed,
-            "unconfirmed" => Self::Unconfirmed,
-            "rejected" => Self::Rejected,
-            "submitted_unconfirmed" => Self::SubmittedUnconfirmed,
-            "readback_mismatch" => Self::ReadbackMismatch,
-            "readback_unavailable" => Self::ReadbackUnavailable,
-            "unsupported_command" => Self::UnsupportedCommand,
-            "stale_request" => Self::StaleRequest,
-            "request_id_reused" => Self::RequestIdReused,
-            "unknown_device" => Self::UnknownDevice,
-            "device_unavailable" => Self::DeviceUnavailable,
-            "backend_unavailable" => Self::BackendUnavailable,
-            "busy" => Self::Busy,
-            "control_failed" => Self::ControlFailed,
-            "invalid_request_id" => Self::InvalidRequestId,
-            _ => Self::Unknown(value),
-        }
-    }
-}
-
-impl From<&str> for ControlStatus {
-    fn from(value: &str) -> Self {
-        Self::from(value.to_owned())
+        <Self as strum::IntoEnumIterator>::iter()
+            .find(|status| match status {
+                Self::Unknown(_) => false,
+                status => status.as_ref() == value,
+            })
+            .unwrap_or(Self::Unknown(value))
     }
 }
 

@@ -9,10 +9,10 @@ workspace = true
 
 [dependencies]
 anyhow.workspace = true
+backon = { workspace = true, features = ["std"] }
 btleplug.workspace = true
 bytes.workspace = true
 futures-util.workspace = true
-rand.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["sync", "time"] }
 tracing.workspace = true

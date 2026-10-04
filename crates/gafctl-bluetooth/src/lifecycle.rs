@@ -1,6 +1,7 @@
-use std::{future::Future, ops::RangeInclusive, time::Duration};
+use std::{future::Future, time::Duration};
 
 use anyhow::{Context, Result};
+use backon::{BackoffBuilder, ExponentialBuilder};
 use btleplug::{
     api::{Central as _, Peripheral as _},
     platform::{Adapter, Peripheral},
@@ -12,24 +13,11 @@ use crate::{
     error::{CleanupFailed, cleanup_is_complete},
 };
 
-const CONNECTION_RETRY_CAPS_MS: [u64; 4] = [1_000, 2_000, 4_000, 8_000];
 const CONNECTION_RECOVERY_BUDGET: Duration = Duration::from_secs(20);
 
 pub(super) fn platform_timeout(response_timeout: Duration) -> Duration {
     // BlueZ allows 30 seconds for Connect, then five for service resolution.
     response_timeout.max(Duration::from_secs(40))
-}
-
-fn connection_retry_window(retry_index: usize) -> Option<RangeInclusive<u64>> {
-    CONNECTION_RETRY_CAPS_MS
-        .get(retry_index)
-        .map(|&cap| cap / 2..=cap)
-}
-
-fn connection_retry_delay(retry_index: usize) -> Option<Duration> {
-    connection_retry_window(retry_index)
-        .map(rand::random_range)
-        .map(Duration::from_millis)
 }
 
 fn retry_fits_recovery_budget(elapsed: Duration, delay: Duration) -> bool {
@@ -50,7 +38,13 @@ where
         Err(error) => error,
     };
 
-    for delay in (0..CONNECTION_RETRY_CAPS_MS.len()).filter_map(connection_retry_delay) {
+    for delay in ExponentialBuilder::default()
+        .with_min_delay(Duration::from_millis(500))
+        .with_factor(2.0)
+        .with_max_times(4)
+        .with_jitter()
+        .build()
+    {
         if !ProbeError::is_transient_connect_failure(&failure)
             || !retry_fits_recovery_budget(started.elapsed(), delay)
         {
@@ -184,7 +178,7 @@ pub(super) fn fail_with_cleanup<T>(operation: anyhow::Error, cleanup: Result<()>
 
 #[cfg(test)]
 mod tests {
-    use std::cell::Cell;
+    use std::cell::{Cell, RefCell};
 
     use super::*;
     use futures_util::future;
@@ -233,24 +227,6 @@ mod tests {
 
         assert!(error.to_string().contains("query failed"));
         assert!(error.to_string().contains("disconnect failed"));
-    }
-
-    #[test]
-    fn connection_retry_delays_are_increasing_and_finite() {
-        [500..=1_000, 1_000..=2_000, 2_000..=4_000, 4_000..=8_000]
-            .into_iter()
-            .enumerate()
-            .for_each(|(index, window)| {
-                assert_eq!(connection_retry_window(index).as_ref(), Some(&window));
-                (0..64).for_each(|_| {
-                    let delay = connection_retry_delay(index).expect("retry has a delay");
-                    assert!(
-                        window.contains(&u64::try_from(delay.as_millis()).expect("bounded delay"))
-                    );
-                });
-            });
-        assert_eq!(connection_retry_delay(4), None);
-        assert_eq!(connection_retry_delay(usize::MAX), None);
     }
 
     #[test]
@@ -393,6 +369,30 @@ mod tests {
 
         assert_eq!(connected, 3);
         assert_eq!(attempts.get(), 3);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn connection_retry_jitter_varies_between_recovery_episodes() {
+        let mut schedules = Vec::new();
+        for _ in 0..2 {
+            let started = Instant::now();
+            let attempts = RefCell::new(Vec::new());
+            let error = retry_connection(|| {
+                attempts.borrow_mut().push(started.elapsed());
+                async {
+                    Err::<(), _>(anyhow::Error::new(btleplug::Error::TimedOut(
+                        Duration::ZERO,
+                    )))
+                }
+            })
+            .await
+            .expect_err("each recovery episode exhausts its transient retries");
+            assert!(ProbeError::is_transient_connect_failure(&error));
+            let attempts = attempts.into_inner();
+            assert_eq!(attempts.len(), 5);
+            schedules.push(attempts);
+        }
+        assert_ne!(schedules[0], schedules[1]);
     }
 
     #[tokio::test(start_paused = true)]
