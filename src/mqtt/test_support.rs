@@ -13,9 +13,9 @@ use rumqttc_next::{MqttOptions, MqttOptionsBuilder, Publish};
 use serde_json::json;
 use tokio::{
     net::{TcpListener, TcpStream},
-    sync::mpsc,
     time::{sleep, timeout},
 };
+use tokio_stream::wrappers::UnboundedReceiverStream;
 
 use super::MqttConfig;
 pub(super) use super::connection::observed_client;
@@ -89,14 +89,10 @@ pub(super) fn test_mqtt_options(client_id: &str, port: u16) -> MqttOptions {
 }
 
 pub(super) async fn receive_topic(
-    received: &mut mpsc::UnboundedReceiver<Publish>,
+    received: &mut UnboundedReceiverStream<Publish>,
     topic: &str,
 ) -> Publish {
-    let messages = stream::unfold(received, |received| async {
-        received.recv().await.map(|message| (message, received))
-    })
-    .filter(|message| future::ready(message.topic == topic));
-    tokio::pin!(messages);
+    let mut messages = received.filter(|message| future::ready(message.topic == topic));
     timeout(Duration::from_secs(15), messages.next())
         .await
         .expect("timed out waiting for MQTT publication")

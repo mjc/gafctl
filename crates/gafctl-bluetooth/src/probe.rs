@@ -7,7 +7,7 @@ use btleplug::{
     platform::{Adapter, Manager, Peripheral},
 };
 use gafctl_protocol::ControlCommand;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, OnceCell};
 
 use crate::{
     ProbeError, ProbeMode, ProbeOptions, ProbeResult,
@@ -30,7 +30,7 @@ pub struct ProbeClient {
 
 #[derive(Default)]
 struct BleBackend {
-    manager: Option<Manager>,
+    manager: OnceCell<Manager>,
     adapter: Option<Adapter>,
     pending_disconnect: Option<Peripheral>,
     scan_pending: bool,
@@ -77,15 +77,16 @@ impl BleBackend {
             }
             *scan_pending = false;
         }
-        let manager = get_or_init(manager, || async {
-            complete_before(
-                platform_timeout(options.response_timeout),
-                "create Bluetooth manager",
-                async { Manager::new().await.context("create Bluetooth manager") },
-            )
-            .await
-        })
-        .await?;
+        let manager = manager
+            .get_or_try_init(|| async {
+                complete_before(
+                    platform_timeout(options.response_timeout),
+                    "create Bluetooth manager",
+                    async { Manager::new().await.context("create Bluetooth manager") },
+                )
+                .await
+            })
+            .await?;
 
         // BlueZ can replace its adapter object after it disappears. Enumerating
         // through the retained manager refreshes that handle without opening a
@@ -117,17 +118,6 @@ async fn finish_without_cancelling<T: Send + 'static>(
     tokio::spawn(operation)
         .await
         .context("BLE operation task failed")?
-}
-
-async fn get_or_init<T, E, F, Fut>(slot: &mut Option<T>, initialize: F) -> Result<&mut T, E>
-where
-    F: FnOnce() -> Fut,
-    Fut: Future<Output = Result<T, E>>,
-{
-    if slot.is_none() {
-        *slot = Some(initialize().await?);
-    }
-    Ok(slot.as_mut().expect("slot initialized above"))
 }
 
 impl Default for ProbeClient {
@@ -219,10 +209,6 @@ async fn query_selected_device(
 
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::{AtomicUsize, Ordering};
-
-    use super::get_or_init;
-
     #[tokio::test]
     async fn idle_wait_drains_cleanup_after_the_caller_is_cancelled() {
         let client = std::sync::Arc::new(super::ProbeClient::new());
@@ -272,62 +258,5 @@ mod tests {
         finish.send(()).unwrap();
         did_complete.await.unwrap();
         let _guard = backend.lock().await;
-    }
-
-    #[tokio::test]
-    async fn manager_initialization_is_retained_across_adapter_failures() {
-        let manager_creations = AtomicUsize::new(0);
-        let mut manager = None;
-        let mut adapter = None;
-
-        get_or_init(&mut manager, || async {
-            manager_creations.fetch_add(1, Ordering::SeqCst);
-            Ok::<_, &'static str>("manager")
-        })
-        .await
-        .unwrap();
-
-        let failed_adapter = get_or_init(&mut adapter, || async {
-            Err::<(), _>("adapter unavailable")
-        })
-        .await;
-        assert_eq!(failed_adapter, Err("adapter unavailable"));
-
-        get_or_init(&mut manager, || async {
-            manager_creations.fetch_add(1, Ordering::SeqCst);
-            Ok::<_, &'static str>("replacement manager")
-        })
-        .await
-        .unwrap();
-        get_or_init(&mut adapter, || async { Ok::<_, &'static str>(()) })
-            .await
-            .unwrap();
-
-        assert_eq!(manager_creations.load(Ordering::SeqCst), 1);
-        assert_eq!(manager, Some("manager"));
-        assert_eq!(adapter, Some(()));
-    }
-
-    #[tokio::test]
-    async fn failed_manager_initialization_can_be_retried() {
-        let manager_creations = AtomicUsize::new(0);
-        let mut manager = None;
-
-        let failed = get_or_init(&mut manager, || async {
-            manager_creations.fetch_add(1, Ordering::SeqCst);
-            Err::<(), _>("manager unavailable")
-        })
-        .await;
-        assert_eq!(failed, Err("manager unavailable"));
-
-        get_or_init(&mut manager, || async {
-            manager_creations.fetch_add(1, Ordering::SeqCst);
-            Ok::<_, &'static str>(())
-        })
-        .await
-        .unwrap();
-
-        assert_eq!(manager_creations.load(Ordering::SeqCst), 2);
-        assert_eq!(manager, Some(()));
     }
 }

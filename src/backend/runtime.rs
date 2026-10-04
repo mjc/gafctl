@@ -241,9 +241,7 @@ impl DeviceRuntime {
 
     pub async fn wait_for_control_change(&self, generation: u64) {
         let mut changed = self.control_changed.subscribe();
-        if *changed.borrow_and_update() == generation {
-            let _ = changed.changed().await;
-        }
+        let _ = changed.wait_for(|current| *current != generation).await;
     }
 
     pub async fn set_control_state_if_current(&self, generation: u64, state: DeviceState) -> bool {

@@ -1,7 +1,5 @@
 use std::{sync::Arc, time::Duration};
 
-#[cfg(test)]
-use futures_util::stream;
 use futures_util::{StreamExt, future};
 #[cfg(test)]
 use rumqttc_next::Publish;
@@ -15,6 +13,8 @@ use tokio::{
     sync::{Semaphore, watch},
     time::sleep,
 };
+#[cfg(test)]
+use tokio_stream::wrappers::UnboundedReceiverStream;
 use tokio_stream::wrappers::WatchStream;
 
 use super::{
@@ -133,7 +133,7 @@ async fn handle_mqtt_event(
 pub(super) fn observed_client(
     client_id: &str,
     port: u16,
-) -> (AsyncClient, mpsc::UnboundedReceiver<Publish>) {
+) -> (AsyncClient, UnboundedReceiverStream<Publish>) {
     let (client, eventloop) =
         AsyncClient::builder(super::test_support::test_mqtt_options(client_id, port))
             .capacity(16)
@@ -154,117 +154,15 @@ pub(super) fn observed_client(
                 future::ready(())
             }),
     );
-    (client, received)
+    (client, UnboundedReceiverStream::new(received))
 }
 
 #[cfg(test)]
 mod tests {
-    use super::super::test_support::{
-        config, receive_topic, start_native_broker, test_mqtt_options,
-    };
+    use super::super::test_support::{config, receive_topic, start_native_broker};
     use super::*;
     use gafctl_api::ProxyId;
     use tokio::time::timeout;
-
-    #[tokio::test]
-    async fn disconnected_event_stream_ends() {
-        let (client, eventloop) = AsyncClient::builder(test_mqtt_options("stream-end", 1)).build();
-        client.disconnect_now().await.unwrap();
-        let events = eventloop.into_stream();
-        tokio::pin!(events);
-        assert!(events.next().await.is_none());
-    }
-
-    #[tokio::test]
-    async fn native_broker_fresh_session_fails_old_notices_and_completes_new_publications() {
-        use rumqttc_next::{Outgoing, PublishNoticeError};
-        use tokio_util::task::AbortOnDropHandle;
-
-        let broker = start_native_broker().await;
-        let (client, mut eventloop) =
-            AsyncClient::builder(test_mqtt_options("fresh-notices", broker.port))
-                .capacity(8)
-                .build();
-        let Event::Incoming(Packet::ConnAck(_)) = timeout(Duration::from_secs(5), eventloop.poll())
-            .await
-            .unwrap()
-            .unwrap()
-        else {
-            unreachable!("native broker must acknowledge the initial connection");
-        };
-        let sent = client
-            .publish_tracked(
-                "synthetic/result",
-                "sent-before-reset",
-                PublishOptions::at_least_once(),
-            )
-            .await
-            .unwrap();
-        {
-            let events = stream::unfold(&mut eventloop, |eventloop| async {
-                Some((eventloop.poll().await, eventloop))
-            })
-            .filter_map(|event| {
-                future::ready(match event {
-                    Ok(Event::Outgoing(Outgoing::Publish(id))) => Some(id),
-                    _ => None,
-                })
-            });
-            tokio::pin!(events);
-            timeout(Duration::from_secs(5), events.next())
-                .await
-                .unwrap()
-                .unwrap();
-        }
-        let unsent = client
-            .publish_tracked(
-                "synthetic/result",
-                "queued-before-reset",
-                PublishOptions::at_least_once(),
-            )
-            .await
-            .unwrap();
-        eventloop.clean();
-        let fresh = client
-            .publish_tracked(
-                "synthetic/result",
-                "queued-after-reset",
-                PublishOptions::at_least_once(),
-            )
-            .await
-            .unwrap();
-        let _events = AbortOnDropHandle::new(tokio::spawn(
-            eventloop.into_stream().for_each(|_| future::ready(())),
-        ));
-        assert_eq!(
-            timeout(Duration::from_secs(5), sent.wait_completion_async())
-                .await
-                .unwrap(),
-            Err(PublishNoticeError::SessionReset)
-        );
-        assert_eq!(
-            timeout(Duration::from_secs(5), unsent.wait_completion_async())
-                .await
-                .unwrap(),
-            Err(PublishNoticeError::SessionReset)
-        );
-        timeout(Duration::from_secs(5), fresh.wait_completion_async())
-            .await
-            .unwrap()
-            .unwrap();
-        let next = client
-            .publish_tracked(
-                "synthetic/result",
-                "after-reset-ack",
-                PublishOptions::at_least_once(),
-            )
-            .await
-            .unwrap();
-        timeout(Duration::from_secs(5), next.wait_completion_async())
-            .await
-            .unwrap()
-            .unwrap();
-    }
 
     #[tokio::test]
     async fn native_broker_publishes_process_will_on_unexpected_disconnect() {

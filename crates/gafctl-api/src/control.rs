@@ -32,10 +32,6 @@ impl CommandId {
     fn from_str(value: &str) -> Option<Self> {
         Self::is_valid(value).then(|| Self(Arc::from(value)))
     }
-
-    fn from_string(value: String) -> Option<Self> {
-        Self::is_valid(&value).then(|| Self(Arc::from(value)))
-    }
 }
 
 impl<'de> Deserialize<'de> for CommandId {
@@ -52,25 +48,11 @@ impl<'de> Deserialize<'de> for CommandId {
                 formatter.write_str("a 1-64 character ASCII request ID")
             }
 
-            fn visit_borrowed_str<E>(self, value: &'de str) -> Result<Self::Value, E>
-            where
-                E: de::Error,
-            {
-                self.visit_str(value)
-            }
-
             fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
             where
                 E: de::Error,
             {
                 CommandId::from_str(value).ok_or_else(|| E::custom("invalid control request ID"))
-            }
-
-            fn visit_string<E>(self, value: String) -> Result<Self::Value, E>
-            where
-                E: de::Error,
-            {
-                CommandId::from_string(value).ok_or_else(|| E::custom("invalid control request ID"))
             }
         }
 
@@ -121,16 +103,20 @@ pub fn is_fresh_at(
     }
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, strum::IntoStaticStr)]
 #[serde(rename_all = "snake_case")]
 pub enum ControlPreset {
     #[serde(rename = "automatic105_f30_percent")]
+    #[strum(serialize = "automatic105_f30_percent")]
     Automatic105F30Percent,
     #[serde(rename = "automatic105_1_f30_1_percent")]
+    #[strum(serialize = "automatic105_1_f30_1_percent")]
     Automatic105_1F30_1Percent,
     #[serde(rename = "timer_clear")]
+    #[strum(serialize = "timer_clear")]
     TimerClear,
     #[serde(rename = "timer_one_minute")]
+    #[strum(serialize = "timer_one_minute")]
     TimerOneMinute,
 }
 
@@ -151,15 +137,6 @@ impl ControlPreset {
             }
             Self::TimerClear => ControlCommand::SetTimer(Minutes::new(0)),
             Self::TimerOneMinute => ControlCommand::SetTimer(Minutes::new(1)),
-        }
-    }
-
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Automatic105F30Percent => "automatic105_f30_percent",
-            Self::Automatic105_1F30_1Percent => "automatic105_1_f30_1_percent",
-            Self::TimerClear => "timer_clear",
-            Self::TimerOneMinute => "timer_one_minute",
         }
     }
 

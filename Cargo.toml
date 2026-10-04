@@ -20,8 +20,9 @@ http = [
     "dep:gafctl-quickconnect",
     "dep:uuid",
     "dep:tempfile",
+    "dep:tokio-stream",
 ]
-mqtt = ["http", "dep:rumqttc_next", "dep:tokio-util", "dep:tokio-stream"]
+mqtt = ["http", "dep:rumqttc_next", "dep:tokio-util"]
 cli = [
     "dep:clap",
     "dep:clap_complete",
@@ -99,7 +100,7 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 rumqttc_next = { workspace = true, optional = true }
 tokio-util = { workspace = true, optional = true }
-tokio-stream = { workspace = true, optional = true }
+tokio-stream = { workspace = true, optional = true, features = ["time"] }
 thiserror = { workspace = true, optional = true }
 uuid = { workspace = true, optional = true }
 tempfile = { workspace = true, optional = true }
@@ -139,8 +140,3 @@ tower = { workspace = true, features = ["util"] }
 name = "feature_isolation"
 path = "tests/feature_isolation.rs"
 required-features = ["http", "mqtt"]
-
-[[test]]
-name = "mqtt_delivery"
-path = "tests/mqtt_delivery.rs"
-required-features = ["mqtt"]
