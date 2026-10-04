@@ -524,9 +524,9 @@ checksum = "1d674e81391d1e1ab681a28d99df07927c6d4aa5b027d7da16ba32d1d21ecd99"
 
 [[package]]
 name = "flume"
-version = "0.11.1"
+version = "0.12.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "da0e4dd2a88388a1f4ccc7c9ce104604dab68d9f408dc34cd45823d5a9069095"
+checksum = "5e139bc46ca777eb5efaf62df0ab8cc5fd400866427e56c68b22e414e53bd3be"
 dependencies = [
  "futures-core",
  "futures-sink",
@@ -654,12 +654,13 @@ dependencies = [
  "gafctl-quickconnect",
  "http-body-util",
  "reqwest",
- "rumqttc",
+ "rumqttc-next",
  "serde",
  "serde_json",
  "tempfile",
  "thiserror",
  "tokio",
+ "tokio-stream",
  "tokio-util",
  "tower",
  "tracing",
@@ -1191,6 +1192,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "mqttbytes-core-next"
+version = "0.34.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "366b6ba2b4209ca4bc5ac731ccddf570d09831981eed07e5fbd63564cf0cf1aa"
+dependencies = [
+ "bytes",
+ "thiserror",
+]
+
+[[package]]
 name = "nu-ansi-term"
 version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1586,19 +1597,40 @@ dependencies = [
 ]
 
 [[package]]
-name = "rumqttc"
-version = "0.25.1"
+name = "rumqttc-core-next"
+version = "0.34.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0feff8d882bff0b2fddaf99355a10336d43dd3ed44204f85ece28cf9626ab519"
+checksum = "249896ab27ed630590971738264baa8f722f18965d2e387c706c40a3c2a572cc"
+dependencies = [
+ "thiserror",
+ "tokio",
+]
+
+[[package]]
+name = "rumqttc-next"
+version = "0.34.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "477c9bbfba8f3aecc7aad31c6de2eacb75822efaa18e7aeecb8d3d8e534fbf07"
+dependencies = [
+ "rumqttc-v5-next",
+]
+
+[[package]]
+name = "rumqttc-v5-next"
+version = "0.34.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3dfa6ddcc7a7dd5688f9bf78d8f81cb94f367bce56c055d8d94cf81ecb0518bf"
 dependencies = [
  "bytes",
  "fixedbitset",
  "flume",
+ "futures-core",
  "futures-util",
  "log",
+ "mqttbytes-core-next",
+ "rumqttc-core-next",
  "thiserror",
  "tokio",
- "tokio-stream",
  "tokio-util",
 ]
 

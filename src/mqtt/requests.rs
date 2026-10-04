@@ -1,19 +1,21 @@
 use std::{
+    future::Future,
     sync::{Arc, Mutex},
     time::Duration,
 };
 
 use futures_util::{StreamExt, stream};
 use gafctl_api::{CommandId, DeviceControlV2Request, DeviceControlV2Response};
-use rumqttc::v5::mqttbytes::v5::Publish;
 use serde::{Deserialize, Serialize};
 use tokio::{
     sync::{OwnedSemaphorePermit, Semaphore, mpsc, oneshot},
+    task::JoinSet,
     time::timeout,
 };
 
-use super::connection::MqttConnection;
+use super::topics::Topics;
 use gafctl_api::DeviceId;
+use rumqttc_next::{AsyncClient, Publish, PublishOptions};
 
 pub(crate) const CONTROL_QUEUE_CAPACITY: usize = 8;
 pub(super) const MAX_PENDING_CONTROL_RESULTS: usize = 32;
@@ -127,7 +129,7 @@ pub(crate) struct MqttRequestIntake {
 
 struct IntakeState {
     sender: Option<mpsc::Sender<MqttDeviceWork>>,
-    replies: Vec<tokio::task::JoinHandle<()>>,
+    replies: JoinSet<()>,
 }
 
 impl MqttRequestIntake {
@@ -135,7 +137,7 @@ impl MqttRequestIntake {
         Self {
             state: Arc::new(Mutex::new(IntakeState {
                 sender: Some(sender),
-                replies: Vec::new(),
+                replies: JoinSet::new(),
             })),
         }
     }
@@ -149,36 +151,38 @@ impl MqttRequestIntake {
     }
 
     pub(crate) async fn drain_replies(&self, deadline: tokio::time::Instant) {
-        let replies = {
+        let mut replies = {
             let mut state = self.state.lock().expect("MQTT intake lock poisoned");
             std::mem::take(&mut state.replies)
         };
-        stream::iter(replies)
-            .for_each(|mut reply| async move {
-                if tokio::time::timeout_at(deadline, &mut reply).await.is_err() {
-                    reply.abort();
-                    let _ = reply.await;
-                    tracing::warn!("MQTT reply acknowledgement deadline exceeded");
-                }
-            })
-            .await;
+        if tokio::time::timeout_at(
+            deadline,
+            stream::poll_fn(|cx| replies.poll_join_next(cx)).for_each(|_| std::future::ready(())),
+        )
+        .await
+        .is_err()
+        {
+            replies.shutdown().await;
+            tracing::warn!("MQTT reply acknowledgement deadline exceeded");
+        }
     }
 
-    fn try_send_with_reply(
+    fn try_send_with_reply<F>(
         &self,
         work: MqttDeviceWork,
-        spawn_reply: impl FnOnce() -> tokio::task::JoinHandle<()>,
-    ) -> Result<(), mpsc::error::TrySendError<MqttDeviceWork>> {
+        reply: impl FnOnce() -> F,
+    ) -> Result<(), mpsc::error::TrySendError<MqttDeviceWork>>
+    where
+        F: Future<Output = ()> + Send + 'static,
+    {
         let mut state = self.state.lock().expect("MQTT intake lock poisoned");
         let Some(sender) = state.sender.as_ref() else {
             return Err(mpsc::error::TrySendError::Closed(work));
         };
         sender.try_send(work)?;
-        // Keep admission locked until the accepted request's publisher is owned.
-        // close() therefore fences both work admission and reply registration.
-        let reply = spawn_reply();
-        state.replies.retain(|task| !task.is_finished());
-        state.replies.push(reply);
+        // Admission and reply ownership share the close() fence.
+        std::iter::from_fn(|| state.replies.try_join_next()).for_each(drop);
+        state.replies.spawn(reply());
         Ok(())
     }
 
@@ -195,8 +199,65 @@ impl MqttRequestIntake {
     }
 }
 
+async fn publish_result(
+    client: &AsyncClient,
+    topics: Topics,
+    device: &DeviceId,
+    response: &MqttReply,
+) {
+    let payload = match serde_json::to_vec(response) {
+        Ok(payload) => payload,
+        Err(error) => {
+            tracing::error!(%error, "could not serialize MQTT control result");
+            return;
+        }
+    };
+    match client
+        .publish_tracked(
+            topics.device(device, response.kind().result_suffix()),
+            payload,
+            PublishOptions::at_least_once(),
+        )
+        .await
+    {
+        Ok(notice) => {
+            if let Err(error) = notice.wait_completion_async().await {
+                tracing::warn!(%error, "could not acknowledge MQTT control result");
+            }
+        }
+        Err(error) => tracing::warn!(%error, "could not enqueue MQTT control result"),
+    }
+}
+
+fn reject(
+    client: &AsyncClient,
+    topics: Topics,
+    device: &DeviceId,
+    request: &MqttRequest,
+    status: &'static str,
+) {
+    let response = MqttReply::Rejected {
+        request_id: request.request_id().clone(),
+        status,
+        kind: request.kind(),
+    };
+    match serde_json::to_vec(&response) {
+        Ok(payload) => {
+            if let Err(error) = client.try_publish(
+                topics.device(device, response.kind().result_suffix()),
+                payload,
+                PublishOptions::at_least_once(),
+            ) {
+                tracing::warn!(%error, "could not enqueue MQTT control rejection");
+            }
+        }
+        Err(error) => tracing::error!(%error, "could not serialize MQTT control rejection"),
+    }
+}
+
 pub(super) fn dispatch_request(
-    connection: &MqttConnection,
+    client: &AsyncClient,
+    topics: Topics,
     controls: &MqttRequestIntake,
     pending_results: &Arc<Semaphore>,
     device: DeviceId,
@@ -207,22 +268,23 @@ pub(super) fn dispatch_request(
         return;
     };
     if message.retain {
-        connection.reject(&device, &request, "retained_request");
+        reject(client, topics, &device, &request, "retained_request");
         return;
     }
     if !crate::service::control::v2_request_is_fresh(request.issued_at_unix_ms()) {
-        connection.reject(&device, &request, "stale_request");
+        reject(client, topics, &device, &request, "stale_request");
         return;
     }
     let Ok(permit) = Arc::clone(pending_results).try_acquire_owned() else {
-        connection.reject(&device, &request, "control_results_busy");
+        reject(client, topics, &device, &request, "control_results_busy");
         return;
     };
-    enqueue_control(connection, controls, device, request, permit);
+    enqueue_control(client, topics, controls, device, request, permit);
 }
 
 fn enqueue_control(
-    connection: &MqttConnection,
+    client: &AsyncClient,
+    topics: Topics,
     controls: &MqttRequestIntake,
     device: DeviceId,
     request: MqttRequest,
@@ -240,28 +302,25 @@ fn enqueue_control(
             request,
             reply,
         },
-        || {
-            tokio::spawn(publish_control_reply(
-                connection.clone(),
-                device,
-                response,
-                uncertain,
-                permit,
-            ))
-        },
+        || publish_control_reply(client.clone(), topics, device, response, uncertain, permit),
     ) {
         Ok(()) => {}
         Err(mpsc::error::TrySendError::Full(work)) => {
-            connection.reject(&work.device_id, &work.request, "queue_full")
+            reject(client, topics, &work.device_id, &work.request, "queue_full")
         }
-        Err(mpsc::error::TrySendError::Closed(work)) => {
-            connection.reject(&work.device_id, &work.request, "control_worker_unavailable")
-        }
+        Err(mpsc::error::TrySendError::Closed(work)) => reject(
+            client,
+            topics,
+            &work.device_id,
+            &work.request,
+            "control_worker_unavailable",
+        ),
     }
 }
 
 async fn publish_control_reply(
-    connection: MqttConnection,
+    client: AsyncClient,
+    topics: Topics,
     device: DeviceId,
     response: oneshot::Receiver<MqttReply>,
     uncertain: MqttReply,
@@ -270,7 +329,7 @@ async fn publish_control_reply(
     let result = wait_for_device_reply(response, uncertain).await;
     if timeout(
         Duration::from_secs(30),
-        connection.publish_result(&device, &result),
+        publish_result(&client, topics, &device, &result),
     )
     .await
     .is_err()
@@ -295,14 +354,14 @@ mod tests {
         start,
         test_support::{
             config, mqtt_device, observed_client, receive_topic, request, snapshot,
-            start_native_broker, test_connection,
+            start_native_broker,
         },
         topics::Topics,
     };
     use super::*;
     use gafctl_api::ProxyId;
     use gafctl_api::unix_millis;
-    use rumqttc::v5::{AsyncClient, MqttOptions, mqttbytes::QoS};
+    use rumqttc_next::{MqttOptions, QoS};
     use serde_json::{Value, json};
     use std::time::SystemTime;
 
@@ -478,15 +537,14 @@ mod tests {
         let (release, released) = std::sync::mpsc::channel();
         let (published, publication) = oneshot::channel();
         let admitting = intake.clone();
-        let runtime = tokio::runtime::Handle::current();
         let admission = tokio::task::spawn_blocking(move || {
             admitting
                 .try_send_with_reply(work, || {
                     entered.send(()).unwrap();
                     released.recv().unwrap();
-                    runtime.spawn(async {
+                    async {
                         publication.await.unwrap();
-                    })
+                    }
                 })
                 .unwrap();
         });
@@ -512,16 +570,44 @@ mod tests {
         drain.await;
     }
 
+    #[tokio::test(start_paused = true)]
+    async fn dropping_intake_cancels_pending_device_replies() {
+        let (client, _event_loop) =
+            AsyncClient::builder(MqttOptions::new("test", ("localhost", 1883)))
+                .capacity(1)
+                .build();
+        let (sender, mut queued) = mpsc::channel(1);
+        let intake = MqttRequestIntake::new(sender);
+        dispatch_request(
+            &client,
+            Topics(ProxyId::default()),
+            &intake,
+            &Arc::new(Semaphore::new(1)),
+            DeviceId::configured_ble(),
+            RequestKind::Control,
+            Publish::new("unused", QoS::AtLeastOnce, request("cancelled"), None),
+        );
+        let mut work = queued.recv().await.expect("control was admitted");
+        drop(intake);
+        timeout(Duration::from_secs(1), work.reply.closed())
+            .await
+            .expect("dropping intake must cancel its pending reply task");
+    }
+
     #[tokio::test]
     async fn stalled_results_bound_accepted_controls() {
-        let (client, eventloop) = AsyncClient::new(MqttOptions::new("test", "localhost", 1883), 1);
-        let (connection, _publisher) = test_connection(client, Topics(ProxyId::default()));
+        let (client, eventloop) =
+            AsyncClient::builder(MqttOptions::new("test", ("localhost", 1883)))
+                .capacity(1)
+                .build();
+        let topics = Topics(ProxyId::default());
         let (controls, mut queued) = mpsc::channel(CONTROL_QUEUE_CAPACITY);
         let controls = MqttRequestIntake::new(controls);
         let pending = Arc::new(Semaphore::new(2));
         for index in 0..2 {
             dispatch_request(
-                &connection,
+                &client,
+                topics,
                 &controls,
                 &pending,
                 DeviceId::configured_ble(),
@@ -544,7 +630,8 @@ mod tests {
             tokio::task::yield_now().await;
         }
         dispatch_request(
-            &connection,
+            &client,
+            topics,
             &controls,
             &pending,
             DeviceId::configured_ble(),
@@ -577,9 +664,8 @@ mod tests {
         observer
             .publish(
                 topics.device(&device.id, "control/set"),
-                QoS::AtLeastOnce,
-                true,
                 request("retained"),
+                PublishOptions::at_least_once().retained(),
             )
             .await
             .unwrap();
@@ -593,9 +679,8 @@ mod tests {
         observer
             .publish(
                 topics.device(&device.id, "control/set"),
-                QoS::AtLeastOnce,
-                false,
                 serde_json::to_vec(&stale).unwrap(),
+                PublishOptions::at_least_once(),
             )
             .await
             .unwrap();
@@ -608,9 +693,8 @@ mod tests {
         observer
             .publish(
                 topics.device(&device.id, "control/set"),
-                QoS::AtLeastOnce,
-                false,
                 request("confirmed"),
+                PublishOptions::at_least_once(),
             )
             .await
             .unwrap();
@@ -656,9 +740,8 @@ mod tests {
         observer
             .publish(
                 topics.device(&device.id, "control/set"),
-                QoS::AtLeastOnce,
-                false,
                 request("shutdown-reply"),
+                PublishOptions::at_least_once(),
             )
             .await
             .unwrap();
@@ -723,12 +806,11 @@ mod tests {
             observer
                 .publish(
                     topics.device(&device.id, "refresh/set"),
-                    QoS::AtLeastOnce,
-                    retain,
                     serde_json::to_vec(
                         &json!({"request_id":request_id,"issued_at_unix_ms":issued_at_unix_ms}),
                     )
                     .unwrap(),
+                    PublishOptions::at_least_once().retain(retain),
                 )
                 .await
                 .unwrap();
@@ -738,8 +820,18 @@ mod tests {
             assert_eq!(result["status"], expected);
             assert!(bridge.device_requests.try_recv().is_err());
         }
-        observer.publish(topics.device(&device.id, "refresh/set"), QoS::AtLeastOnce, false,
-            serde_json::to_vec(&json!({"request_id":"read-confirmed","issued_at_unix_ms":unix_millis(SystemTime::now()).unwrap()})).unwrap()).await.unwrap();
+        observer
+            .publish(
+                topics.device(&device.id, "refresh/set"),
+                serde_json::to_vec(&json!({
+                    "request_id":"read-confirmed",
+                    "issued_at_unix_ms":unix_millis(SystemTime::now()).unwrap()
+                }))
+                .unwrap(),
+                PublishOptions::at_least_once(),
+            )
+            .await
+            .unwrap();
         let work = timeout(Duration::from_secs(5), bridge.device_requests.recv())
             .await
             .unwrap()
