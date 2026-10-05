@@ -88,6 +88,22 @@ fn api_roots_require_tls_except_for_loopback_http() {
     let localhost = reqwest::Url::parse("http://localhost:8080/root/").unwrap();
     let public_http = reqwest::Url::parse("http://api.example.invalid/root/").unwrap();
     let other_scheme = reqwest::Url::parse("ftp://api.example.invalid/root/").unwrap();
+    let nested = reqwest::Url::parse("https://api.example.invalid/nested/root/").unwrap();
+    let file_base = reqwest::Url::parse("https://api.example.invalid/nested/root").unwrap();
+
+    assert!(
+        QuickConnectClient::new(
+            credentials(),
+            QuickConnectConfig::new(nested.clone(), nested.clone()),
+        )
+        .is_ok()
+    );
+    for (auth, device) in [(file_base.clone(), nested.clone()), (nested, file_base)] {
+        assert_eq!(
+            QuickConnectClient::new(credentials(), QuickConnectConfig::new(auth, device)).err(),
+            Some(gafctl_quickconnect::ClientError::InvalidEndpoint)
+        );
+    }
 
     assert!(
         QuickConnectClient::new(
@@ -236,42 +252,38 @@ async fn transient_failures_do_not_reset_the_single_reauthentication_allowance()
 
 #[tokio::test]
 async fn malformed_oversized_and_application_error_responses_are_distinct() {
-    let app = Router::new()
-        .route("/cognito/login", post(successful_login))
-        .route("/gaf/device/deviceList", get(valid_empty_inventory))
-        .route("/gaf/device/bad-json", get(malformed_json))
-        .route("/gaf/device/large", get(oversized_json))
-        .route("/gaf/device/service-error", get(service_error));
-    let (base_url, _server) = start_server(app).await;
-    let credentials = Credentials::new("user", "password", AccountRole::Contractor);
-    let client = QuickConnectClient::new(
-        credentials,
-        QuickConnectConfig::new(
-            base_url.join("cognito/").unwrap(),
-            base_url.join("gaf/").unwrap(),
+    for (response, expected) in [
+        (
+            get(malformed_json),
+            gafctl_quickconnect::ClientError::InvalidJson,
+        ),
+        (
+            get(oversized_json),
+            gafctl_quickconnect::ClientError::ResponseTooLarge(128),
+        ),
+        (
+            get(service_error),
+            gafctl_quickconnect::ClientError::ServiceStatus(4444),
+        ),
+    ] {
+        let app = Router::new()
+            .route("/cognito/login", post(successful_login))
+            .route("/gaf/device/deviceList", response);
+        let (base_url, _server) = start_server(app).await;
+        let credentials = Credentials::new("user", "password", AccountRole::Contractor);
+        let client = QuickConnectClient::new(
+            credentials,
+            QuickConnectConfig::new(
+                base_url.join("cognito/").unwrap(),
+                base_url.join("gaf/").unwrap(),
+            )
+            .with_max_response_bytes(128),
         )
-        .with_max_response_bytes(128),
-    )
-    .unwrap();
-
-    assert_eq!(
-        client.get_json("device/bad-json").await.unwrap_err(),
-        gafctl_quickconnect::ClientError::InvalidJson
-    );
-    assert_eq!(
-        client.get_json("device/large").await.unwrap_err(),
-        gafctl_quickconnect::ClientError::ResponseTooLarge(128)
-    );
-    let service_error = client.get_json("device/service-error").await.unwrap_err();
-    assert_eq!(
-        service_error,
-        gafctl_quickconnect::ClientError::ServiceStatus(4444)
-    );
-    assert!(
-        !service_error
-            .to_string()
-            .contains("private service response")
-    );
+        .unwrap();
+        let error = client.list_devices().await.unwrap_err();
+        assert_eq!(error, expected);
+        assert!(!error.to_string().contains("private service response"));
+    }
 }
 
 #[tokio::test]
@@ -285,44 +297,13 @@ async fn settings_rejection_keeps_the_provider_service_status() {
         Credentials::new("user", "password", AccountRole::Contractor),
     );
 
+    let prepared = client.prepare_settings_write().await.unwrap();
     assert_eq!(
         client
-            .save_device_settings("fan", &typed_settings_body())
+            .save_device_settings_prepared("fan", &typed_settings_body(), prepared)
             .await
             .unwrap_err(),
         gafctl_quickconnect::ClientError::ServiceStatus(4444)
-    );
-}
-
-#[tokio::test]
-async fn untrusted_paths_cannot_change_the_api_origin() {
-    let (base_url, _server) = start_server(Router::new()).await;
-    let client = test_client(
-        base_url,
-        Credentials::new("user", "password", AccountRole::Contractor),
-    );
-
-    assert_eq!(
-        client
-            .get_json(r"\\attacker.example/collect")
-            .await
-            .unwrap_err(),
-        gafctl_quickconnect::ClientError::InvalidEndpoint
-    );
-    assert_eq!(
-        client
-            .get_json("//attacker.example/collect")
-            .await
-            .unwrap_err(),
-        gafctl_quickconnect::ClientError::InvalidEndpoint
-    );
-    assert_eq!(
-        client.get_json(" /device/deviceList").await.unwrap_err(),
-        gafctl_quickconnect::ClientError::InvalidEndpoint
-    );
-    assert_eq!(
-        client.get_json("device/%2e%2e/collect").await.unwrap_err(),
-        gafctl_quickconnect::ClientError::InvalidEndpoint
     );
 }
 
@@ -472,9 +453,10 @@ async fn reads_retry_bounded_server_errors_and_writes_are_never_retried() {
 
     assert!(client.list_devices().await.is_ok());
     assert_eq!(read_count.load(Ordering::SeqCst), 3);
+    let prepared = client.prepare_settings_write().await.unwrap();
     assert_eq!(
         client
-            .save_device_settings("fan", &typed_settings_body())
+            .save_device_settings_prepared("fan", &typed_settings_body(), prepared)
             .await
             .unwrap_err(),
         gafctl_quickconnect::ClientError::HttpStatus(500)
@@ -528,9 +510,10 @@ async fn timed_out_settings_write_is_not_replayed() {
     .with_timeout(std::time::Duration::from_millis(50));
     let client = QuickConnectClient::new(credentials, config).unwrap();
 
+    let prepared = client.prepare_settings_write().await.unwrap();
     assert_eq!(
         client
-            .save_device_settings("fan", &typed_settings_body())
+            .save_device_settings_prepared("fan", &typed_settings_body(), prepared)
             .await
             .unwrap_err(),
         gafctl_quickconnect::ClientError::Transport
@@ -718,10 +701,6 @@ async fn detail_by_id(
         .into_response(),
         _ => StatusCode::NOT_FOUND.into_response(),
     }
-}
-
-async fn valid_empty_inventory() -> Json<Value> {
-    Json(json!({"responseData": []}))
 }
 
 async fn invalid_inventory() -> Json<Value> {

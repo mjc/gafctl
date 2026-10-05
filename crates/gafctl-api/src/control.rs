@@ -4,8 +4,7 @@ use std::{
 };
 
 use gafctl_protocol::{
-    AutomaticThresholds, ControlCommand, HumidityTenthsPercent, Minutes, OperatingMode,
-    TemperatureTenthsF, TimerState,
+    AutomaticThresholds, ControlCommand, HumidityTenthsPercent, Minutes, TemperatureTenthsF,
 };
 use serde::{Deserialize, Deserializer, Serialize, de};
 
@@ -67,28 +66,6 @@ pub fn unix_millis(timestamp: SystemTime) -> Option<u64> {
         .and_then(|elapsed| elapsed.as_millis().try_into().ok())
 }
 
-#[derive(Debug, Deserialize, Eq, PartialEq)]
-#[serde(deny_unknown_fields)]
-pub struct ControlRequest {
-    request_id: CommandId,
-    preset: ControlPreset,
-    issued_at_unix_ms: u64,
-}
-
-impl ControlRequest {
-    pub fn request_id(&self) -> &CommandId {
-        &self.request_id
-    }
-
-    pub const fn preset(&self) -> ControlPreset {
-        self.preset
-    }
-
-    pub const fn issued_at_unix_ms(&self) -> u64 {
-        self.issued_at_unix_ms
-    }
-}
-
 pub fn is_fresh_at(
     issued_at_unix_ms: u64,
     now_unix_ms: u64,
@@ -139,28 +116,6 @@ impl ControlPreset {
             Self::TimerOneMinute => ControlCommand::SetTimer(Minutes::new(1)),
         }
     }
-
-    pub fn from_readback(
-        mode: OperatingMode,
-        thresholds: AutomaticThresholds,
-        timer: TimerState,
-    ) -> Option<Self> {
-        match mode {
-            OperatingMode::Automatic => {
-                match (thresholds.temperature.value(), thresholds.humidity.value()) {
-                    (1050, 300) => Some(Self::Automatic105F30Percent),
-                    (1051, 301) => Some(Self::Automatic105_1F30_1Percent),
-                    _ => None,
-                }
-            }
-            OperatingMode::Timer => match (timer.remaining.value(), timer.original.value()) {
-                (0, 0) => Some(Self::TimerClear),
-                (1, 1) => Some(Self::TimerOneMinute),
-                _ => None,
-            },
-            OperatingMode::Ota => None,
-        }
-    }
 }
 
 impl Serialize for CommandId {
@@ -194,71 +149,5 @@ mod tests {
         assert!(!is_fresh_at(1_000_000, 1_030_001, max_age, future_skew));
         assert!(is_fresh_at(1_005_000, 1_000_000, max_age, future_skew));
         assert!(!is_fresh_at(1_005_001, 1_000_000, max_age, future_skew));
-    }
-
-    #[test]
-    fn only_exact_supported_settings_map_to_a_selectable_readback_preset() {
-        let thresholds = |temperature, humidity| AutomaticThresholds {
-            temperature: TemperatureTenthsF::new(temperature),
-            humidity: HumidityTenthsPercent::new(humidity),
-        };
-        let timer = |remaining, original| TimerState {
-            remaining: Minutes::new(remaining),
-            original: Minutes::new(original),
-        };
-
-        assert_eq!(
-            ControlPreset::from_readback(
-                OperatingMode::Automatic,
-                thresholds(1050, 300),
-                timer(0, 0)
-            ),
-            Some(ControlPreset::Automatic105F30Percent)
-        );
-        assert_eq!(
-            ControlPreset::from_readback(
-                OperatingMode::Automatic,
-                thresholds(1051, 301),
-                timer(0, 0)
-            ),
-            Some(ControlPreset::Automatic105_1F30_1Percent)
-        );
-        assert_eq!(
-            ControlPreset::from_readback(OperatingMode::Timer, thresholds(1050, 300), timer(0, 0)),
-            Some(ControlPreset::TimerClear)
-        );
-        assert_eq!(
-            ControlPreset::from_readback(OperatingMode::Timer, thresholds(1050, 300), timer(1, 1)),
-            Some(ControlPreset::TimerOneMinute)
-        );
-        assert_eq!(
-            ControlPreset::from_readback(
-                OperatingMode::Automatic,
-                thresholds(1052, 301),
-                timer(0, 0)
-            ),
-            None
-        );
-    }
-
-    #[test]
-    fn timer_preset_rejects_expired_and_inconsistent_readbacks() {
-        let thresholds = AutomaticThresholds {
-            temperature: TemperatureTenthsF::new(1050),
-            humidity: HumidityTenthsPercent::new(300),
-        };
-        [(0, 1), (2, 1), (1, 2), (0, 2)]
-            .into_iter()
-            .for_each(|(remaining, original)| {
-                let timer = TimerState {
-                    remaining: Minutes::new(remaining),
-                    original: Minutes::new(original),
-                };
-                assert_eq!(
-                    ControlPreset::from_readback(OperatingMode::Timer, thresholds, timer),
-                    None,
-                    "unsupported timer readback: remaining={remaining}, original={original}",
-                );
-            });
     }
 }
