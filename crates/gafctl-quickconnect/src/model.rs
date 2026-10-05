@@ -317,6 +317,12 @@ mod tests {
 
     #[test]
     fn missing_and_invalid_values_remain_unknown_and_diagnostics_are_uninterpreted() {
+        let empty = parse_device_state(json!({"responseData": {}}), None).unwrap();
+        assert_eq!(empty.settings.mode, DeviceModeStatus::Unknown);
+        assert_eq!(
+            parse_device_state(json!({"responseData": []}), None).unwrap_err(),
+            ClientError::InvalidEnvelope
+        );
         let state = parse_device_state(
             json!({
                 "responseData": {
@@ -406,6 +412,12 @@ mod tests {
 
     #[test]
     fn inventory_ids_preserve_zero_and_reject_missing_or_conflicting_aliases() {
+        for payload in [
+            json!({"responseData": []}),
+            json!({"responseData": {"devices": []}}),
+        ] {
+            assert!(parse_inventory(payload).unwrap().is_empty());
+        }
         let inventory = parse_inventory(json!({
             "responseData": {"devices": [{"deviceId": 0, "id": "0", "name": "Zero"}]}
         }))

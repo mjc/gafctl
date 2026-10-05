@@ -43,15 +43,6 @@ pub struct EntitySources {
     pub command_source: EntitySource,
 }
 
-impl Default for EntitySources {
-    fn default() -> Self {
-        Self {
-            state_source: EntitySource::Http,
-            command_source: EntitySource::Http,
-        }
-    }
-}
-
 #[derive(Clone, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(try_from = "String")]
 pub struct DeviceId(String);

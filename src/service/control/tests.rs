@@ -17,7 +17,7 @@ fn reservation_is_reused(reservation: V2ControlReservation) -> bool {
 
 fn reservation_has_status(reservation: V2ControlReservation, status: &str) -> bool {
     match reservation {
-        V2ControlReservation::Completed(response) => response == status,
+        V2ControlReservation::Completed(response) => response.as_str() == status,
         V2ControlReservation::Execute(_) | V2ControlReservation::Wait(_) => false,
     }
 }
@@ -264,5 +264,5 @@ async fn v2_control_execution_survives_waiter_cancellation_and_records_result() 
     assert!(execution.await.is_ok());
     let history = history.lock().await;
     assert!(!history.in_flight.contains_key(&request_id));
-    assert_eq!(history.completed.front().unwrap().2, "unconfirmed");
+    assert_eq!(history.completed.front().unwrap().2.as_str(), "unconfirmed");
 }

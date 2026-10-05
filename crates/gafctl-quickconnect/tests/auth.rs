@@ -62,7 +62,7 @@ async fn login_trims_username_encodes_utf8_password_and_sends_literal_token_head
     )
     .unwrap();
 
-    client.list_devices().await.unwrap();
+    client.read_inventory().await.unwrap();
 
     assert_eq!(
         *captured_login.lock().await,
@@ -199,10 +199,10 @@ async fn concurrent_unauthorized_reads_share_one_replacement_login() {
     )
     .unwrap();
 
-    let (first, second) = tokio::join!(client.list_devices(), client.list_devices());
+    let (first, second) = tokio::join!(client.read_inventory(), client.read_inventory());
 
-    assert!(first.is_ok());
-    assert!(second.is_ok());
+    assert!(first.unwrap().is_empty());
+    assert!(second.unwrap().is_empty());
     assert_eq!(login_count.load(Ordering::SeqCst), 2);
 }
 
@@ -221,7 +221,7 @@ async fn repeated_auth_rejection_stops_after_one_retry() {
     );
 
     assert_eq!(
-        client.list_devices().await.unwrap_err(),
+        client.read_inventory().await.unwrap_err(),
         gafctl_quickconnect::ClientError::Authentication
     );
     assert_eq!(login_count.load(Ordering::SeqCst), 2);
@@ -243,7 +243,7 @@ async fn transient_failures_do_not_reset_the_single_reauthentication_allowance()
     );
 
     assert_eq!(
-        client.list_devices().await.unwrap_err(),
+        client.read_inventory().await.unwrap_err(),
         gafctl_quickconnect::ClientError::Authentication
     );
     assert_eq!(login_count.load(Ordering::SeqCst), 2);
@@ -280,7 +280,7 @@ async fn malformed_oversized_and_application_error_responses_are_distinct() {
             .with_max_response_bytes(128),
         )
         .unwrap();
-        let error = client.list_devices().await.unwrap_err();
+        let error = client.read_inventory().await.unwrap_err();
         assert_eq!(error, expected);
         assert!(!error.to_string().contains("private service response"));
     }
@@ -320,7 +320,7 @@ async fn transient_refresh_login_failure_is_retried_within_its_budget() {
         Credentials::new("user", "password", AccountRole::Contractor),
     );
 
-    assert!(client.list_devices().await.is_ok());
+    assert!(client.read_inventory().await.is_ok());
     assert_eq!(login_count.load(Ordering::SeqCst), 3);
 }
 
@@ -339,7 +339,7 @@ async fn exhausted_refresh_retries_return_the_original_transient_failure() {
     );
 
     assert_eq!(
-        client.list_devices().await.unwrap_err(),
+        client.read_inventory().await.unwrap_err(),
         gafctl_quickconnect::ClientError::HttpStatus(503)
     );
     assert_eq!(login_count.load(Ordering::SeqCst), 4);
@@ -361,7 +361,7 @@ async fn exhausted_initial_login_retries_do_not_restart_the_login_budget() {
     );
 
     assert_eq!(
-        client.list_devices().await.unwrap_err(),
+        client.read_inventory().await.unwrap_err(),
         gafctl_quickconnect::ClientError::HttpStatus(503)
     );
     assert_eq!(login_count.load(Ordering::SeqCst), 3);
@@ -380,7 +380,7 @@ async fn successful_http_response_with_unknown_inventory_shape_is_a_schema_error
     );
 
     assert_eq!(
-        client.list_devices().await.unwrap_err(),
+        client.read_inventory().await.unwrap_err(),
         gafctl_quickconnect::ClientError::InvalidEnvelope
     );
 }
@@ -398,7 +398,8 @@ async fn device_detail_encodes_provider_identifier_as_a_query_value() {
         Credentials::new("user", "password", AccountRole::Contractor),
     );
 
-    client.device_detail("fan&other=secret").await.unwrap();
+    let state = client.read_device_state("fan&other=secret").await.unwrap();
+    assert_eq!(state.settings.mode, DeviceModeStatus::Unknown);
 
     assert_eq!(
         captured_query.lock().await.as_deref(),
@@ -416,7 +417,7 @@ async fn missing_login_token_is_an_authentication_error() {
     );
 
     assert_eq!(
-        client.list_devices().await.unwrap_err(),
+        client.read_inventory().await.unwrap_err(),
         gafctl_quickconnect::ClientError::Authentication
     );
 }
@@ -431,7 +432,7 @@ async fn login_client_error_status_is_an_authentication_error() {
     );
 
     assert_eq!(
-        client.list_devices().await.unwrap_err(),
+        client.read_inventory().await.unwrap_err(),
         gafctl_quickconnect::ClientError::Authentication
     );
 }
@@ -451,7 +452,7 @@ async fn reads_retry_bounded_server_errors_and_writes_are_never_retried() {
         Credentials::new("user", "password", AccountRole::Contractor),
     );
 
-    assert!(client.list_devices().await.is_ok());
+    assert!(client.read_inventory().await.is_ok());
     assert_eq!(read_count.load(Ordering::SeqCst), 3);
     let prepared = client.prepare_settings_write().await.unwrap();
     assert_eq!(
@@ -487,7 +488,7 @@ async fn retry_after_does_not_extend_exhausted_read_or_login_budget() {
                 .with_state((Arc::clone(&attempts), fail_login));
             let (base_url, _server) = start_server(app).await;
             let client = test_client(base_url, Credentials::new("user", "password", AccountRole::Contractor));
-            let result = tokio::time::timeout(std::time::Duration::from_secs(2), client.list_devices()).await;
+            let result = tokio::time::timeout(std::time::Duration::from_secs(2), client.read_inventory()).await;
             assert_eq!(result.unwrap().unwrap_err(), gafctl_quickconnect::ClientError::HttpStatus(503));
             assert_eq!(attempts.load(Ordering::SeqCst), 3);
         })
@@ -538,7 +539,7 @@ async fn timed_out_reads_use_the_finite_retry_budget() {
     let client = QuickConnectClient::new(credentials, config).unwrap();
 
     assert_eq!(
-        client.list_devices().await.unwrap_err(),
+        client.read_inventory().await.unwrap_err(),
         gafctl_quickconnect::ClientError::Transport
     );
     assert_eq!(read_count.load(Ordering::SeqCst), 3);
@@ -559,7 +560,7 @@ async fn redirects_are_not_followed_with_account_authorization() {
     );
 
     assert_eq!(
-        client.list_devices().await.unwrap_err(),
+        client.read_inventory().await.unwrap_err(),
         gafctl_quickconnect::ClientError::HttpStatus(302)
     );
     assert_eq!(redirected_requests.load(Ordering::SeqCst), 0);

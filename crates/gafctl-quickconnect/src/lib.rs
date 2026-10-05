@@ -176,30 +176,14 @@ impl QuickConnectClient {
         })
     }
 
-    /// Read the device list response without interpreting provider-specific records.
-    pub async fn list_devices(&self) -> Result<Value, ClientError> {
+    /// Read typed inventory without waiting for device detail requests.
+    pub async fn read_inventory(&self) -> Result<Vec<InventoryDevice>, ClientError> {
         let url = self
             .config
             .device_base_url
             .join("device/deviceList")
             .map_err(|_| ClientError::InvalidEndpoint)?;
-        validate_inventory_response(self.get_url_with_retry(url).await?)
-    }
-
-    /// Read typed inventory without waiting for device detail requests.
-    pub async fn read_inventory(&self) -> Result<Vec<InventoryDevice>, ClientError> {
-        model::parse_inventory(self.list_devices().await?)
-    }
-
-    /// Read one device detail record using its provider ID as an encoded query value.
-    pub async fn device_detail(&self, provider_id: &str) -> Result<Value, ClientError> {
-        let mut url = self
-            .config
-            .device_base_url
-            .join("device")
-            .map_err(|_| ClientError::InvalidEndpoint)?;
-        url.query_pairs_mut().append_pair("deviceId", provider_id);
-        validate_device_response(self.get_url_with_retry(url).await?)
+        model::parse_inventory(self.get_url_with_retry(url).await?)
     }
 
     /// Fetch and decode one device's current readings and settings.
@@ -207,7 +191,13 @@ impl QuickConnectClient {
         &self,
         provider_id: &str,
     ) -> Result<QuickConnectDeviceState, ClientError> {
-        let payload = self.device_detail(provider_id).await?;
+        let mut url = self
+            .config
+            .device_base_url
+            .join("device")
+            .map_err(|_| ClientError::InvalidEndpoint)?;
+        url.query_pairs_mut().append_pair("deviceId", provider_id);
+        let payload = self.get_url_with_retry(url).await?;
         model::parse_device_state(payload, unix_millis(SystemTime::now()))
     }
 
@@ -536,25 +526,6 @@ fn settings_endpoint(base: &Url, provider_id: &str) -> Result<Url, ClientError> 
     Ok(url)
 }
 
-fn validate_inventory_response(payload: Value) -> Result<Value, ClientError> {
-    let inventory = payload
-        .get("responseData")
-        .ok_or(ClientError::InvalidEnvelope)?;
-    if inventory.is_array() || inventory.get("devices").is_some_and(Value::is_array) {
-        Ok(payload)
-    } else {
-        Err(ClientError::InvalidEnvelope)
-    }
-}
-
-fn validate_device_response(payload: Value) -> Result<Value, ClientError> {
-    if payload.get("responseData").is_some_and(Value::is_object) {
-        Ok(payload)
-    } else {
-        Err(ClientError::InvalidEnvelope)
-    }
-}
-
 fn retry_after(headers: &reqwest::header::HeaderMap) -> Option<Duration> {
     headers
         .get(RETRY_AFTER)
@@ -628,20 +599,6 @@ mod tests {
         assert_eq!(
             parse_retry_after(&value, now),
             Some(Duration::from_secs(100))
-        );
-    }
-
-    #[test]
-    fn supported_inventory_and_detail_envelopes_are_accepted() {
-        assert!(validate_inventory_response(serde_json::json!({"responseData": []})).is_ok());
-        assert!(
-            validate_inventory_response(serde_json::json!({"responseData": {"devices": []}}))
-                .is_ok()
-        );
-        assert!(validate_device_response(serde_json::json!({"responseData": {}})).is_ok());
-        assert_eq!(
-            validate_device_response(serde_json::json!({"responseData": []})).unwrap_err(),
-            ClientError::InvalidEnvelope
         );
     }
 

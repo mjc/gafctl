@@ -223,12 +223,6 @@ impl From<ControlStatus> for String {
     }
 }
 
-impl PartialEq<&str> for ControlStatus {
-    fn eq(&self, other: &&str) -> bool {
-        self.as_str() == *other
-    }
-}
-
 #[cfg(test)]
 mod tests {
     #[test]

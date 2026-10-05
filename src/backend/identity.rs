@@ -224,7 +224,6 @@ fn validate_identity_file(file: IdentityFile) -> Result<IdentityFile, DeviceRegi
         |(mut identities, mut local_ids), binding| {
             if !valid_identity(&binding.identity.account_id)
                 || !valid_identity(&binding.identity.provider_id)
-                || DeviceId::parse(binding.local_id.as_str().to_owned()).is_none()
                 || binding.local_id == DeviceId::configured_ble()
                 || !identities.insert(binding.identity.clone())
                 || !local_ids.insert(binding.local_id.clone())
@@ -312,6 +311,28 @@ mod tests {
             .unwrap();
             assert!(DeviceRegistry::load(&path).is_err_and(is_invalid_store));
         });
+        for local_id in [
+            "".to_owned(),
+            "space here".to_owned(),
+            "../device".to_owned(),
+            "a".repeat(65),
+        ] {
+            fs::write(
+                &path,
+                serde_json::to_vec(&json!({
+                    "version": 2,
+                    "proxy_id": ProxyId::default(),
+                    "sources": {},
+                    "bindings": [{
+                        "identity": {"account_id": "account", "provider_id": "provider"},
+                        "local_id": local_id
+                    }]
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+            assert!(DeviceRegistry::load(&path).is_err_and(is_invalid_store));
+        }
     }
 
     #[test]
