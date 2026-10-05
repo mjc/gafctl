@@ -2,7 +2,7 @@ use gafctl_api::{CommandId, ControlStatus, DeviceControlV2Request, DeviceStateV2
 use serde_json::json;
 
 #[test]
-fn cloud_single_target_commands_accept_only_whole_in_range_values() {
+fn adjustable_commands_accept_only_whole_values_in_their_backend_ranges() {
     for (kind, field, minimum, maximum) in [
         (
             "quick_connect_automatic_temperature",
@@ -16,29 +16,6 @@ fn cloud_single_target_commands_accept_only_whole_in_range_values() {
             30,
             80,
         ),
-    ] {
-        for value in [minimum, maximum] {
-            let mut command = json!({"kind":kind});
-            command[field] = json!(value);
-            assert!(serde_json::from_value::<gafctl_api::DeviceCommand>(command).is_ok());
-        }
-        for value in [
-            json!(minimum - 1),
-            json!(maximum + 1),
-            json!(1.5),
-            json!(true),
-            json!(null),
-        ] {
-            let mut command = json!({"kind":kind});
-            command[field] = value;
-            assert!(serde_json::from_value::<gafctl_api::DeviceCommand>(command).is_err());
-        }
-    }
-}
-
-#[test]
-fn adjustable_ble_controls_accept_original_app_ranges_and_reject_other_values() {
-    for (kind, field, minimum, maximum) in [
         ("legacy_automatic_temperature", "temperature_f", 90, 120),
         ("legacy_automatic_humidity", "humidity_percent", 30, 80),
         ("legacy_timer", "minutes", 0, 360),
@@ -53,19 +30,19 @@ fn adjustable_ble_controls_accept_original_app_ranges_and_reject_other_values() 
         }
         for value in [
             json!(-1),
+            json!(minimum - 1),
             json!(maximum + 1),
+            json!(1.5),
             json!(90.5),
             json!(true),
             json!(null),
         ] {
             let mut command = json!({"kind":kind});
-            command[field] = value;
-            assert!(serde_json::from_value::<gafctl_api::DeviceCommand>(command).is_err());
-        }
-        if minimum > 0 {
-            let mut command = json!({"kind":kind});
-            command[field] = json!(minimum - 1);
-            assert!(serde_json::from_value::<gafctl_api::DeviceCommand>(command).is_err());
+            command[field] = value.clone();
+            assert!(
+                serde_json::from_value::<gafctl_api::DeviceCommand>(command).is_err(),
+                "{kind} {value}"
+            );
         }
     }
 }
@@ -280,23 +257,13 @@ fn available_state_rejects_inconsistent_backend_and_measurements() {
             "provenance":{"backend":"legacy_ble","fetched_at_unix_ms":123,"observed_at_unix_ms":120}}});
     let valid: DeviceStateV2Response = serde_json::from_value(value.clone()).unwrap();
     assert!(valid.validate().is_ok());
-    for invalid in [
-        {
-            let mut value = value.clone();
-            value["state"]["provenance"]["backend"] = json!("quick_connect");
-            value
-        },
-        {
-            let mut value = value.clone();
-            value["backend"] = json!("quick_connect");
-            value
-        },
-        {
-            let mut value = value.clone();
-            value["state"]["humidity_percent"] = json!(101);
-            value
-        },
+    for (pointer, replacement) in [
+        ("/state/provenance/backend", json!("quick_connect")),
+        ("/backend", json!("quick_connect")),
+        ("/state/humidity_percent", json!(101)),
     ] {
+        let mut invalid = value.clone();
+        *invalid.pointer_mut(pointer).unwrap() = replacement;
         let parsed: DeviceStateV2Response = serde_json::from_value(invalid).unwrap();
         assert!(parsed.validate().is_err());
     }

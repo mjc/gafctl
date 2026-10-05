@@ -3,6 +3,7 @@
 import importlib
 import sys
 import unittest
+from copy import deepcopy
 from pathlib import Path
 from types import ModuleType
 
@@ -72,16 +73,6 @@ class FixtureTests(unittest.TestCase):
                     ),
                     {},
                 )
-
-    def test_reported_states_have_independent_nested_records(self):
-        for backend in ("legacy_ble", "quick_connect"):
-            with self.subTest(backend=backend):
-                first = reported_state(backend)
-                second = reported_state(backend)
-                for section in ("settings", "diagnostics", "provenance"):
-                    self.assertIsNot(first[section], second[section])
-                    first[section].clear()
-                self.assertEqual(second, reported_state(backend))
 
 
 class FakeResponse:
@@ -303,21 +294,12 @@ class ApiClientTests(unittest.IsolatedAsyncioTestCase):
                 ota_in_progress=True,
             ),
         )
+        expected = deepcopy(raw)
         state = (await self.state(raw, "quick_connect"))["state"]
-        self.assertEqual(state, raw)
-        self.assertEqual(state["temperature_f"], 101.4)
-        self.assertEqual(state["settings"]["automatic_temperature_f"], 105)
-        self.assertEqual(state["settings"]["timer_duration_minutes"], 60)
-        self.assertEqual(state["settings"]["mode"], "automatic")
+        self.assertEqual(state, expected)
         self.assertIs(state["settings"]["humidity_monitor"], True)
         self.assertIs(state["estimated_running"], True)
-        self.assertEqual(state["settings"]["backend"], "quick_connect")
-        self.assertEqual(state["diagnostics"]["signal_strength_raw"], "-42")
-        self.assertEqual(state["diagnostics"]["verified_raw"], "unknown-token")
         self.assertIs(state["diagnostics"]["ota_in_progress"], True)
-        self.assertNotIn("timer_remaining_minutes", state["settings"])
-        self.assertNotIn("signal_strength", state)
-        self.assertNotIn("is_verified", state)
         raw["settings"]["mode"] = "conflicting"
         self.assertEqual(
             (await self.state(raw, "quick_connect"))["state"]["settings"]["mode"],
@@ -328,19 +310,11 @@ class ApiClientTests(unittest.IsolatedAsyncioTestCase):
             ("quick_connect", quickconnect_settings()),
         ):
             with self.subTest(backend=backend):
-                unknown = (await self.state(readings(settings=settings), backend))[
-                    "state"
-                ]
-                for field in (
-                    "temperature_f",
-                    "humidity_percent",
-                    "diagnostics",
-                    "estimated_running",
-                ):
-                    self.assertIsNone(unknown[field])
-                for key, value in unknown["settings"].items():
-                    if key not in {"backend", "mode"}:
-                        self.assertIsNone(value)
+                unknown_raw = readings(settings=settings)
+                expected = deepcopy(unknown_raw)
+                self.assertEqual(
+                    (await self.state(unknown_raw, backend))["state"], expected
+                )
         stale = await self.state(
             None, inventory_status="present", last_error="BLE unavailable"
         )

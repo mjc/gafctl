@@ -371,6 +371,9 @@ mod tests {
 
     #[test]
     fn command_capabilities_cover_every_command_family() {
+        let read_only = DeviceCapabilities::quickconnect_read_only();
+        assert!(read_only.read_state);
+        assert!(read_only.commands.is_empty());
         let temperature = AutomaticTemperatureF::try_from(105).unwrap();
         let humidity = AutomaticHumidityPercent::try_from(40).unwrap();
         let cases = [
@@ -486,22 +489,6 @@ mod tests {
                 );
             });
         });
-    }
-
-    #[test]
-    fn capabilities_keep_legacy_presets_separate_from_cloud_commands() {
-        let legacy = DeviceCapabilities::legacy_ble();
-        assert!(legacy.supports(DeviceCommand::LegacyPreset {
-            preset: ControlPreset::TimerClear,
-        }));
-        assert!(!legacy.supports(DeviceCommand::QuickConnectMode {
-            mode: QuickConnectMode::Automatic,
-        }));
-
-        let cloud = DeviceCapabilities::quickconnect_read_only();
-        assert!(cloud.read_state);
-        assert!(cloud.commands.is_empty());
-        assert!(!cloud.supports(DeviceCommand::QuickConnectTimerDuration { minutes: 30 }));
     }
 
     #[test]

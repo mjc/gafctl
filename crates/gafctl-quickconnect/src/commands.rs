@@ -326,115 +326,64 @@ mod tests {
     }
 
     #[test]
-    fn mode_change_has_six_exact_fields_and_preserves_current_settings() {
-        let command = QuickConnectCommand::SetMode {
-            mode: QuickConnectCommandMode::Manual,
-        };
-
-        let body = build_settings_body(&command, &current_settings()).unwrap();
-
-        assert_eq!(
-            serde_json::to_value(body).unwrap(),
-            json!({
-                "automaticMode": false,
-                "desiredTemp": 105,
-                "desiredHumidity": 42,
-                "timerMode": false,
-                "timerValue": 60,
-                "fanMode": true
-            })
-        );
-    }
-
-    #[test]
-    fn every_mode_uses_one_exclusive_flag_tuple() {
-        let modes = [
+    fn every_mode_has_the_exact_body_and_preserves_current_settings() {
+        for (mode, [automatic, timer, manual]) in [
             (QuickConnectCommandMode::Off, [false, false, false]),
             (QuickConnectCommandMode::Automatic, [true, false, false]),
             (QuickConnectCommandMode::Timer, [false, true, false]),
             (QuickConnectCommandMode::Manual, [false, false, true]),
-        ];
-        let bodies = modes.map(|(mode, _)| {
-            build_settings_body(&QuickConnectCommand::SetMode { mode }, &current_settings())
-                .unwrap()
-        });
-        let flags = bodies.map(|body| {
-            let body = serde_json::to_value(body).unwrap();
-            [
-                body["automaticMode"].as_bool().unwrap(),
-                body["timerMode"].as_bool().unwrap(),
-                body["fanMode"].as_bool().unwrap(),
-            ]
-        });
-        let expected = modes.map(|(_, flags)| flags);
-
-        assert_eq!(flags, expected);
+        ] {
+            let body =
+                build_settings_body(&QuickConnectCommand::SetMode { mode }, &current_settings())
+                    .unwrap();
+            assert_eq!(
+                serde_json::to_value(body).unwrap(),
+                json!({
+                    "automaticMode": automatic,
+                    "desiredTemp": 105,
+                    "desiredHumidity": 42,
+                    "timerMode": timer,
+                    "timerValue": 60,
+                    "fanMode": manual
+                }),
+                "{mode:?}"
+            );
+        }
     }
 
     #[test]
-    fn timer_duration_preserves_timer_mode_without_activating_it() {
-        let command = QuickConnectCommand::SetTimerDuration {
-            duration_minutes: 90,
-        };
-        let current = QuickConnectSettings {
-            mode: DeviceModeStatus::Automatic,
-            ..current_settings()
-        };
-
-        let body = build_settings_body(&command, &current).unwrap();
-
-        assert_eq!(
-            serde_json::to_value(body).unwrap(),
-            json!({"timerMode": false, "timerValue": 90})
-        );
-    }
-
-    #[test]
-    fn timer_mode_is_preserved_and_invalid_values_are_rejected() {
-        let current = QuickConnectSettings {
-            mode: DeviceModeStatus::Timer,
-            ..current_settings()
-        };
-        let body = build_settings_body(
-            &QuickConnectCommand::SetTimerDuration {
-                duration_minutes: 360,
-            },
-            &current,
-        )
-        .unwrap();
-        assert_eq!(
-            serde_json::to_value(body).unwrap(),
-            json!({"timerMode": true, "timerValue": 360})
-        );
-        assert_eq!(
-            build_settings_body(
-                &QuickConnectCommand::SetTimerDuration {
-                    duration_minutes: 31
-                },
-                &current,
+    fn timer_duration_preserves_mode_and_validates_boundaries() {
+        use crate::QuickConnectCommandError::{InvalidTimerStep, OutOfRange};
+        for (mode, duration_minutes, expected) in [
+            (
+                DeviceModeStatus::Automatic,
+                90,
+                Ok(json!({"timerMode":false,"timerValue":90})),
             ),
-            Err(crate::QuickConnectCommandError::InvalidTimerStep)
-        );
-        assert_eq!(
-            build_settings_body(
-                &QuickConnectCommand::SetTimerDuration {
-                    duration_minutes: 361
-                },
-                &current,
+            (
+                DeviceModeStatus::Timer,
+                360,
+                Ok(json!({"timerMode":true,"timerValue":360})),
             ),
-            Err(crate::QuickConnectCommandError::OutOfRange)
-        );
-        let lower_boundary = build_settings_body(
-            &QuickConnectCommand::SetTimerDuration {
-                duration_minutes: 30,
-            },
-            &current,
-        )
-        .unwrap();
-        assert_eq!(
-            serde_json::to_value(lower_boundary).unwrap(),
-            json!({"timerMode": true, "timerValue": 30})
-        );
+            (
+                DeviceModeStatus::Timer,
+                30,
+                Ok(json!({"timerMode":true,"timerValue":30})),
+            ),
+            (DeviceModeStatus::Timer, 31, Err(InvalidTimerStep)),
+            (DeviceModeStatus::Timer, 361, Err(OutOfRange)),
+        ] {
+            let current = QuickConnectSettings {
+                mode,
+                ..current_settings()
+            };
+            let actual = build_settings_body(
+                &QuickConnectCommand::SetTimerDuration { duration_minutes },
+                &current,
+            )
+            .map(|body| serde_json::to_value(body).unwrap());
+            assert_eq!(actual, expected, "{mode:?} duration={duration_minutes}");
+        }
     }
 
     #[test]
@@ -501,59 +450,43 @@ mod tests {
 
     #[test]
     fn target_ranges_accept_boundaries_and_reject_out_of_range_values() {
-        let temperature_bodies = [90, 120].map(|temperature_f| {
-            build_settings_body(
+        use crate::QuickConnectCommandError::OutOfRange;
+        for (temperature_f, humidity_percent, expected) in [
+            (
+                Some(90),
+                None,
+                Ok(json!({"automaticMode":true,"desiredTemp":90,"desiredHumidity":42})),
+            ),
+            (
+                Some(120),
+                None,
+                Ok(json!({"automaticMode":true,"desiredTemp":120,"desiredHumidity":42})),
+            ),
+            (
+                None,
+                Some(30),
+                Ok(json!({"automaticMode":true,"desiredTemp":105,"desiredHumidity":30})),
+            ),
+            (
+                None,
+                Some(80),
+                Ok(json!({"automaticMode":true,"desiredTemp":105,"desiredHumidity":80})),
+            ),
+            (Some(89), None, Err(OutOfRange)),
+            (None, Some(81), Err(OutOfRange)),
+        ] {
+            let actual = build_settings_body(
                 &QuickConnectCommand::SetAutomaticTargets {
-                    temperature_f: Some(temperature_f),
-                    humidity_percent: None,
+                    temperature_f,
+                    humidity_percent,
                 },
                 &current_settings(),
             )
-            .unwrap()
-        });
-        let temperature_values = temperature_bodies.map(|body| {
-            serde_json::to_value(body).unwrap()["desiredTemp"]
-                .as_u64()
-                .unwrap()
-        });
-        assert_eq!(temperature_values, [90, 120]);
-
-        let humidity_bodies = [30, 80].map(|humidity_percent| {
-            build_settings_body(
-                &QuickConnectCommand::SetAutomaticTargets {
-                    temperature_f: None,
-                    humidity_percent: Some(humidity_percent),
-                },
-                &current_settings(),
-            )
-            .unwrap()
-        });
-        let humidity_values = humidity_bodies.map(|body| {
-            serde_json::to_value(body).unwrap()["desiredHumidity"]
-                .as_u64()
-                .unwrap()
-        });
-        assert_eq!(humidity_values, [30, 80]);
-
-        let invalid_targets = [
-            QuickConnectCommand::SetAutomaticTargets {
-                temperature_f: Some(89),
-                humidity_percent: None,
-            },
-            QuickConnectCommand::SetAutomaticTargets {
-                temperature_f: None,
-                humidity_percent: Some(81),
-            },
-        ];
-        let results =
-            invalid_targets.map(|command| build_settings_body(&command, &current_settings()));
-
-        assert_eq!(
-            results,
-            [
-                Err(crate::QuickConnectCommandError::OutOfRange),
-                Err(crate::QuickConnectCommandError::OutOfRange)
-            ]
-        );
+            .map(|body| serde_json::to_value(body).unwrap());
+            assert_eq!(
+                actual, expected,
+                "temperature={temperature_f:?} humidity={humidity_percent:?}"
+            );
+        }
     }
 }

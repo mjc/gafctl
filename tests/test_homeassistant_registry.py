@@ -2,16 +2,18 @@
 
 import asyncio
 import json
+import logging
 import os
 import shutil
 import sys
 import tempfile
 import unittest
 from contextlib import contextmanager
+from datetime import timedelta
 from functools import partial
 from pathlib import Path
 from types import MappingProxyType
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from ha_fixtures import (
@@ -25,8 +27,10 @@ from ha_fixtures import (
     reported_state,
     state_data,
 )
+from homeassistant import loader
 from homeassistant.components.mqtt import binary_sensor as mqtt_binary
 from homeassistant.components.mqtt import button as mqtt_button
+from homeassistant.components.mqtt import discovery as mqtt_discovery
 from homeassistant.components.mqtt import number as mqtt_number
 from homeassistant.components.mqtt import select as mqtt_select
 from homeassistant.components.mqtt import sensor as mqtt_sensor
@@ -35,6 +39,7 @@ from homeassistant.components.mqtt.discovery import (
     MQTTDiscoveryPayload,
     _merge_common_device_options,
 )
+from homeassistant.components.mqtt.models import DATA_MQTT, MqttData, ReceiveMessage
 from homeassistant.components.mqtt.schemas import DEVICE_DISCOVERY_SCHEMA
 from homeassistant.components.sensor import SensorDeviceClass, SensorStateClass
 from homeassistant.config_entries import ConfigEntries, ConfigEntry, ConfigEntryState
@@ -49,6 +54,7 @@ from homeassistant.exceptions import ConfigEntryNotReady, HomeAssistantError
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers import issue_registry as ir
+from homeassistant.helpers.entity_platform import EntityPlatform
 from homeassistant.helpers.template import Template
 
 from custom_components import gafctl as gafctl_integration
@@ -64,6 +70,7 @@ from custom_components.gafctl.controls import NUMBER_CONTROLS
 from custom_components.gafctl.models import ApiError, ControlOutcomeUnknown
 
 COMPONENT_DIR = Path(__file__).resolve().parents[1] / "custom_components/gafctl"
+REGISTRY_FIXTURE_DIR = COMPONENT_DIR.parents[1] / "target/ha-registry-tests"
 
 
 @contextmanager
@@ -760,7 +767,10 @@ class RegistryTests(unittest.IsolatedAsyncioTestCase):
                 )
 
     async def asyncSetUp(self) -> None:
-        self.directory = tempfile.TemporaryDirectory()
+        await asyncio.to_thread(REGISTRY_FIXTURE_DIR.mkdir, parents=True, exist_ok=True)
+        self.directory = await asyncio.to_thread(
+            tempfile.TemporaryDirectory, dir=REGISTRY_FIXTURE_DIR
+        )
         self.hass = HomeAssistant(self.directory.name)
         self.hass.config_entries = ConfigEntries(self.hass, {})
         await ir.async_load(self.hass)
@@ -1030,6 +1040,165 @@ class RegistryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             checked, {"sensor_automatic_temperature_threshold", "sensor_freshness"}
         )
+
+    async def test_mqtt_migration_failure_replays_old_config_and_preserves_customization(
+        self,
+    ):
+        fixture = os.environ.get("GAFCTL_DISCOVERY_FIXTURE")
+        if not fixture:
+            self.skipTest("set GAFCTL_DISCOVERY_FIXTURE to generated discovery configs")
+        topic, document = (await asyncio.to_thread(read_discovery_fixture, fixture))[0]
+        identifier = document["device"]["identifiers"][0]
+        component = document["components"]["sensor_temperature"]
+        grouped = document | {"components": {"sensor_temperature": component}}
+        individual = MQTTDiscoveryPayload(component)
+        del individual["platform"]
+        individual["device"] = document["device"]
+        individual["origin"] = document["origin"]
+        _merge_common_device_options(individual, document)
+        old_topic = f"homeassistant/sensor/gafctl/{identifier}_temperature/config"
+        retained = {}
+        platforms = []
+        subscriptions = []
+        entry_id = None
+
+        async def start_discovery():
+            nonlocal entry_id
+            loader.async_setup(self.hass)
+            entry = ConfigEntry(
+                version=1,
+                minor_version=1,
+                domain="mqtt",
+                title="Test MQTT",
+                source="user",
+                data={"broker": "localhost"},
+                options={},
+                unique_id=None,
+                discovery_keys=MappingProxyType({}),
+                subentries_data=[],
+                entry_id=entry_id,
+            )
+            entry_id = entry.entry_id
+            with patch.object(
+                ConfigEntries, "async_setup", AsyncMock(return_value=True)
+            ):
+                await self.hass.config_entries.async_add(entry)
+            entry._async_set_state(self.hass, ConfigEntryState.SETUP_IN_PROGRESS, None)
+
+            def subscribe(pattern, callback, *_args):
+                subscription = (pattern, callback)
+                subscriptions.append(subscription)
+                return lambda: subscriptions.remove(subscription)
+
+            client = MagicMock()
+            client.connected = True
+            client.async_subscribe.side_effect = subscribe
+            self.hass.data[DATA_MQTT] = MqttData(client=client, config=[])
+
+            async def forward(hass, config_entry, components):
+                self.assertEqual(components, {"sensor"})
+                platform = EntityPlatform(
+                    hass=hass,
+                    logger=logging.getLogger(__name__),
+                    domain="sensor",
+                    platform_name="mqtt",
+                    platform=mqtt_sensor,
+                    scan_interval=timedelta(seconds=30),
+                    entity_namespace=None,
+                )
+                platform.config_entry = config_entry
+                platforms.append(platform)
+                await mqtt_sensor.async_setup_entry(
+                    hass, config_entry, platform._async_schedule_add_entities_for_entry
+                )
+                hass.data[DATA_MQTT].platforms_loaded.add("sensor")
+
+            forward_patch = patch.object(
+                mqtt_discovery,
+                "async_forward_entry_setup_and_setup_discovery",
+                side_effect=forward,
+            )
+            forward_patch.start()
+            self.addCleanup(forward_patch.stop)
+            await mqtt_discovery.async_start(self.hass, "homeassistant", entry)
+
+        async def deliver(config_topic, payload, *, retain):
+            message = json.dumps(payload)
+            if retain:
+                retained[config_topic] = message
+            pattern = (
+                "homeassistant/device/+/+/config"
+                if config_topic == topic
+                else "homeassistant/sensor/+/+/config"
+            )
+            callback = next(
+                callback
+                for subscribed, callback in subscriptions
+                if subscribed == pattern
+            )
+            callback(ReceiveMessage(config_topic, message, 0, retain, pattern, 0))
+            await self.hass.async_block_till_done()
+
+        def customized_entry():
+            entity = self.entities.async_get("sensor.attic_temperature")
+            self.assertIsNotNone(entity)
+            self.assertEqual(entity.unique_id, component["unique_id"])
+            self.assertEqual(entity.name, "Attic custom temperature")
+            self.assertEqual(entity.icon, "mdi:thermometer-alert")
+            return entity
+
+        await start_discovery()
+        await deliver(old_topic, individual, retain=True)
+        entity_id = self.entities.async_get_entity_id(
+            "sensor", "mqtt", component["unique_id"]
+        )
+        self.assertIsNotNone(self.hass.states.get(entity_id))
+        registered = self.entities.async_update_entity(
+            entity_id,
+            new_entity_id="sensor.attic_temperature",
+            name="Attic custom temperature",
+            icon="mdi:thermometer-alert",
+        )
+        registry_id, device_id = registered.id, registered.device_id
+        await self.hass.async_block_till_done()
+        await deliver(old_topic, {"migrate_discovery": True}, retain=False)
+        self.assertIsNone(self.hass.states.get("sensor.attic_temperature"))
+        self.assertEqual(customized_entry().id, registry_id)
+        self.assertEqual(retained, {old_topic: json.dumps(individual)})
+        # The broker rejects the grouped publish: no group reaches HA or replaces retention.
+        self.assertNotIn(topic, retained)
+
+        # Restart HA with the same registry files, then replay the unchanged retained config.
+        await self.entities._store.async_save(self.entities._data_to_save())
+        await self.devices._store.async_save(self.devices._data_to_save())
+        for platform in platforms:
+            await platform.async_reset()
+        await self.hass.async_stop()
+        platforms.clear()
+        subscriptions.clear()
+        self.hass = HomeAssistant(self.directory.name)
+        self.hass.config_entries = ConfigEntries(self.hass, {})
+        await ir.async_load(self.hass)
+        dr.async_setup(self.hass)
+        await dr.async_load(self.hass)
+        await er.async_load(self.hass)
+        self.devices = dr.async_get(self.hass)
+        self.entities = er.async_get(self.hass)
+        await start_discovery()
+        await deliver(old_topic, json.loads(retained[old_topic]), retain=True)
+        self.assertIsNotNone(self.hass.states.get("sensor.attic_temperature"))
+        self.assertEqual(customized_entry().id, registry_id)
+        self.assertEqual(customized_entry().device_id, device_id)
+
+        # A later successful retry migrates the restored entity using the same unique ID.
+        await deliver(old_topic, {"migrate_discovery": True}, retain=False)
+        await deliver(topic, grouped, retain=True)
+        self.assertIsNotNone(self.hass.states.get("sensor.attic_temperature"))
+        self.assertEqual(customized_entry().id, registry_id)
+        self.assertEqual(customized_entry().device_id, device_id)
+        self.assertEqual(len(self.entities.entities), 1)
+        for platform in platforms:
+            await platform.async_reset()
 
     async def discovery_configs(self):
         fixture = os.environ.get("GAFCTL_DISCOVERY_FIXTURE")

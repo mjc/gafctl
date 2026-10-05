@@ -206,6 +206,8 @@ fn request_carries_frame_response_and_operation_together() {
     ]
     .into_iter()
     .for_each(|(command, wire, response)| {
+        assert_eq!(command.frame(), wire);
+        assert_eq!(command.response_id(), response);
         let request = Request::from(command);
         assert!(match request.frame() {
             gafctl_protocol::RequestFrame::Read(_) => true,
@@ -504,110 +506,99 @@ fn timer_outcome_allows_elapsed_time_and_keeps_readback_errors() {
 }
 
 #[test]
-fn threshold_control_requires_automatic_mode_after_matching_thresholds() {
+fn threshold_confirmation_requires_automatic_decodable_mode() {
     let requested = AutomaticThresholds {
         temperature: TemperatureTenthsF::new(1050),
         humidity: HumidityTenthsPercent::new(300),
     };
-    let snapshot = snapshot_with_mode(b"#dmrtn\n", b"#atr041a012c\n", b"#ttr00000000\n");
-    let outcome = ControlOutcome::from_response(
-        ControlCommand::SetAutomaticThresholds(requested),
-        frame(b"#amr0\n"),
-        Some(&snapshot),
-    )
-    .unwrap();
-
-    assert_eq!(
-        outcome.readback(),
-        &ControlReadback::Thresholds(Ok(Readback {
-            actual: requested,
-            comparison: ReadbackMatch::Matches,
-        })),
-    );
-    assert_eq!(
-        outcome.mode_readback(),
-        ModeReadback::Differs(OperatingMode::Timer)
-    );
-    assert!(!outcome.is_confirmed());
+    for (mode, expected) in [
+        (
+            b"#dmrtn\n".as_slice(),
+            ModeReadback::Differs(OperatingMode::Timer),
+        ),
+        (
+            b"#dmrzz\n".as_slice(),
+            ModeReadback::Unrecognized(PayloadError::InvalidMode),
+        ),
+    ] {
+        let snapshot = snapshot_with_mode(mode, b"#atr041a012c\n", b"#ttr00000000\n");
+        let outcome = ControlOutcome::from_response(
+            ControlCommand::SetAutomaticThresholds(requested),
+            frame(b"#amr0\n"),
+            Some(&snapshot),
+        )
+        .unwrap();
+        assert_eq!(
+            outcome.readback(),
+            &ControlReadback::Thresholds(Ok(Readback {
+                actual: requested,
+                comparison: ReadbackMatch::Matches,
+            })),
+            "mode={mode:?}"
+        );
+        assert_eq!(outcome.mode_readback(), expected, "mode={mode:?}");
+        assert!(!outcome.is_confirmed(), "mode={mode:?}");
+    }
 }
 
 #[test]
-fn timer_control_does_not_confirm_unverified_expiry() {
-    let command = ControlCommand::SetTimer(Minutes::new(1));
-    let still_automatic = snapshot_with_mode(b"#dmraf\n", b"#atr041a012c\n", b"#ttr00010001\n");
-    let outcome =
-        ControlOutcome::from_response(command, frame(b"#tmr0\n"), Some(&still_automatic)).unwrap();
-    assert!(!outcome.is_confirmed());
-
-    let expired = snapshot_with_mode(b"#dmraf\n", b"#atr041a012c\n", b"#ttr00000001\n");
-    let outcome =
-        ControlOutcome::from_response(command, frame(b"#tmr0\n"), Some(&expired)).unwrap();
-    assert!(!outcome.is_confirmed());
-    assert_eq!(
-        outcome.mode_readback(),
-        ModeReadback::UnverifiedTimerExpiry(OperatingMode::Automatic)
-    );
-}
-
-#[test]
-fn clearing_timer_requires_timer_mode_and_controller_fan_off() {
-    let command = ControlCommand::SetTimer(Minutes::new(0));
-
-    let still_on = snapshot_with_mode(b"#dmrtn\n", b"#atr041a012c\n", b"#ttr00000000\n");
-    let outcome =
-        ControlOutcome::from_response(command, frame(b"#tmr0\n"), Some(&still_on)).unwrap();
-    assert!(!outcome.is_confirmed());
-    assert_eq!(
-        outcome.mode_readback(),
-        ModeReadback::FanFlagDiffers {
-            mode: OperatingMode::Timer,
-            actual: FanState::On,
-        }
-    );
-
-    let cleared = snapshot_with_mode(b"#dmrtf\n", b"#atr041a012c\n", b"#ttr00000000\n");
-    let outcome =
-        ControlOutcome::from_response(command, frame(b"#tmr0\n"), Some(&cleared)).unwrap();
-    assert!(outcome.is_confirmed());
-    assert_eq!(
-        outcome.mode_readback(),
-        ModeReadback::Matches(OperatingMode::Timer)
-    );
-
-    let automatic = snapshot_with_mode(b"#dmraf\n", b"#atr041a012c\n", b"#ttr00000000\n");
-    let outcome =
-        ControlOutcome::from_response(command, frame(b"#tmr0\n"), Some(&automatic)).unwrap();
-    assert!(!outcome.is_confirmed());
-    assert_eq!(
-        outcome.mode_readback(),
-        ModeReadback::Differs(OperatingMode::Automatic)
-    );
-}
-
-#[test]
-fn control_confirmation_requires_decodable_mode() {
-    let requested = AutomaticThresholds {
-        temperature: TemperatureTenthsF::new(1050),
-        humidity: HumidityTenthsPercent::new(300),
-    };
-    let snapshot = snapshot_with_mode(b"#dmrzz\n", b"#atr041a012c\n", b"#ttr00000000\n");
-    let outcome = ControlOutcome::from_response(
-        ControlCommand::SetAutomaticThresholds(requested),
-        frame(b"#amr0\n"),
-        Some(&snapshot),
-    )
-    .unwrap();
-
-    assert_eq!(
-        outcome.readback(),
-        &ControlReadback::Thresholds(Ok(Readback {
-            actual: requested,
-            comparison: ReadbackMatch::Matches,
-        })),
-    );
-    assert_eq!(
-        outcome.mode_readback(),
-        ModeReadback::Unrecognized(PayloadError::InvalidMode)
-    );
-    assert!(!outcome.is_confirmed());
+fn timer_confirmation_requires_verified_mode_expiry_and_fan_flag() {
+    for (minutes, mode, timer, expected, confirmed) in [
+        (
+            1,
+            b"#dmraf\n".as_slice(),
+            b"#ttr00010001\n".as_slice(),
+            ModeReadback::Differs(OperatingMode::Automatic),
+            false,
+        ),
+        (
+            1,
+            b"#dmraf\n".as_slice(),
+            b"#ttr00000001\n".as_slice(),
+            ModeReadback::UnverifiedTimerExpiry(OperatingMode::Automatic),
+            false,
+        ),
+        (
+            0,
+            b"#dmrtn\n".as_slice(),
+            b"#ttr00000000\n".as_slice(),
+            ModeReadback::FanFlagDiffers {
+                mode: OperatingMode::Timer,
+                actual: FanState::On,
+            },
+            false,
+        ),
+        (
+            0,
+            b"#dmrtf\n".as_slice(),
+            b"#ttr00000000\n".as_slice(),
+            ModeReadback::Matches(OperatingMode::Timer),
+            true,
+        ),
+        (
+            0,
+            b"#dmraf\n".as_slice(),
+            b"#ttr00000000\n".as_slice(),
+            ModeReadback::Differs(OperatingMode::Automatic),
+            false,
+        ),
+    ] {
+        let snapshot = snapshot_with_mode(mode, b"#atr041a012c\n", timer);
+        let outcome = ControlOutcome::from_response(
+            ControlCommand::SetTimer(Minutes::new(minutes)),
+            frame(b"#tmr0\n"),
+            Some(&snapshot),
+        )
+        .unwrap();
+        assert_eq!(
+            outcome.mode_readback(),
+            expected,
+            "minutes={minutes} mode={mode:?} timer={timer:?}"
+        );
+        assert_eq!(
+            outcome.is_confirmed(),
+            confirmed,
+            "minutes={minutes} mode={mode:?} timer={timer:?}"
+        );
+    }
 }

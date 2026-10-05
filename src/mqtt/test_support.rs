@@ -59,6 +59,19 @@ pub(super) async fn start_native_broker() -> NativeBroker {
 }
 
 pub(super) async fn start_native_broker_with_packet_limit(limit: usize) -> NativeBroker {
+    start_native_broker_with_config(&format!("max_packet_size {limit}")).await
+}
+
+pub(super) async fn start_native_broker_with_acl(allowed_topic: &str) -> NativeBroker {
+    use std::io::Write;
+    let directory = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("target/mqtt-tests");
+    std::fs::create_dir_all(&directory).unwrap();
+    let mut acl = tempfile::NamedTempFile::new_in(directory).unwrap();
+    writeln!(acl, "user gafctl-test\ntopic readwrite #\nuser partial-migration\ntopic read #\ntopic write {allowed_topic}").unwrap();
+    start_native_broker_with_config(&format!("acl_file {}", acl.path().display())).await
+}
+
+async fn start_native_broker_with_config(settings: &str) -> NativeBroker {
     use std::io::Write;
 
     let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
@@ -69,7 +82,7 @@ pub(super) async fn start_native_broker_with_packet_limit(limit: usize) -> Nativ
     let mut config = tempfile::NamedTempFile::new_in(directory).unwrap();
     writeln!(
         config,
-        "listener {port} 127.0.0.1\nallow_anonymous true\nmax_packet_size {limit}"
+        "listener {port} 127.0.0.1\nallow_anonymous true\n{settings}"
     )
     .unwrap();
     let process = Command::new("mosquitto")
@@ -139,7 +152,7 @@ pub(super) fn mqtt_device(proxy_id: ProxyId, id: &str) -> DeviceDescriptor {
     }
 }
 
-pub(super) fn config(port: u16, discovery_enabled: bool) -> MqttConfig {
+pub(crate) fn config(port: u16, discovery_enabled: bool) -> MqttConfig {
     MqttConfig {
         host: "127.0.0.1".to_owned(),
         port,

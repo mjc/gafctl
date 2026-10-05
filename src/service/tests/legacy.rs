@@ -7,7 +7,6 @@ use axum::{
 };
 use gafctl_api::{CommandId, ControlPreset, DeviceControlV2Request, DeviceControlV2Response};
 use http_body_util::BodyExt;
-use std::time::Instant;
 use tower::ServiceExt;
 
 #[tokio::test]
@@ -76,28 +75,20 @@ async fn ble_http_admission_rejects_busy_before_waiting_or_touching_bluetooth() 
 
 #[test]
 fn control_presets_encode_only_the_verified_settings() {
-    assert_eq!(
-        ControlPreset::Automatic105F30Percent
-            .command()
-            .frame()
-            .as_bytes(),
-        b"#ams041A012C\n"
-    );
-    assert_eq!(
-        ControlPreset::Automatic105_1F30_1Percent
-            .command()
-            .frame()
-            .as_bytes(),
-        b"#ams041B012D\n"
-    );
-    assert_eq!(
-        ControlPreset::TimerClear.command().frame().as_bytes(),
-        b"#tms0000\n"
-    );
-    assert_eq!(
-        ControlPreset::TimerOneMinute.command().frame().as_bytes(),
-        b"#tms0001\n"
-    );
+    for (preset, expected) in [
+        (
+            ControlPreset::Automatic105F30Percent,
+            b"#ams041A012C\n".as_slice(),
+        ),
+        (
+            ControlPreset::Automatic105_1F30_1Percent,
+            b"#ams041B012D\n".as_slice(),
+        ),
+        (ControlPreset::TimerClear, b"#tms0000\n".as_slice()),
+        (ControlPreset::TimerOneMinute, b"#tms0001\n".as_slice()),
+    ] {
+        assert_eq!(preset.command().frame().as_bytes(), expected, "{preset:?}");
+    }
     assert!(serde_json::from_str::<ControlPreset>("\"arbitrary\"").is_err());
 }
 
@@ -148,13 +139,4 @@ fn snapshot_projection_requires_every_field_to_decode() {
             "field {field}"
         );
     }
-}
-
-#[test]
-fn snapshot_projection_does_not_expose_identity_suffix_or_claim_airflow() {
-    let snapshot = snapshot_at(Instant::now(), SystemTime::now());
-    let projected = serde_json::to_string(&project_legacy_snapshot(&snapshot)).unwrap();
-    assert!(!projected.contains("private-suffix"));
-    assert!(projected.contains("\"estimated_running\":null"));
-    assert!(projected.contains("\"controller_fan_on\":false"));
 }

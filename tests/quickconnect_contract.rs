@@ -101,42 +101,25 @@ fn keys(value: &Value) -> Vec<&str> {
 
 #[test]
 fn request_fixtures_match_each_exact_reference_write_shape() {
-    let mode_fixture = json(MODE_REQUEST);
-    let targets_fixture = json(TARGETS_REQUEST);
-    let timer_fixture = json(TIMER_REQUEST);
-    let mode = &mode_fixture["body"];
-    let targets = &targets_fixture["body"];
-    let timer = &timer_fixture["body"];
-
-    assert_eq!(
-        keys(mode),
-        [
-            "automaticMode",
-            "desiredHumidity",
-            "desiredTemp",
-            "fanMode",
-            "timerMode",
-            "timerValue"
-        ]
-    );
-    assert_eq!(mode["automaticMode"], true);
-    assert_eq!(mode["timerMode"], false);
-    assert_eq!(mode["fanMode"], false);
-    assert_eq!(mode["desiredTemp"].as_i64(), Some(105));
-    assert_eq!(mode["desiredHumidity"].as_i64(), Some(40));
-    assert_eq!(mode["timerValue"].as_i64(), Some(60));
-
-    assert_eq!(
-        keys(targets),
-        ["automaticMode", "desiredHumidity", "desiredTemp"]
-    );
-    assert_eq!(targets["automaticMode"], true);
-    assert_eq!(targets["desiredTemp"].as_i64(), Some(105));
-    assert_eq!(targets["desiredHumidity"].as_i64(), Some(40));
-
-    assert_eq!(keys(timer), ["timerMode", "timerValue"]);
-    assert_eq!(timer["timerMode"], false);
-    assert_eq!(timer["timerValue"].as_i64(), Some(60));
+    for (name, source, expected) in [
+        (
+            "mode",
+            MODE_REQUEST,
+            serde_json::json!({"automaticMode":true,"timerMode":false,"fanMode":false,"desiredTemp":105,"desiredHumidity":40,"timerValue":60}),
+        ),
+        (
+            "targets",
+            TARGETS_REQUEST,
+            serde_json::json!({"automaticMode":true,"desiredTemp":105,"desiredHumidity":40}),
+        ),
+        (
+            "timer",
+            TIMER_REQUEST,
+            serde_json::json!({"timerMode":false,"timerValue":60}),
+        ),
+    ] {
+        assert_eq!(json(source)["body"], expected, "{name}");
+    }
 }
 
 #[test]

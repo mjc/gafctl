@@ -161,7 +161,14 @@ async fn publish_discovery(
         &desired,
     )
     .chain(discovery::component_topics(topics, &inactive_identities));
-    if !publish_discovery_messages(client, inactive_topics, b"").await {
+    if !publish_discovery_messages(
+        client,
+        inactive_topics,
+        b"",
+        PublishOptions::at_least_once().retained(),
+    )
+    .await
+    {
         return previous;
     }
     for (device, topic, config) in configs {
@@ -193,8 +200,14 @@ async fn publish_device_discovery(
     migrating: bool,
 ) -> bool {
     if migrating
-        && !publish_component_messages(client, topics, identity, br#"{"migrate_discovery":true}"#)
-            .await
+        && !publish_component_messages(
+            client,
+            topics,
+            identity,
+            br#"{"migrate_discovery":true}"#,
+            PublishOptions::at_least_once(),
+        )
+        .await
     {
         return false;
     }
@@ -205,10 +218,25 @@ async fn publish_device_discovery(
             return false;
         }
     };
-    if !publish_discovery_message(client, topic, payload).await {
+    if !publish_discovery_message(
+        client,
+        topic,
+        payload,
+        PublishOptions::at_least_once().retained(),
+    )
+    .await
+    {
         return false;
     }
-    !migrating || publish_component_messages(client, topics, identity, b"").await
+    !migrating
+        || publish_component_messages(
+            client,
+            topics,
+            identity,
+            b"",
+            PublishOptions::at_least_once().retained(),
+        )
+        .await
 }
 
 async fn publish_component_messages(
@@ -216,11 +244,13 @@ async fn publish_component_messages(
     topics: Topics,
     identity: &(DeviceId, DeviceBackend),
     payload: &[u8],
+    options: PublishOptions,
 ) -> bool {
     publish_discovery_messages(
         client,
         discovery::component_topics(topics, std::slice::from_ref(identity)),
         payload,
+        options,
     )
     .await
 }
@@ -229,24 +259,31 @@ async fn publish_discovery_messages(
     client: &AsyncClient,
     topics: impl IntoIterator<Item = String>,
     payload: &[u8],
+    options: PublishOptions,
 ) -> bool {
     stream::iter(topics)
         .map(Ok::<_, ()>)
-        .try_fold((), |(), topic| async move {
-            publish_discovery_message(client, topic, payload.to_vec())
-                .await
-                .then_some(())
-                .ok_or(())
+        .try_fold((), |(), topic| {
+            let options = options.clone();
+            async move {
+                publish_discovery_message(client, topic, payload.to_vec(), options)
+                    .await
+                    .then_some(())
+                    .ok_or(())
+            }
         })
         .await
         .is_ok()
 }
 
-async fn publish_discovery_message(client: &AsyncClient, topic: String, payload: Vec<u8>) -> bool {
+async fn publish_discovery_message(
+    client: &AsyncClient,
+    topic: String,
+    payload: Vec<u8>,
+    options: PublishOptions,
+) -> bool {
     let completion = tokio::time::timeout(std::time::Duration::from_secs(30), async {
-        let notice = client
-            .publish_tracked(topic, payload, PublishOptions::at_least_once().retained())
-            .await?;
+        let notice = client.publish_tracked(topic, payload, options).await?;
         notice.wait_completion_async().await?;
         Ok::<(), anyhow::Error>(())
     })
@@ -254,11 +291,11 @@ async fn publish_discovery_message(client: &AsyncClient, topic: String, payload:
     match completion {
         Ok(Ok(())) => true,
         Ok(Err(error)) => {
-            tracing::warn!(%error, "could not complete retained MQTT discovery publication");
+            tracing::warn!(%error, "could not complete MQTT discovery publication");
             false
         }
         Err(error) => {
-            tracing::warn!(%error, "retained MQTT discovery publication timed out");
+            tracing::warn!(%error, "MQTT discovery publication timed out");
             false
         }
     }
@@ -470,7 +507,8 @@ mod tests {
 
     #[tokio::test]
     async fn native_broker_rejected_grouped_discovery_preserves_old_migration_configs() {
-        let broker = super::super::test_support::start_native_broker_with_packet_limit(2_048).await;
+        let mut broker =
+            super::super::test_support::start_native_broker_with_packet_limit(2_048).await;
         let device = mqtt_device(ProxyId::default(), "packet-limit");
         let topics = Topics(device.proxy_id);
         let identities = [(device.id.clone(), device.backend)];
@@ -479,6 +517,7 @@ mod tests {
             "homeassistant/sensor/gafctl/{}_temperature/config",
             topics.identifier(&device.id)
         );
+        let original = br#"{"unique_id":"existing","state_topic":"working/state"}"#;
         let (observer, mut received) = observed_client("rejected-group-observer", broker.port);
         observer
             .subscribe("homeassistant/#", QoS::AtLeastOnce)
@@ -487,18 +526,22 @@ mod tests {
         observer
             .publish(
                 &old_topic,
-                br#"{"unique_id":"existing"}"#.to_vec(),
+                original.to_vec(),
                 PublishOptions::at_least_once().retained(),
             )
             .await
             .unwrap();
         receive_topic(&mut received, &old_topic).await;
         let (client, _) = observed_client("rejected-group-publisher", broker.port);
-        assert!(
-            publish_discovery(&client, topics, &snapshot(device), true, HashSet::new())
-                .await
-                .is_empty()
-        );
+        let previous = publish_discovery(
+            &client,
+            topics,
+            &snapshot(device.clone()),
+            true,
+            HashSet::new(),
+        )
+        .await;
+        assert!(previous.is_empty());
         let markers = timeout(
             Duration::from_secs(15),
             received.by_ref().take(old_topics.len()).collect::<Vec<_>>(),
@@ -517,12 +560,154 @@ mod tests {
         );
         let (late, mut retained) = observed_client("rejected-group-late", broker.port);
         late.subscribe(&old_topic, QoS::AtLeastOnce).await.unwrap();
-        assert!(
-            !receive_topic(&mut retained, &old_topic)
+        assert_eq!(
+            receive_topic(&mut retained, &old_topic)
                 .await
                 .payload
-                .is_empty()
+                .as_ref(),
+            original
         );
+        broker.restart().await;
+        assert_successful_migration_retry(broker.port, device, previous).await;
+    }
+
+    async fn assert_successful_migration_retry(
+        port: u16,
+        device: DeviceDescriptor,
+        previous: HashSet<String>,
+    ) {
+        let topics = Topics(device.proxy_id);
+        let old_topics =
+            discovery::component_topics(topics, &[(device.id.clone(), device.backend)])
+                .collect::<HashSet<_>>();
+        let (observer, mut received) = observed_client("retry-observer", port);
+        observer
+            .subscribe("homeassistant/#", QoS::AtLeastOnce)
+            .await
+            .unwrap();
+        let (client, _) = observed_client("retry-publisher", port);
+        let active =
+            publish_discovery(&client, topics, &snapshot(device.clone()), true, previous).await;
+        assert_eq!(active, HashSet::from([topics.discovery(&device.id)]));
+        let messages = timeout(
+            Duration::from_secs(15),
+            received
+                .by_ref()
+                .take(old_topics.len() * 2 + 1)
+                .collect::<Vec<_>>(),
+        )
+        .await
+        .unwrap();
+        assert!(messages[..old_topics.len()].iter().all(|message| {
+            old_topics.contains(std::str::from_utf8(&message.topic).unwrap())
+                && message.payload.as_ref() == br#"{"migrate_discovery":true}"#
+        }));
+        assert_eq!(
+            messages[old_topics.len()].topic,
+            topics.discovery(&device.id)
+        );
+        assert!(messages[old_topics.len() + 1..].iter().all(|message| {
+            old_topics.contains(std::str::from_utf8(&message.topic).unwrap())
+                && message.payload.is_empty()
+        }));
+        let (late, mut retained) = observed_client("retry-late", port);
+        late.subscribe("homeassistant/#", QoS::AtLeastOnce)
+            .await
+            .unwrap();
+        assert_eq!(
+            timeout(Duration::from_secs(15), retained.next())
+                .await
+                .unwrap()
+                .unwrap()
+                .topic,
+            topics.discovery(&device.id)
+        );
+        assert!(
+            timeout(Duration::from_millis(200), retained.next())
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn native_broker_partial_marker_rejection_preserves_configs_and_retries() {
+        let device = mqtt_device(ProxyId::default(), "partial-marker");
+        let topics = Topics(device.proxy_id);
+        let identities = [(device.id.clone(), device.backend)];
+        let old_topics = discovery::component_topics(topics, &identities)
+            .take(2)
+            .collect::<Vec<_>>();
+        let mut broker =
+            super::super::test_support::start_native_broker_with_acl(&old_topics[0]).await;
+        let (observer, mut received) = observed_client("partial-observer", broker.port);
+        observer
+            .subscribe("homeassistant/#", QoS::AtLeastOnce)
+            .await
+            .unwrap();
+        let original = br#"{"unique_id":"existing","state_topic":"working/state"}"#;
+        for topic in &old_topics {
+            observer
+                .publish(
+                    topic,
+                    original.to_vec(),
+                    PublishOptions::at_least_once().retained(),
+                )
+                .await
+                .unwrap();
+            receive_topic(&mut received, topic).await;
+        }
+        let mut options =
+            super::super::test_support::test_mqtt_options("partial-publisher", broker.port);
+        options.set_credentials("partial-migration", "unused");
+        let (client, eventloop) = AsyncClient::builder(options).capacity(16).build();
+        let _events = tokio_util::task::AbortOnDropHandle::new(tokio::spawn(
+            eventloop.into_stream().for_each(|_| future::ready(())),
+        ));
+        let previous = publish_discovery(
+            &client,
+            topics,
+            &snapshot(device.clone()),
+            true,
+            HashSet::new(),
+        )
+        .await;
+        assert!(previous.is_empty());
+        let marker = timeout(Duration::from_secs(15), received.next())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(marker.topic, old_topics[0]);
+        assert_eq!(marker.payload.as_ref(), br#"{"migrate_discovery":true}"#);
+        assert!(
+            timeout(Duration::from_millis(200), received.next())
+                .await
+                .is_err()
+        );
+        let (late, mut retained) = observed_client("partial-late", broker.port);
+        late.subscribe("homeassistant/#", QoS::AtLeastOnce)
+            .await
+            .unwrap();
+        let replayed = timeout(
+            Duration::from_secs(15),
+            retained.by_ref().take(2).collect::<Vec<_>>(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(replayed.len(), 2);
+        assert_eq!(
+            replayed
+                .iter()
+                .map(|message| std::str::from_utf8(&message.topic).unwrap().to_owned())
+                .collect::<HashSet<_>>(),
+            old_topics.into_iter().collect::<HashSet<_>>()
+        );
+        assert!(
+            replayed
+                .iter()
+                .all(|message| message.payload.as_ref() == original)
+        );
+        broker.restart().await;
+        assert_successful_migration_retry(broker.port, device, previous).await;
     }
 
     #[tokio::test]

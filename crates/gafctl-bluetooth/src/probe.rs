@@ -210,11 +210,14 @@ async fn query_selected_device(
 #[cfg(test)]
 mod tests {
     #[tokio::test]
-    async fn idle_wait_drains_cleanup_after_the_caller_is_cancelled() {
-        let client = std::sync::Arc::new(super::ProbeClient::new());
-        let guard = std::sync::Arc::clone(&client.backend).lock_owned().await;
-        let (started, did_start) = tokio::sync::oneshot::channel();
-        let (finish, can_finish) = tokio::sync::oneshot::channel();
+    async fn cancelled_caller_keeps_backend_locked_until_idle_cleanup_finishes() {
+        use std::sync::Arc;
+        use tokio::sync::oneshot;
+
+        let client = Arc::new(super::ProbeClient::new());
+        let guard = Arc::clone(&client.backend).lock_owned().await;
+        let (started, did_start) = oneshot::channel();
+        let (finish, can_finish) = oneshot::channel();
         let caller = tokio::spawn(super::finish_without_cancelling(async move {
             let _guard = guard;
             started.send(()).unwrap();
@@ -224,7 +227,9 @@ mod tests {
         did_start.await.unwrap();
         caller.abort();
         assert!(caller.await.unwrap_err().is_cancelled());
-        let idle = tokio::spawn(async move { client.wait_until_idle().await });
+        assert!(client.backend.try_lock().is_err());
+        let idle_client = Arc::clone(&client);
+        let idle = tokio::spawn(async move { idle_client.wait_until_idle().await });
         tokio::task::yield_now().await;
         assert!(!idle.is_finished());
         finish.send(()).unwrap();
@@ -232,31 +237,6 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-    }
-
-    #[tokio::test]
-    async fn cancelled_caller_keeps_backend_locked_until_operation_finishes() {
-        use std::sync::Arc;
-        use tokio::sync::{Mutex, oneshot};
-
-        let backend = Arc::new(Mutex::new(()));
-        let guard = Arc::clone(&backend).lock_owned().await;
-        let (started, did_start) = oneshot::channel();
-        let (finish, can_finish) = oneshot::channel();
-        let (completed, did_complete) = oneshot::channel();
-        let caller = tokio::spawn(super::finish_without_cancelling(async move {
-            let _guard = guard;
-            started.send(()).unwrap();
-            can_finish.await.unwrap();
-            completed.send(()).unwrap();
-            Ok(())
-        }));
-        did_start.await.unwrap();
-        caller.abort();
-        assert!(caller.await.unwrap_err().is_cancelled());
-        assert!(backend.try_lock().is_err());
-        finish.send(()).unwrap();
-        did_complete.await.unwrap();
-        let _guard = backend.lock().await;
+        assert!(client.backend.try_lock().is_ok());
     }
 }
