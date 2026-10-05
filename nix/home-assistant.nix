@@ -7,4 +7,5 @@ buildHomeAssistantComponent {
     root = ../.;
     fileset = ../custom_components/gafctl;
   };
+  meta.license = lib.licenses.mit;
 }

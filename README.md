@@ -168,3 +168,9 @@ all presets, QuickConnect commands, timeouts, and exit codes.
 - [Bluetooth protocol and captured device replies](docs/protocol-findings.md)
 - [Bluetooth protocol contract](docs/protocol-contract-v1.md)
 - [QuickConnect API research](docs/quickconnect-contract.md)
+
+## License
+
+Gafctl is licensed under [MIT](LICENSE). The
+[QuickConnect reference notice](LICENSE-QUICKCONNECT-REFERENCE.txt) covers the
+upstream reference implementation.

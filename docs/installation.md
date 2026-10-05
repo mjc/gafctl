@@ -1,7 +1,7 @@
 # Install Gafctl
 
 Gafctl has two parts: a server near the fan, and a Home Assistant integration.
-Install the server once. HACS installs the integration; it does not install or
+The integration requires Home Assistant **2026.9.4 or newer**. Install the server once. HACS installs the integration; it does not install or
 start the server.
 
 | Server host | Install method |
@@ -21,7 +21,12 @@ its backend remains experimental, with writes disabled by default.
 No release binaries or registry images have been published yet. The source,
 Compose, HACS custom repository, and Home Assistant app paths work from this
 repository. The release workflow builds `.deb` packages, Linux binary archives,
-and multi-architecture container images when a release is published.
+and multi-architecture container images when a release is published. Both native
+Linux architectures must pass checks of the exported archive, installed Debian
+package, runtime image and Home Assistant app image before publication. Tagged
+builds produce GitHub artifact attestations for the tested packages and image
+archives. These establish build provenance; they do not establish physical fan
+compatibility.
 
 ## Ubuntu and Debian
 
@@ -182,8 +187,25 @@ To update, pull this repository and repeat your original Compose command with
    Home Assistant MQTT user. Enable discovery when you want MQTT entities.
 5. Start the app and enable **Start on boot**. Check its log and
    `http://HOME_ASSISTANT_HOST:8787/health`.
-6. [Install the integration](#home-assistant-integration) for HTTP, or use
+6. Discovery publishes only devices assigned to MQTT. Read the inventory and
+   select MQTT ownership using the commands below before expecting entities.
+7. [Install the integration](#home-assistant-integration) for HTTP, or use
    Home Assistant's MQTT integration for MQTT discovery.
+
+To assign a fan to MQTT, read its actual local ID from inventory:
+
+```sh
+curl http://HOME_ASSISTANT_HOST:8787/api/v2/devices
+curl --fail -X PUT http://HOME_ASSISTANT_HOST:8787/api/v2/devices/DEVICE_ID/sources \
+  -H 'Content-Type: application/json' \
+  -d '{"state_source":"mqtt","command_source":"mqtt"}'
+curl http://HOME_ASSISTANT_HOST:8787/api/v2/devices
+```
+
+Replace `DEVICE_ID` with the inventory ID. Keep both sources equal. MQTT and
+MQTT discovery must be configured before this change is accepted. Returning both
+sources to `http` removes MQTT discovery for that device; choose one Home
+Assistant representation per fan.
 
 This app currently builds the Rust binaries locally from a pinned source
 revision during installation. The first build takes time and needs Internet

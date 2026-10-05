@@ -9,7 +9,18 @@ concurrency:
   group: distribution-${{ github.ref }}
   cancel-in-progress: false
 jobs:
+  checks:
+    strategy:
+      matrix:
+        runner: [ubuntu-24.04, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: cachix/install-nix-action@2126ae7fc54c9df00dd18f7f18754393182c73cd # v31.9.1
+      - name: Check Rust and Home Assistant contracts
+        run: nix run --accept-flake-config github:cachix/devenv/b904dcb51fe48c30db250038241507f60752f222 -- tasks run check:all
   build:
+    needs: checks
     strategy:
       matrix:
         include:
@@ -18,8 +29,14 @@ jobs:
           - runner: ubuntu-24.04-arm
             arch: arm64
     runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          fetch-depth: 0
       - name: Check versions
         shell: bash
         run: |
@@ -33,7 +50,9 @@ jobs:
         with:
           context: .
           target: artifacts
-          build-args: PACKAGE_ARCH=${{ matrix.arch }}
+          build-args: |
+            PACKAGE_ARCH=${{ matrix.arch }}
+            GAFCTL_REVISION=${{ github.sha }}
           outputs: type=local,dest=dist
           cache-from: type=gha,scope=gafctl-${{ matrix.arch }}
           cache-to: type=gha,mode=max,scope=gafctl-${{ matrix.arch }}
@@ -43,8 +62,55 @@ jobs:
           context: .
           target: runtime
           tags: gafctl:local
+          build-args: GAFCTL_REVISION=${{ github.sha }}
           outputs: type=docker,dest=gafctl-image.tar
           cache-from: type=gha,scope=gafctl-${{ matrix.arch }}
+      - name: Check exported packages and image
+        env:
+          PACKAGE_ARCH: ${{ matrix.arch }}
+        run: |
+          packaging/check-release-artifacts.sh "$PACKAGE_ARCH"
+          docker load --input gafctl-image.tar
+          packaging/check-release-image.sh gafctl:local "$PACKAGE_ARCH" "$GITHUB_SHA"
+      - name: Check Home Assistant app source
+        id: app
+        shell: bash
+        run: |
+          revision=$(sed -n 's/^ARG GAFCTL_REVISION=//p' home-assistant/Dockerfile)
+          test -n "$revision"
+          git cat-file -e "$revision^{commit}"
+          git diff --exit-code "$revision" HEAD -- Cargo.toml Cargo.lock rust-toolchain.toml .clippy.toml LICENSE LICENSE-QUICKCONNECT-REFERENCE.txt src crates
+          echo "revision=$revision" >> "$GITHUB_OUTPUT"
+          echo "version=$(packaging/version.sh)" >> "$GITHUB_OUTPUT"
+          if [[ "${{ matrix.arch }}" == arm64 ]]; then arch=aarch64; else arch=amd64; fi
+          echo "arch=$arch" >> "$GITHUB_OUTPUT"
+      - name: Build Home Assistant app image
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: home-assistant
+          tags: gafctl-app:local
+          outputs: type=docker,dest=gafctl-app-image.tar
+          build-args: |
+            BUILD_VERSION=${{ steps.app.outputs.version }}
+            BUILD_ARCH=${{ steps.app.outputs.arch }}
+          cache-from: type=gha,scope=gafctl-app-${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=gafctl-app-${{ matrix.arch }}
+      - name: Check exported Home Assistant app image
+        env:
+          PACKAGE_ARCH: ${{ matrix.arch }}
+          APP_REVISION: ${{ steps.app.outputs.revision }}
+        run: |
+          docker load --input gafctl-app-image.tar
+          packaging/check-release-image.sh gafctl-app:local "$PACKAGE_ARCH" "$APP_REVISION"
+      - name: Attest tested release artifacts
+        if: github.ref_type == 'tag'
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4
+        with:
+          subject-path: |
+            dist/*.deb
+            dist/*.tar.gz
+            gafctl-image.tar
+            gafctl-app-image.tar
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: packages-${{ matrix.arch }}
@@ -54,6 +120,11 @@ jobs:
         with:
           name: image-${{ matrix.arch }}
           path: gafctl-image.tar
+          retention-days: 7
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: app-image-${{ matrix.arch }}
+          path: gafctl-app-image.tar
           retention-days: 7
   publish:
     if: github.ref_type == 'tag'

@@ -2,6 +2,10 @@
 name = "gafctl-client"
 version = "0.1.0"
 edition = "2024"
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
 description = "Typed asynchronous client for a running Gafctl service"
 
 [lints]

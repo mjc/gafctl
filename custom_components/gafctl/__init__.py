@@ -18,6 +18,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: GafctlConfigEntry) -> bo
     entry.runtime_data = coordinator
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     coordinator._entities_loaded = True
+    entry.async_on_unload(
+        coordinator.async_add_listener(coordinator._reload_changed_entities)
+    )
     return True
 
 

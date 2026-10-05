@@ -1,4 +1,5 @@
 use std::{
+    net::SocketAddr,
     sync::{
         Arc,
         atomic::{AtomicUsize, Ordering},
@@ -14,6 +15,11 @@ use axum::{
     routing::{get, post},
 };
 use serde_json::{Value, json};
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    net::TcpStream,
+};
+use tokio_stream::{StreamExt, wrappers::IntervalStream};
 use tokio_util::task::AbortOnDropHandle;
 
 async fn cli<'a>(
@@ -41,6 +47,71 @@ async fn cli<'a>(
 }
 
 struct ServerProcess(std::process::Child);
+
+async fn start_server(binary: &str, prefix: Option<&str>) -> (ServerProcess, SocketAddr) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    drop(listener);
+    let mut command = std::process::Command::new(assert_cmd::cargo::cargo_bin(binary));
+    command.args(prefix).args(["--bind", &address.to_string()]);
+    std::env::vars_os()
+        .filter(|(name, _)| name.as_encoded_bytes().starts_with(b"GAFCTL_"))
+        .for_each(|(name, _)| {
+            command.env_remove(name);
+        });
+    let mut server = ServerProcess(command.stdout(std::process::Stdio::null()).spawn().unwrap());
+    let client = reqwest::Client::new();
+    let health = format!("http://{address}/health");
+    for _ in 0..100 {
+        assert!(
+            server.0.try_wait().unwrap().is_none(),
+            "{binary} exited before listening"
+        );
+        if client
+            .get(&health)
+            .send()
+            .await
+            .is_ok_and(|response| response.status().is_success())
+        {
+            return (server, address);
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    unreachable!("{binary} did not serve health")
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn stalled_http_body_does_not_prevent_sigterm_exit() {
+    let (mut server, address) = start_server("gafctl-server", None).await;
+    let mut stalled = TcpStream::connect(address).await.unwrap();
+    stalled.write_all(
+        b"POST /api/v2/devices/configured/control HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: 1000\r\nExpect: 100-continue\r\n\r\n"
+    ).await.unwrap();
+    let mut accepted = [0; 25];
+    tokio::time::timeout(Duration::from_secs(2), stalled.read_exact(&mut accepted))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(&accepted, b"HTTP/1.1 100 Continue\r\n\r\n");
+    stalled.write_all(b"{").await.unwrap();
+    assert!(
+        std::process::Command::new("kill")
+            .args(["-TERM", &server.0.id().to_string()])
+            .status()
+            .unwrap()
+            .success()
+    );
+    let ticks = IntervalStream::new(tokio::time::interval(Duration::from_millis(20)));
+    let exited = ticks.filter_map(|_| server.0.try_wait().unwrap());
+    tokio::pin!(exited);
+    let status = tokio::time::timeout(Duration::from_secs(7), exited.next())
+        .await
+        .expect("server must exit with the unfinished request still open")
+        .unwrap();
+    assert!(status.success());
+    drop(stalled);
+}
 
 #[test]
 fn server_help_and_invalid_arguments_are_forwarded_to_the_server_executable() {
@@ -70,46 +141,8 @@ impl Drop for ServerProcess {
 #[tokio::test]
 async fn both_server_entrypoints_serve_health_and_inventory_without_device_access() {
     for (binary, prefix) in [("gafctl", Some("server")), ("gafctl-server", None)] {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap();
-        drop(listener);
-        let mut command = std::process::Command::new(assert_cmd::cargo::cargo_bin(binary));
-        command.args(prefix).args(["--bind", &address.to_string()]);
-        for name in [
-            "GAFCTL_DEVICE_ID",
-            "GAFCTL_IDENTITY_STORE",
-            "GAFCTL_MQTT_HOST",
-            "GAFCTL_MQTT_USERNAME",
-            "GAFCTL_MQTT_PASSWORD",
-            "GAFCTL_QUICKCONNECT_USERNAME",
-            "GAFCTL_QUICKCONNECT_PASSWORD",
-            "GAFCTL_QUICKCONNECT_PASSWORD_FILE",
-            "GAFCTL_QUICKCONNECT_WRITES_ENABLED",
-        ] {
-            command.env_remove(name);
-        }
-        let mut server =
-            ServerProcess(command.stdout(std::process::Stdio::null()).spawn().unwrap());
+        let (_server, address) = start_server(binary, prefix).await;
         let client = reqwest::Client::new();
-        let health = format!("http://{address}/health");
-        let mut ready = false;
-        for _ in 0..100 {
-            assert!(
-                server.0.try_wait().unwrap().is_none(),
-                "{binary} exited before listening"
-            );
-            if client
-                .get(&health)
-                .send()
-                .await
-                .is_ok_and(|response| response.status().is_success())
-            {
-                ready = true;
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-        assert!(ready, "{binary} did not serve health");
         let inventory: Value = client
             .get(format!("http://{address}/api/v2/devices"))
             .send()

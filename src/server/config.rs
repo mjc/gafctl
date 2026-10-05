@@ -29,6 +29,19 @@ impl ServerConfig {
     }
 }
 
+pub(super) fn validate_mqtt_ownership(
+    registry: &crate::backend::DeviceRegistry,
+    ble_enabled: bool,
+    account_id: Option<&str>,
+    discovery_enabled: bool,
+) -> Result<()> {
+    anyhow::ensure!(
+        !registry.mqtt_ownership_required(ble_enabled, account_id) || discovery_enabled,
+        "persisted MQTT ownership requires a configured broker and --mqtt-discovery"
+    );
+    Ok(())
+}
+
 pub(super) fn read_quickconnect_config(
     role: &str,
     writes_enabled: bool,
@@ -176,6 +189,66 @@ mod tests {
             };
             assert_eq!(config.validate().is_ok(), valid, "{address}");
         });
+    }
+
+    #[test]
+    fn restored_mqtt_ownership_requires_an_available_discovery_publisher() {
+        use crate::backend::DeviceRegistry;
+        use gafctl_api::{DeviceId, EntitySource};
+
+        let (_directory, path) = crate::test_support::identity_store_fixture();
+        let mut registry = DeviceRegistry::load(&path).unwrap();
+        registry.register_configured_ble();
+        registry
+            .set_entity_sources(
+                &DeviceId::configured_ble(),
+                EntitySource::Mqtt,
+                EntitySource::Mqtt,
+            )
+            .unwrap();
+        let saved = std::fs::read(&path).unwrap();
+        let registry = DeviceRegistry::load(&path).unwrap();
+        let config = ServerConfig {
+            device_id: Some("synthetic-ble-id".into()),
+            identity_store: Some(path.clone()),
+            ..server_config()
+        };
+        assert_eq!(
+            validate_mqtt_ownership(&registry, config.device_id.is_some(), None, false)
+                .unwrap_err()
+                .to_string(),
+            "persisted MQTT ownership requires a configured broker and --mqtt-discovery"
+        );
+        assert!(validate_mqtt_ownership(&registry, false, None, false).is_ok());
+        assert!(validate_mqtt_ownership(&registry, true, None, true).is_ok());
+        assert_eq!(std::fs::read(path).unwrap(), saved);
+    }
+
+    #[test]
+    fn restored_cloud_mqtt_ownership_is_scoped_to_the_configured_account() {
+        use crate::backend::DeviceRegistry;
+        use gafctl_api::EntitySource;
+
+        let (_directory, path) = crate::test_support::identity_store_fixture();
+        let mut registry = DeviceRegistry::load(&path).unwrap();
+        let ids = registry
+            .reconcile_quickconnect(
+                "consumer:account",
+                &[crate::test_support::cloud_device("provider", "Fan")],
+            )
+            .unwrap();
+        registry
+            .set_entity_sources(&ids[0], EntitySource::Mqtt, EntitySource::Mqtt)
+            .unwrap();
+        let saved = std::fs::read(&path).unwrap();
+        let registry = DeviceRegistry::load(&path).unwrap();
+        assert!(
+            validate_mqtt_ownership(&registry, false, Some("consumer:account"), false).is_err()
+        );
+        assert!(validate_mqtt_ownership(&registry, false, Some("consumer:account"), true).is_ok());
+        assert!(validate_mqtt_ownership(&registry, false, Some("consumer:other"), false).is_ok());
+        assert!(validate_mqtt_ownership(&registry, false, None, false).is_ok());
+        assert_eq!(std::fs::read(path).unwrap(), saved);
     }
 
     #[test]

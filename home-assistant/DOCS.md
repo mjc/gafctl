@@ -25,10 +25,25 @@ MQTT is optional. Set `mqtt_host`, `mqtt_username`, and `mqtt_password` together
 For Home Assistant's Mosquitto app, the host is `core-mosquitto`. Use a dedicated
 MQTT login. Enable `mqtt_discovery` if you want entities through MQTT.
 
+Enabling discovery does not automatically change a device's owner. Read
+`http://HOME_ASSISTANT_HOST:8787/api/v2/devices` to get its actual local device ID,
+then assign both sources to MQTT:
+
+```sh
+curl --fail -X PUT http://HOME_ASSISTANT_HOST:8787/api/v2/devices/DEVICE_ID/sources \
+  -H 'Content-Type: application/json' \
+  -d '{"state_source":"mqtt","command_source":"mqtt"}'
+```
+
+Replace `DEVICE_ID` with the inventory ID and reread inventory to confirm both
+sources. MQTT discovery must be enabled for this request to succeed. To use the
+HTTP integration instead, assign both sources to `http`. Ownership persists
+across app restarts; avoid HTTP and MQTT duplicates of the same fan.
+
 For HTTP, install the separate **Gafctl GAF Vent** integration through the HACS
 custom repository `https://github.com/mjc/gafctl`, or copy the repository's
 `custom_components/gafctl` directory into your Home Assistant configuration.
-Restart Home Assistant and add the integration with
+The integration requires Home Assistant 2026.9.4 or newer. Restart Home Assistant and add the integration with
 `http://HOME_ASSISTANT_HOST:8787`. Do not add both HTTP and MQTT entities for the
 same fan; select one entity source for each device.
 

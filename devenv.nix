@@ -21,7 +21,7 @@ in {
       cargo-deny
       cargo-machete
       bacon
-      python3
+      (python3.withPackages (ps: [ps.aiohttp]))
       ruff
       mypy
       pkg-config
@@ -41,6 +41,7 @@ in {
   tasks."check:clippy".exec = "cargo clippy --workspace --all-targets --all-features --locked -- -D warnings";
   tasks."check:clippy-cli".exec = "cargo clippy --package gafctl --all-targets --no-default-features --features cli --locked -- -D warnings";
   tasks."check:clippy-http".exec = "cargo clippy --package gafctl --all-targets --no-default-features --features http --locked -- -D warnings";
+  tasks."check:no-features".exec = "cargo check --package gafctl --all-targets --no-default-features --locked";
   tasks."check:test".exec = "cargo nextest run --workspace --all-targets --all-features --locked --status-level fail --final-status-level fail";
   tasks."check:cli-bin".exec = "cargo nextest run --package gafctl --no-default-features --features cli --lib --bin gafctl --locked --status-level fail --final-status-level fail";
   tasks."check:http".exec = "cargo nextest run --package gafctl --all-targets --no-default-features --features http --locked --status-level fail --final-status-level fail";
@@ -49,7 +50,7 @@ in {
   tasks."check:python-types".exec = "mypy custom_components/gafctl/client.py custom_components/gafctl/models.py custom_components/gafctl/controls.py";
   tasks."check:python-lint".exec = "ruff check custom_components tests/*.py";
   tasks."check:ha".exec = "python3 -m unittest discover -s tests -p test_gafctl_client.py";
-  tasks."check:release".exec = "python3 packaging/test-publish-images.py";
+  tasks."check:release".exec = "python3 packaging/test-publish-images.py && python3 packaging/test_package.py";
   tasks."check:ha-registry" = lib.mkIf linux {
     exec = ''
       set -eu
@@ -76,6 +77,7 @@ in {
       "check:clippy"
       "check:clippy-cli"
       "check:clippy-http"
+      "check:no-features"
       "check:test"
       "check:cli-bin"
       "check:http"

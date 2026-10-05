@@ -40,7 +40,10 @@ client, models and controls, and the Python
 Home Assistant client tests and release image publication tests.
 
 `check:release` uses a local Docker stub to check artifact validation,
-architecture agreement, image tags and manifest members. It does not publish images.
+architecture agreement, image tags and manifest members. It also runs package boundary tests
+that reject mismatched ELF targets,
+non-ELF input and stale CLI/server versions before packaging. Neither suite
+publishes images.
 
 On native Linux, `check:all` also runs `check:ha-registry`. That task uses Home
 Assistant and MQTT dependencies pinned by `devenv.lock`, generates discovery
@@ -69,7 +72,7 @@ Replace `TEST_NAME` with a test name or substring. For the Python tests:
 python3 -m unittest discover -s tests -p test_gafctl_client.py
 ```
 
-The HA integration uses Python 3.14 and typed config-entry runtime data.
+The HA integration baseline is Home Assistant 2026.9.4 or newer, using Python 3.14 and typed config-entry runtime data.
 `models.py` describes the fixed Rust API dictionaries with `TypedDict`.
 The client returns those dictionaries directly, checking device identity,
 backend agreement, ownership, availability and command confirmation.
@@ -215,8 +218,9 @@ run uploads build artifacts without publishing. A `vVERSION` tag must match the
 root Cargo version, HA manifest version, and app version. Update the app source
 revision when releasing server changes.
 
-Before publishing, protect release tags and configure required reviewers on the
-GitHub `release` environment. Its publish job creates a GitHub Release with
+Release publication requires successful checks and artifact tests, an immutable
+`vVERSION` tag, and the GitHub `release` environment restricted to version tags.
+Required environment reviewers can be added separately. Its publish job creates a GitHub Release with
 checksums and publishes `ghcr.io/mjc/gafctl:VERSION` as a multi-architecture
 image. Set the GHCR package visibility to public after its first publication.
 Do not document a registry tag as available before it has been published.
@@ -286,3 +290,25 @@ across restart, then removes its units and fixtures. The artifact defines the
 test ports, paths and unit names. It never configures a fan or cloud account.
 Set `GAFCTL_CHECK_SUDO=doas` if that is the host's privilege tool. The check reads BlueZ's object list as the
 service account without scanning or connecting to a device.
+
+## Release artifacts
+
+The distribution workflow runs the repository's pinned devenv `check:all` on
+native amd64 and arm64, including Rust feature configurations and native Home
+Assistant registry tests, before artifact builds. It also checks packaging input
+validation on both architectures.
+Before uploading or
+publishing, it tests the exported binary archive, installs and tests the exact
+Debian package, and loads and tests the exported server and Home Assistant app
+image archives. The image checks verify architecture, source revision, both
+executable versions, license notices, HTTP readiness, shutdown and persistent
+identity. Package smoke checks use no configured devices or cloud credentials.
+The app's pinned server revision must contain the same Cargo/toolchain/runtime
+inputs as the tagged source. Update its pin only after those inputs are committed.
+
+Tagged runs use GitHub's built-in artifact attestations for packages and image
+archives. Verify a downloaded package with `gh attestation verify --repo
+mjc/gafctl PATH_TO_PACKAGE`; these attestations do not sign the GHCR manifest or
+prove physical fan compatibility. Docker base images are pinned by immutable
+multi-architecture index digest. Apt repositories still resolve packages at
+build time, so byte-for-byte reproducibility is not claimed.

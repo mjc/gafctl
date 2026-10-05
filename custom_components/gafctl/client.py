@@ -143,6 +143,7 @@ class ApiClient:
             method,
             urljoin(self._base_url, path),
             timeout=10 if method == "GET" else 300,
+            allow_redirects=False,
             **kwargs,
         ) as response:
             if method == "GET" and response.status != 200:

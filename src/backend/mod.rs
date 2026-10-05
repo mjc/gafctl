@@ -110,7 +110,6 @@ impl DeviceRegistry {
         )
     }
 
-    #[cfg(any(feature = "mqtt", test))]
     pub fn mqtt_ownership_required(&self, ble_enabled: bool, account_id: Option<&str>) -> bool {
         self.identities.sources.iter().any(|(id, source)| {
             *source == EntitySource::Mqtt

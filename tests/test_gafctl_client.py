@@ -7,6 +7,7 @@ from copy import deepcopy
 from pathlib import Path
 from types import ModuleType
 
+from aiohttp import ClientSession, web
 from ha_fixtures import (
     PROXY_ID,
     device,
@@ -111,6 +112,42 @@ class FakeSession:
 
 
 class ApiClientTests(unittest.IsolatedAsyncioTestCase):
+    async def test_control_redirects_do_not_resubmit_commands(self):
+        for status in (307, 308):
+            with self.subTest(status=status):
+                submissions = []
+
+                async def redirect(request, submissions=submissions, status=status):
+                    submissions.append(await request.json())
+                    return web.Response(
+                        status=status, headers={"Location": "/second-write"}
+                    )
+
+                async def second_write(request, submissions=submissions):
+                    body = await request.json()
+                    submissions.append(body)
+                    return web.json_response(
+                        {"request_id": body["request_id"], "status": "confirmed"}
+                    )
+
+                app = web.Application()
+                app.router.add_post("/api/v2/devices/configured/control", redirect)
+                app.router.add_post("/second-write", second_write)
+                runner = web.AppRunner(app)
+                await runner.setup()
+                try:
+                    site = web.TCPSite(runner, "127.0.0.1", 0)
+                    await site.start()
+                    port = site._server.sockets[0].getsockname()[1]
+                    async with ClientSession() as session:
+                        client = CLIENT.ApiClient(f"http://127.0.0.1:{port}", session)
+                        with self.assertRaises(MODELS.ControlOutcomeUnknown):
+                            await client.set_control("configured", COMMAND)
+                    self.assertEqual(len(submissions), 1)
+                    self.assertEqual(submissions[0]["command"], COMMAND)
+                finally:
+                    await runner.cleanup()
+
     def client(self, payload, status=200, url="http://proxy"):
         session = FakeSession(FakeResponse(payload, status))
         return CLIENT.ApiClient(url, session), session
@@ -349,7 +386,7 @@ class ApiClientTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             session.urls, ["http://proxy/prefix/api/v2/devices/configured/refresh"]
         )
-        self.assertEqual(session.posts, [{"timeout": 300}])
+        self.assertEqual(session.posts, [{"timeout": 300, "allow_redirects": False}])
         for status, http_status in (
             ("failed", 502),
             ("superseded", 409),

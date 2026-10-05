@@ -107,6 +107,71 @@ def read_discovery_fixture(path: str) -> list[tuple[str, dict[str, object]]]:
 
 
 class RegistryTests(unittest.IsolatedAsyncioTestCase):
+    async def test_empty_entry_keeps_polling_and_restores_http_entities(self) -> None:
+        for selected in (device(owner="mqtt"), device(commands=[], read_state=False)):
+            with self.subTest(selected=selected):
+                entry = await self.entry()
+                entry._async_set_state(
+                    self.hass, ConfigEntryState.SETUP_IN_PROGRESS, None
+                )
+                client = fake_client(
+                    devices=[selected], state=state_data(available=False)
+                )
+                entities = []
+
+                async def forward(entry, platforms, entities=entities):
+                    for platform in platforms:
+                        module = __import__(
+                            f"custom_components.gafctl.{platform}",
+                            fromlist=["async_setup_entry"],
+                        )
+                        await module.async_setup_entry(
+                            self.hass, entry, entities.extend
+                        )
+
+                reloaded = asyncio.Event()
+
+                async def reload(
+                    entry_id, entry=entry, forward=forward, reloaded=reloaded
+                ):
+                    self.assertEqual(entry_id, entry.entry_id)
+                    await forward(entry, gafctl_integration.PLATFORMS)
+                    reloaded.set()
+                    return True
+
+                with (
+                    api_client(client, "custom_components.gafctl"),
+                    patch(
+                        "custom_components.gafctl.coordinator.UPDATE_INTERVAL",
+                        timedelta(seconds=1),
+                    ),
+                    patch.object(
+                        ConfigEntries, "async_forward_entry_setups", side_effect=forward
+                    ),
+                    patch.object(ConfigEntries, "async_reload", side_effect=reload),
+                ):
+                    await gafctl_integration.async_setup_entry(self.hass, entry)
+                    self.assertEqual(entities, [])
+                    client.fetch_devices.return_value = [device()]
+                    await asyncio.wait_for(reloaded.wait(), timeout=3)
+                coordinator = entry.runtime_data
+                self.assertGreaterEqual(client.fetch_devices.await_count, 2)
+                self.assertEqual(coordinator.device["state_source"], "http")
+                self.assertTrue(gafctl_integration.entity_keys(coordinator.device))
+                self.assertTrue(entities)
+                with patch.object(
+                    ConfigEntries,
+                    "async_unload_platforms",
+                    AsyncMock(return_value=True),
+                ):
+                    self.assertTrue(
+                        await gafctl_integration.async_unload_entry(self.hass, entry)
+                    )
+                await entry._async_process_on_unload(self.hass)
+                self.assertEqual(coordinator._listeners, {})
+                self.assertIsNone(coordinator._unsub_refresh)
+                entry._async_set_state(self.hass, ConfigEntryState.NOT_LOADED, None)
+
     async def test_setup_resolves_inventory_once_and_cleans_obsolete_entities(
         self,
     ) -> None:

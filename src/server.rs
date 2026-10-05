@@ -1,11 +1,12 @@
 use crate::{api::router, backend::DeviceRegistry, service::DeviceService};
 use anyhow::{Context, Result};
 use futures_util::StreamExt;
-use std::time::Duration;
+use std::{future::IntoFuture, time::Duration};
 use tokio::{
     net::TcpListener,
+    sync::oneshot,
     task::JoinSet,
-    time::{MissedTickBehavior, interval},
+    time::{Instant, MissedTickBehavior, interval, timeout_at},
 };
 use tokio_stream::wrappers::IntervalStream;
 
@@ -28,23 +29,30 @@ pub(crate) async fn serve(config: config::ServerConfig) -> Result<()> {
         mqtt_config,
         quickconnect_config,
     } = config;
+    let registry = DeviceRegistry::load_optional(identity_store)
+        .context("could not load local device identity mappings")?;
+    config::validate_mqtt_ownership(
+        &registry,
+        device_id.is_some(),
+        quickconnect_config
+            .as_ref()
+            .map(|config| config.account_id.as_str()),
+        {
+            #[cfg(feature = "mqtt")]
+            {
+                mqtt_config
+                    .as_ref()
+                    .is_some_and(|config| config.discovery_enabled)
+            }
+            #[cfg(not(feature = "mqtt"))]
+            {
+                false
+            }
+        },
+    )?;
     let listener = TcpListener::bind(address)
         .await
         .context("could not bind HTTP listener")?;
-    let registry = DeviceRegistry::load_optional(identity_store)
-        .context("could not load local device identity mappings")?;
-    #[cfg(feature = "mqtt")]
-    anyhow::ensure!(
-        !registry.mqtt_ownership_required(
-            device_id.is_some(),
-            quickconnect_config
-                .as_ref()
-                .map(|config| config.account_id.as_str())
-        ) || mqtt_config
-            .as_ref()
-            .is_some_and(|config| config.discovery_enabled),
-        "persisted MQTT ownership requires a configured broker and --mqtt-discovery"
-    );
     let mut state = match device_id {
         Some(device_id) => DeviceService::with_ble_device(device_id, registry),
         None => DeviceService::with_registry(registry),
@@ -53,49 +61,111 @@ pub(crate) async fn serve(config: config::ServerConfig) -> Result<()> {
         state.start_quickconnect(config).await?;
     }
     #[cfg(feature = "mqtt")]
-    let mut mqtt = match mqtt_config {
+    let mqtt = match mqtt_config {
         Some(config) => Some(mqtt::start(&mut state, config).await?),
         None => None,
     };
-    let app = router(state.clone());
-    let poll_state = state.state_polling_enabled();
-    let poll_quickconnect = state.quickconnect_polling_enabled();
-    let mut polls = JoinSet::new();
-    let mut stop_polls = Vec::new();
-    if poll_state {
-        stop_polls.push(polls.spawn(poll_device(state.clone(), DEFAULT_POLL_INTERVAL)));
-    }
-    if poll_quickconnect {
-        stop_polls.push(polls.spawn(poll_quickconnect_device(
-            state.clone(),
-            DEFAULT_POLL_INTERVAL,
-        )));
-    }
-
     tracing::info!(%address, "Gafctl API listening");
+    serve_http(
+        listener,
+        state,
+        #[cfg(feature = "mqtt")]
+        mqtt,
+    )
+    .await
+}
+
+fn start_polling(state: &DeviceService) -> (JoinSet<()>, Vec<tokio::task::AbortHandle>) {
+    let mut polls = JoinSet::new();
+    let stop_polls = [
+        state
+            .state_polling_enabled()
+            .then(|| polls.spawn(poll_device(state.clone(), DEFAULT_POLL_INTERVAL))),
+        state.quickconnect_polling_enabled().then(|| {
+            polls.spawn(poll_quickconnect_device(
+                state.clone(),
+                DEFAULT_POLL_INTERVAL,
+            ))
+        }),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    (polls, stop_polls)
+}
+
+async fn serve_http(
+    listener: TcpListener,
+    state: DeviceService,
+    #[cfg(feature = "mqtt")] mut mqtt: Option<mqtt::MqttRuntime>,
+) -> Result<()> {
+    let (mut polls, stop_polls) = start_polling(&state);
     #[cfg(feature = "mqtt")]
     let mqtt_intake = mqtt.as_ref().map(|runtime| runtime.intake.clone());
-    let result = axum::serve(listener, app)
+    let (shutdown_started, mut shutdown_deadline) = oneshot::channel();
+    let server = axum::serve(listener, router(state.clone()))
         .with_graceful_shutdown(async move {
             shutdown_signal().await;
+            let deadline = Instant::now() + SHUTDOWN_CLEANUP_TIMEOUT;
             #[cfg(feature = "mqtt")]
             if let Some(intake) = mqtt_intake {
                 intake.close();
             }
             stop_polls.iter().for_each(tokio::task::AbortHandle::abort);
+            let _ = shutdown_started.send(deadline);
         })
-        .await
-        .context("HTTP server failed");
-    polls.abort_all();
-    let cleanup_deadline = tokio::time::Instant::now() + SHUTDOWN_CLEANUP_TIMEOUT;
-    #[cfg(feature = "mqtt")]
-    if let Some(mqtt) = &mut mqtt {
-        mqtt.drain(cleanup_deadline).await;
+        .into_future();
+    tokio::pin!(server);
+    let deadline = tokio::select! {
+        result = &mut server => {
+            polls.abort_all();
+            let deadline = shutdown_deadline
+                .try_recv()
+                .unwrap_or_else(|_| Instant::now() + SHUTDOWN_CLEANUP_TIMEOUT);
+            cleanup_transports(
+                &state,
+                #[cfg(feature = "mqtt")]
+                &mut mqtt,
+                deadline,
+            ).await;
+            return result.context("HTTP server failed");
+        }
+        deadline = &mut shutdown_deadline => deadline.context("HTTP shutdown notification failed")?,
+    };
+    let (result, ()) = tokio::join!(
+        timeout_at(deadline, &mut server),
+        cleanup_transports(
+            &state,
+            #[cfg(feature = "mqtt")]
+            &mut mqtt,
+            deadline,
+        ),
+    );
+    match result {
+        Ok(result) => result.context("HTTP server failed"),
+        Err(_) => {
+            tracing::warn!(
+                "HTTP shutdown deadline exceeded; unfinished command outcomes are unknown"
+            );
+            Ok(())
+        }
     }
-    // Cancelling a poll waiter leaves its BLE worker owning the backend until
-    // disconnect cleanup completes. Give it a short grace after HTTP draining.
-    state.finish_backend_cleanup(cleanup_deadline).await;
-    result
+}
+
+async fn cleanup_transports(
+    state: &DeviceService,
+    #[cfg(feature = "mqtt")] mqtt: &mut Option<mqtt::MqttRuntime>,
+    deadline: Instant,
+) {
+    let backend_cleanup = state.finish_backend_cleanup(deadline);
+    #[cfg(feature = "mqtt")]
+    tokio::join!(backend_cleanup, async {
+        if let Some(mqtt) = mqtt {
+            mqtt.drain(deadline).await;
+        }
+    });
+    #[cfg(not(feature = "mqtt"))]
+    backend_cleanup.await;
 }
 
 async fn shutdown_signal() {
