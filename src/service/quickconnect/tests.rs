@@ -1,5 +1,6 @@
 use super::*;
 use crate::service::test_support::*;
+use crate::test_support::cloud_device;
 
 #[tokio::test]
 async fn cloud_poll_skips_transaction_queued_read_superseded_by_control() {
@@ -7,13 +8,7 @@ async fn cloud_poll_skips_transaction_queued_read_superseded_by_control() {
     let cloud = state.quickconnect.as_ref().unwrap();
     let mut registry = state.registry.write().await;
     registry
-        .reconcile_quickconnect(
-            &cloud.account_id,
-            &[crate::backend::CloudDeviceInput::new(
-                "vent".to_owned(),
-                "vent".to_owned(),
-            )],
-        )
+        .reconcile_quickconnect(&cloud.account_id, &[cloud_device("vent", "vent")])
         .unwrap();
     let generations = registry.begin_quickconnect_poll(&cloud.account_id);
     drop(registry);

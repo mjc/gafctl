@@ -1,6 +1,6 @@
 use super::*;
 use crate::service::test_support::*;
-use crate::test_support::identity_store_fixture;
+use crate::test_support::{cloud_device, identity_store_fixture};
 use crate::{api::router, backend::DeviceRegistry};
 use axum::{
     body::Body,
@@ -22,10 +22,7 @@ async fn mqtt_snapshot_collection_serializes_sibling_publications() {
         .await
         .reconcile_quickconnect(
             "synthetic-account",
-            &[crate::backend::CloudDeviceInput::new(
-                "another-device".to_owned(),
-                "Second".to_owned(),
-            )],
+            &[cloud_device("another-device", "Second")],
         )
         .unwrap();
     let runtimes = {
@@ -118,18 +115,9 @@ async fn source_route_accepts_persistent_mqtt_owner_with_offline_broker() {
         "no-physical-device".to_owned(),
         DeviceRegistry::load(&path).unwrap(),
     );
-    crate::server::mqtt::start(
-        &mut state,
-        crate::mqtt::MqttConfig {
-            host: "127.0.0.1".to_owned(),
-            port: 1,
-            username: "test-user".to_owned(),
-            password: "test-password".to_owned(),
-            discovery_enabled: true,
-        },
-    )
-    .await
-    .unwrap();
+    crate::server::mqtt::start(&mut state, crate::mqtt::test_support::config(1, true))
+        .await
+        .unwrap();
     let mut updates = state.publication.as_ref().unwrap().updates.subscribe();
     let response = router(state.clone())
         .oneshot(
@@ -158,39 +146,22 @@ async fn source_route_accepts_persistent_mqtt_owner_with_offline_broker() {
     );
 }
 
-#[test]
-#[cfg(feature = "mqtt")]
-fn cloud_only_mqtt_state_is_scheduled_without_ble() {
-    let mut state = DeviceService::with_registry(DeviceRegistry::new());
-    assert!(!state.state_polling_enabled());
-    state.attach_state_publication(
-        watch::channel(Arc::new(StateSnapshot {
-            descriptors: Vec::new(),
-            publications: Vec::new(),
-            proxy_id: gafctl_api::ProxyId::default(),
-            discovery_identities: Vec::new(),
-        }))
-        .0,
-        false,
-    );
-    assert!(state.state_polling_enabled());
-}
-
 #[tokio::test]
 #[cfg(feature = "mqtt")]
-async fn cloud_only_periodic_state_publication_refreshes_the_mqtt_snapshot() {
-    let initial = StateSnapshot {
-        descriptors: Vec::new(),
-        publications: Vec::new(),
-        proxy_id: gafctl_api::ProxyId::default(),
-        discovery_identities: Vec::new(),
-    };
-    let (updates, mut current) = watch::channel(Arc::new(initial));
+async fn cloud_only_state_is_scheduled_and_periodically_published() {
+    let mut disconnected = DeviceService::with_registry(DeviceRegistry::new());
+    assert!(!disconnected.state_polling_enabled());
+    disconnected.attach_state_publication(
+        watch::channel(Arc::new(disconnected.state_snapshot().await.unwrap())).0,
+        false,
+    );
+    assert!(disconnected.state_polling_enabled());
     let mut state = DeviceService::with_registry(DeviceRegistry::new());
+    assert!(!state.state_polling_enabled());
+    let (updates, mut current) = watch::channel(Arc::new(state.state_snapshot().await.unwrap()));
     state.attach_state_publication(updates, false);
-
+    assert!(state.state_polling_enabled());
     state.poll_and_publish_state().await;
-
     assert!(current.changed().await.is_ok());
     assert!(current.borrow().publications.is_empty());
 }
@@ -204,14 +175,8 @@ async fn mqtt_discovery_start_preserves_per_device_ownership() {
         .reconcile_quickconnect(
             "account-a",
             &[
-                crate::backend::CloudDeviceInput::new(
-                    "provider-a".to_owned(),
-                    "Cloud fan A".to_owned(),
-                ),
-                crate::backend::CloudDeviceInput::new(
-                    "provider-b".to_owned(),
-                    "Cloud fan B".to_owned(),
-                ),
+                cloud_device("provider-a", "Cloud fan A"),
+                cloud_device("provider-b", "Cloud fan B"),
             ],
         )
         .unwrap();
@@ -220,18 +185,9 @@ async fn mqtt_discovery_start_preserves_per_device_ownership() {
         .unwrap();
     let mut state = DeviceService::with_registry(registry);
 
-    crate::server::mqtt::start(
-        &mut state,
-        crate::mqtt::MqttConfig {
-            host: "127.0.0.1".to_owned(),
-            port: 1,
-            username: "test-user".to_owned(),
-            password: "test-password".to_owned(),
-            discovery_enabled: true,
-        },
-    )
-    .await
-    .unwrap();
+    crate::server::mqtt::start(&mut state, crate::mqtt::test_support::config(1, true))
+        .await
+        .unwrap();
 
     let registry = state.registry.read().await;
     let descriptors = registry.descriptors().collect::<Vec<_>>();

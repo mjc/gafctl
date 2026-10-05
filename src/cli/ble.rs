@@ -729,6 +729,8 @@ mod tests {
                 "platform/id",
                 "preset",
                 name,
+                "--format",
+                "json",
                 "--scan-seconds",
                 "7",
                 "--timeout-seconds",
@@ -757,26 +759,6 @@ mod tests {
 
     #[test]
     fn ble_controls_require_explicit_target_and_only_offer_verified_presets() {
-        for preset in [
-            "automatic-105-f-30-percent",
-            "automatic-105-1-f-30-1-percent",
-            "timer-clear",
-            "timer-one-minute",
-        ] {
-            assert!(
-                BleParser::try_parse_from([
-                    "gafctl",
-                    "control",
-                    "--device-id",
-                    "platform/id",
-                    "preset",
-                    preset,
-                    "--format",
-                    "json"
-                ])
-                .is_ok()
-            );
-        }
         for args in [
             vec!["control", "preset", "timer-clear"],
             vec!["control", "--device-id", "id", "mode", "off"],

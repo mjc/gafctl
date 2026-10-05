@@ -252,11 +252,12 @@ fn valid_identity(value: &str) -> bool {
 mod tests {
     use super::super::{DeviceRegistry, test_support::*};
     use super::*;
+    use crate::test_support::{cloud_device, identity_store_fixture};
     use serde_json::json;
 
     #[test]
     fn failed_identity_replacement_removes_staging_files() {
-        let (directory, path) = registry_fixture();
+        let (directory, path) = identity_store_fixture();
         let store = IdentityStore::load(path.clone()).unwrap();
         fs::remove_file(&path).unwrap();
         fs::create_dir(&path).unwrap();
@@ -274,7 +275,7 @@ mod tests {
     fn identity_replacement_keeps_private_file_permissions() {
         use std::os::unix::fs::PermissionsExt;
 
-        let (_directory, path) = registry_fixture();
+        let (_directory, path) = identity_store_fixture();
         let store = IdentityStore::load(path.clone()).unwrap();
         fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
         store.save(&store.bindings, &store.sources).unwrap();
@@ -288,7 +289,7 @@ mod tests {
 
     #[test]
     fn identity_store_rejects_dangling_sources_and_invalid_proxy_ids() {
-        let (_directory, path) = registry_fixture();
+        let (_directory, path) = identity_store_fixture();
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         [
             (
@@ -312,6 +313,7 @@ mod tests {
             assert!(DeviceRegistry::load(&path).is_err_and(is_invalid_store));
         });
         for local_id in [
+            "configured".to_owned(),
             "".to_owned(),
             "space here".to_owned(),
             "../device".to_owned(),
@@ -337,7 +339,7 @@ mod tests {
 
     #[test]
     fn failed_source_persistence_preserves_live_and_saved_ownership() {
-        let (_directory, path) = registry_fixture();
+        let (_directory, path) = identity_store_fixture();
         let path = path.with_file_name("store").join("identities.json");
         let mut registry = DeviceRegistry::load(&path).unwrap();
         registry.register_configured_ble();
@@ -376,16 +378,13 @@ mod tests {
 
     #[test]
     fn entity_sources_survive_restart_for_ble_and_cloud() {
-        let (_directory, path) = registry_fixture();
+        let (_directory, path) = identity_store_fixture();
         let mut registry = DeviceRegistry::load(&path).unwrap();
         registry.register_configured_ble();
         let cloud = registry
             .reconcile_quickconnect(
                 "test-account",
-                &[CloudDeviceInput::new(
-                    "private-provider".to_owned(),
-                    "Cloud fan".to_owned(),
-                )],
+                &[cloud_device("private-provider", "Cloud fan")],
             )
             .unwrap()
             .pop()
@@ -406,10 +405,7 @@ mod tests {
         restored
             .reconcile_quickconnect(
                 "test-account",
-                &[CloudDeviceInput::new(
-                    "private-provider".to_owned(),
-                    "Renamed cloud fan".to_owned(),
-                )],
+                &[cloud_device("private-provider", "Renamed cloud fan")],
             )
             .unwrap();
         let ble = restored
@@ -424,7 +420,7 @@ mod tests {
 
     #[test]
     fn proxy_identity_is_persisted_before_devices_are_registered() {
-        let (_directory, path) = registry_fixture();
+        let (_directory, path) = identity_store_fixture();
         let mut registry = DeviceRegistry::load(&path).unwrap();
         let first: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
         registry.register_configured_ble();
@@ -444,7 +440,7 @@ mod tests {
 
     #[test]
     fn cloud_identity_survives_order_rename_restart_and_coexists_with_ble() {
-        let (_directory, path) = registry_fixture();
+        let (_directory, path) = identity_store_fixture();
         let mut registry = DeviceRegistry::load(&path).unwrap();
         registry.register_configured_ble();
         registry
@@ -460,7 +456,7 @@ mod tests {
         let attic_id = original["Attic fan"].clone();
         let guest_id = original["Guest fan"].clone();
         assert_ne!(attic_id, guest_id);
-        assert_eq!(registry.identity_count(), 2);
+        assert_eq!(registry.identities.bindings.len(), 2);
 
         drop(registry);
         let mut restored = DeviceRegistry::load(&path).unwrap();
@@ -487,7 +483,7 @@ mod tests {
 
     #[test]
     fn provider_identifiers_are_scoped_to_their_account() {
-        let (_directory, path) = registry_fixture();
+        let (_directory, path) = identity_store_fixture();
         let mut registry = DeviceRegistry::load(&path).unwrap();
         let first = registry
             .reconcile_quickconnect("account-a", &[cloud_device("same-provider-id", "One")])
@@ -522,28 +518,15 @@ mod tests {
     }
 
     #[test]
-    fn identity_store_rejects_the_reserved_configured_device_id() {
-        let (_directory, path) = registry_fixture();
-        fs::create_dir_all(path.parent().unwrap()).unwrap();
-        fs::write(
-            &path,
-            serde_json::to_vec(&json!({"version": 2, "proxy_id": ProxyId::default(), "sources": {}, "bindings": [{"identity": {"account_id": "account-a", "provider_id": "provider-a"}, "local_id": "configured"}]})).unwrap(),
-        )
-        .unwrap();
-
-        assert!(DeviceRegistry::load(&path).is_err_and(is_invalid_store));
-    }
-
-    #[test]
     fn duplicate_provider_ids_reject_the_inventory_before_saving() {
-        let (_directory, path) = registry_fixture();
+        let (_directory, path) = identity_store_fixture();
         let mut registry = DeviceRegistry::load(&path).unwrap();
         let result = registry.reconcile_quickconnect(
             "account-a",
             &[cloud_device("same", "One"), cloud_device("same", "Two")],
         );
         assert!(result.err().is_some_and(is_duplicate_provider_id));
-        assert_eq!(registry.identity_count(), 0);
+        assert_eq!(registry.identities.bindings.len(), 0);
         let stored: IdentityFile = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
         assert!(stored.bindings.is_empty());
     }

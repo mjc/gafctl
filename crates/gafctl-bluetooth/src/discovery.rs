@@ -484,31 +484,26 @@ mod tests {
     fn bluez_cached_initial_events_do_not_count_as_fresh_advertisements() {
         let stale = test_peripheral_id(0);
         let fresh = test_peripheral_id(1);
-        let initial = CentralEvent::ServicesAdvertisement {
-            id: stale.clone(),
-            services: vec![GAF_SERVICE_UUID],
-        };
         let existing = HashSet::from([stale.clone()]);
-        assert!(fresh_advertisement_id(initial, &existing).is_none());
-
-        let advertisement = CentralEvent::RssiUpdate {
-            id: fresh.clone(),
-            rssi: -50,
-        };
-        let newly_discovered = CentralEvent::DeviceDiscovered(fresh.clone());
-        let observed = [
-            fresh_advertisement_id(advertisement, &existing),
-            fresh_advertisement_id(newly_discovered, &existing),
-        ]
-        .into_iter()
-        .flatten()
-        .collect::<HashSet<_>>();
-        let current_scan = [stale, fresh.clone()]
-            .into_iter()
-            .filter(|id| observed.contains(id))
-            .collect::<Vec<_>>();
-        assert_eq!(current_scan.len(), 1);
-        assert_eq!(current_scan[0], fresh);
+        for (event, expected) in [
+            (
+                CentralEvent::ServicesAdvertisement {
+                    id: stale,
+                    services: vec![GAF_SERVICE_UUID],
+                },
+                None,
+            ),
+            (
+                CentralEvent::RssiUpdate {
+                    id: fresh.clone(),
+                    rssi: -50,
+                },
+                Some(fresh.clone()),
+            ),
+            (CentralEvent::DeviceDiscovered(fresh.clone()), Some(fresh)),
+        ] {
+            assert_eq!(fresh_advertisement_id(event, &existing), expected);
+        }
     }
 
     #[test]
@@ -516,25 +511,25 @@ mod tests {
         let configured = test_peripheral_id(0);
         let unrelated = test_peripheral_id(1);
         let fresh = HashSet::new();
-        let configured_id = configured.to_string();
-
-        assert!(should_inspect_peripheral(
-            &configured,
-            Some(&fresh),
-            Some(&configured_id),
-        ));
-        assert!(!should_inspect_peripheral(
-            &unrelated,
-            Some(&fresh),
-            Some(&configured_id),
-        ));
         let fresh_unrelated = HashSet::from([unrelated.clone()]);
-        assert!(!should_inspect_peripheral(
-            &unrelated,
-            Some(&fresh_unrelated),
-            Some(&configured_id),
-        ));
-        assert!(!should_inspect_peripheral(&configured, Some(&fresh), None,));
+        let configured_id = configured.to_string();
+        for (id, observed, selected, inspect) in [
+            (&configured, &fresh, Some(configured_id.as_str()), true),
+            (&unrelated, &fresh, Some(configured_id.as_str()), false),
+            (
+                &unrelated,
+                &fresh_unrelated,
+                Some(configured_id.as_str()),
+                false,
+            ),
+            (&configured, &fresh, None, false),
+        ] {
+            assert_eq!(
+                should_inspect_peripheral(id, Some(observed), selected),
+                inspect,
+                "id={id} observed={observed:?} selected={selected:?}"
+            );
+        }
     }
 
     #[test]
@@ -542,22 +537,18 @@ mod tests {
         let configured = test_peripheral_id(0);
         let unrelated = test_peripheral_id(1);
         let configured_id = configured.to_string();
-
-        assert!(should_keep_candidate(
-            &configured,
-            None,
-            Some(&configured_id)
-        ));
-        assert!(!should_keep_candidate(
-            &unrelated,
-            None,
-            Some(&configured_id)
-        ));
-        assert!(should_keep_candidate(
-            &unrelated,
-            Some(&[GAF_SERVICE_UUID]),
-            Some(&configured_id),
-        ));
+        let advertised = [GAF_SERVICE_UUID];
+        for (id, services, keep) in [
+            (&configured, None, true),
+            (&unrelated, None, false),
+            (&unrelated, Some(advertised.as_slice()), true),
+        ] {
+            assert_eq!(
+                should_keep_candidate(id, services, Some(&configured_id)),
+                keep,
+                "id={id} services={services:?}"
+            );
+        }
     }
 
     #[test]

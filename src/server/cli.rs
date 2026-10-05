@@ -271,14 +271,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn serve_can_start_without_a_ble_device_identifier() {
-        assert!(
-            Cli::try_parse_from(["gafctl-server"]).is_ok(),
-            "serving without a BLE backend must be a valid startup mode"
-        );
-    }
-
-    #[test]
     fn serve_accepts_ble_only_cloud_only_and_mixed_cli_modes() {
         [
             &["gafctl-server", "--device-id", "synthetic-ble-id"][..],
@@ -295,34 +287,15 @@ mod tests {
     }
 
     #[test]
-    fn diagnostic_probe_rejects_zero_deadlines() {
-        ["--scan-seconds", "--response-timeout-seconds"]
-            .into_iter()
-            .for_each(|flag| {
+    fn diagnostic_probe_rejects_invalid_deadlines() {
+        for flag in ["--scan-seconds", "--response-timeout-seconds"] {
+            for value in ["0", "18446744073709551615"] {
                 assert!(
-                    Cli::try_parse_from(["gafctl-server", "probe", "ble", flag, "0"]).is_err(),
-                    "{flag} must reject zero before transport access"
+                    Cli::try_parse_from(["gafctl-server", "probe", "ble", flag, value]).is_err(),
+                    "{flag} must reject {value} before transport access"
                 );
-            });
-    }
-
-    #[test]
-    fn diagnostic_probe_rejects_unrepresentable_deadlines() {
-        ["--scan-seconds", "--response-timeout-seconds"]
-            .into_iter()
-            .for_each(|flag| {
-                assert!(
-                    Cli::try_parse_from([
-                        "gafctl-server",
-                        "probe",
-                        "ble",
-                        flag,
-                        "18446744073709551615",
-                    ])
-                    .is_err(),
-                    "{flag} must reject an unrepresentable deadline before transport access"
-                );
-            });
+            }
+        }
     }
 
     #[test]
