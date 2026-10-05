@@ -16,6 +16,30 @@ use axum::{
 use serde_json::{Value, json};
 use tokio_util::task::AbortOnDropHandle;
 
+async fn cli<'a>(
+    args: impl IntoIterator<Item = &'a str>,
+    environment: &[(&str, &str)],
+    expected_exit: i32,
+) -> std::process::Output {
+    let args: Vec<_> = args.into_iter().map(str::to_owned).collect();
+    let environment: Vec<_> = environment
+        .iter()
+        .map(|(key, value)| (key.to_string(), value.to_string()))
+        .collect();
+    tokio::task::spawn_blocking(move || {
+        cargo_bin_cmd!("gafctl")
+            .args(args)
+            .envs(environment)
+            .timeout(Duration::from_secs(5))
+            .assert()
+            .code(expected_exit)
+            .get_output()
+            .clone()
+    })
+    .await
+    .unwrap()
+}
+
 struct ServerProcess(std::process::Child);
 
 #[test]
@@ -149,37 +173,14 @@ fn help_and_completions_work_without_any_transport_configuration() {
 #[test]
 fn invalid_input_and_missing_control_targets_exit_before_transport_access() {
     for args in [
-        vec!["state", "../wrong"],
-        vec!["devices", "--server", "http://user:secret@localhost"],
-        vec![
-            "control",
-            "configured",
-            "targets",
-            "--temperature-f",
-            "89",
-            "--humidity-percent",
-            "40",
-        ],
-        vec![
-            "control",
-            "configured",
-            "targets",
-            "--temperature-f",
-            "110",
-            "--humidity-percent",
-            "80.1",
-        ],
-        vec!["control", "configured", "timer-duration", "31"],
-        vec!["devices", "--timeout-seconds", "0"],
-        vec!["ble", "control", "preset", "timer-clear"],
-        vec![
-            "control",
-            "configured",
-            "preset",
-            "timer-clear",
-            "--request-id",
-            "bad/id",
-        ],
+        "state ../wrong".split_whitespace(),
+        "devices --server http://user:secret@localhost".split_whitespace(),
+        "control configured targets --temperature-f 89 --humidity-percent 40".split_whitespace(),
+        "control configured targets --temperature-f 110 --humidity-percent 80.1".split_whitespace(),
+        "control configured timer-duration 31".split_whitespace(),
+        "devices --timeout-seconds 0".split_whitespace(),
+        "ble control preset timer-clear".split_whitespace(),
+        "control configured preset timer-clear --request-id bad/id".split_whitespace(),
     ] {
         cargo_bin_cmd!("gafctl")
             .args(args)
@@ -261,23 +262,19 @@ async fn service_reads_emit_one_json_result_and_explicit_url_overrides_environme
         posts: Arc::default(),
     })
     .await;
-    for args in [vec!["devices"], vec!["state", "configured"]] {
+    for args in ["devices", "state configured"] {
         let url = server.url.clone();
-        let output = tokio::task::spawn_blocking(move || {
-            cargo_bin_cmd!("gafctl")
-                .args(args)
-                .args(["--server", &url, "--format", "json"])
-                .env("GAFCTL_SERVER_URL", "http://127.0.0.1:1")
-                .env("RUST_LOG", "gafctl=debug")
-                .timeout(Duration::from_secs(5))
-                .assert()
-                .success()
-                .get_output()
-                .stdout
-                .clone()
-        })
+        let output = cli(
+            args.split_whitespace()
+                .chain(["--server", &url, "--format", "json"]),
+            &[
+                ("GAFCTL_SERVER_URL", "http://127.0.0.1:1"),
+                ("RUST_LOG", "gafctl=debug"),
+            ],
+            0,
+        )
         .await
-        .unwrap();
+        .stdout;
         let value: Value = serde_json::from_slice(&output).unwrap();
         assert!(value.get("devices").is_some() || value["available"] == false);
     }
@@ -296,29 +293,24 @@ async fn service_controls_preserve_backend_results_and_exit_only_when_confirmed(
         };
         let server = start(service.clone()).await;
         let url = server.url.clone();
-        let output = tokio::task::spawn_blocking(move || {
-            cargo_bin_cmd!("gafctl")
-                .args([
-                    "control",
-                    "configured",
-                    "preset",
-                    "timer-clear",
-                    "--server",
-                    &url,
-                    "--format",
-                    "json",
-                    "--request-id",
-                    "cli-test",
-                ])
-                .timeout(Duration::from_secs(5))
-                .assert()
-                .code(exit)
-                .get_output()
-                .stdout
-                .clone()
-        })
+        let output = cli(
+            [
+                "control",
+                "configured",
+                "preset",
+                "timer-clear",
+                "--server",
+                &url,
+                "--format",
+                "json",
+                "--request-id",
+                "cli-test",
+            ],
+            &[],
+            exit,
+        )
         .await
-        .unwrap();
+        .stdout;
         let value: Value = serde_json::from_slice(&output).unwrap();
         assert_eq!(value["request_id"], "cli-test");
         assert_eq!(value["status"], outcome);
@@ -378,17 +370,12 @@ async fn unavailable_state_retains_backend_error_in_text_and_json_without_failin
     let server = start_router(app).await;
     for format in ["text", "json"] {
         let url = server.url.clone();
-        let output = tokio::task::spawn_blocking(move || {
-            cargo_bin_cmd!("gafctl")
-                .args(["state", "configured", "--server", &url, "--format", format])
-                .timeout(Duration::from_secs(5))
-                .assert()
-                .success()
-                .get_output()
-                .clone()
-        })
-        .await
-        .unwrap();
+        let output = cli(
+            ["state", "configured", "--server", &url, "--format", format],
+            &[],
+            0,
+        )
+        .await;
         assert!(output.stderr.is_empty());
         match format {
             "text" => {
@@ -414,19 +401,12 @@ async fn json_errors_keep_http_status_and_service_logs_use_stderr() {
         get(|| async { (StatusCode::BAD_GATEWAY, "upstream unavailable") }),
     );
     let Running { url, _task } = start_router(app).await;
-    let output = tokio::task::spawn_blocking(move || {
-        cargo_bin_cmd!("gafctl")
-            .args(["devices", "--format", "json"])
-            .env("GAFCTL_SERVER_URL", url)
-            .env("RUST_LOG", "gafctl=debug")
-            .timeout(Duration::from_secs(5))
-            .assert()
-            .code(1)
-            .get_output()
-            .clone()
-    })
-    .await
-    .unwrap();
+    let output = cli(
+        ["devices", "--format", "json"],
+        &[("GAFCTL_SERVER_URL", &url), ("RUST_LOG", "gafctl=debug")],
+        1,
+    )
+    .await;
     let value: Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(value["error"]["http_status"], 502);
     assert!(String::from_utf8_lossy(&output.stderr).contains("running control CLI command"));
@@ -439,20 +419,16 @@ async fn empty_inventory_from_environment_is_successful_and_contains_one_newline
         get(|| async { Json(json!({"devices":[]})) }),
     );
     let Running { url, _task } = start_router(app).await;
-    let output = tokio::task::spawn_blocking(move || {
-        cargo_bin_cmd!("gafctl")
-            .args(["devices", "--format", "json"])
-            .env("GAFCTL_SERVER_URL", url)
-            .env("GAFCTL_QUICKCONNECT_USERNAME", "incomplete-account")
-            .timeout(Duration::from_secs(5))
-            .assert()
-            .success()
-            .get_output()
-            .stdout
-            .clone()
-    })
+    let output = cli(
+        ["devices", "--format", "json"],
+        &[
+            ("GAFCTL_SERVER_URL", &url),
+            ("GAFCTL_QUICKCONNECT_USERNAME", "incomplete-account"),
+        ],
+        0,
+    )
     .await
-    .unwrap();
+    .stdout;
     assert_eq!(output, b"{\"devices\":[]}\n");
 }
 
@@ -460,21 +436,15 @@ async fn empty_inventory_from_environment_is_successful_and_contains_one_newline
 async fn all_cloud_control_shapes_are_posted_through_the_service() {
     for (args, expected) in [
         (
-            vec!["mode", "manual"],
+            "mode manual",
             json!({"kind":"quick_connect_mode","mode":"manual"}),
         ),
         (
-            vec![
-                "targets",
-                "--temperature-f",
-                "105",
-                "--humidity-percent",
-                "40",
-            ],
+            "targets --temperature-f 105 --humidity-percent 40",
             json!({"kind":"quick_connect_targets","temperature_f":105,"humidity_percent":40}),
         ),
         (
-            vec!["timer-duration", "60"],
+            "timer-duration 60",
             json!({"kind":"quick_connect_timer_duration","minutes":60}),
         ),
     ] {
@@ -488,20 +458,16 @@ async fn all_cloud_control_shapes_are_posted_through_the_service() {
                 Json(json!({"request_id":request["request_id"],"status":"confirmed"}))
             }}));
         let Running { url, _task } = start_router(app).await;
-        let output = tokio::task::spawn_blocking(move || {
-            cargo_bin_cmd!("gafctl")
-                .args(["control", "qc-local"])
-                .args(args)
-                .args(["--server", &url, "--format", "json"])
-                .timeout(Duration::from_secs(5))
-                .assert()
-                .success()
-                .get_output()
-                .stdout
-                .clone()
-        })
+        let output = cli(
+            ["control", "qc-local"]
+                .into_iter()
+                .chain(args.split_whitespace())
+                .chain(["--server", &url, "--format", "json"]),
+            &[],
+            0,
+        )
         .await
-        .unwrap();
+        .stdout;
         let value: Value = serde_json::from_slice(&output).unwrap();
         assert_eq!(value["status"], "confirmed");
         assert_eq!(value["http_status"], 200);
@@ -524,31 +490,26 @@ async fn timed_out_control_keeps_request_id_and_reports_unknown_outcome_without_
         }),
     );
     let Running { url, _task } = start_router(app).await;
-    let output = tokio::task::spawn_blocking(move || {
-        cargo_bin_cmd!("gafctl")
-            .args([
-                "control",
-                "configured",
-                "preset",
-                "timer-clear",
-                "--server",
-                &url,
-                "--format",
-                "json",
-                "--timeout-seconds",
-                "1",
-                "--request-id",
-                "uncertain-cli",
-            ])
-            .timeout(Duration::from_secs(5))
-            .assert()
-            .code(1)
-            .get_output()
-            .stdout
-            .clone()
-    })
+    let output = cli(
+        [
+            "control",
+            "configured",
+            "preset",
+            "timer-clear",
+            "--server",
+            &url,
+            "--format",
+            "json",
+            "--timeout-seconds",
+            "1",
+            "--request-id",
+            "uncertain-cli",
+        ],
+        &[],
+        1,
+    )
     .await
-    .unwrap();
+    .stdout;
     let value: Value = serde_json::from_slice(&output).unwrap();
     assert_eq!(value["error"]["kind"], "timeout");
     assert_eq!(value["error"]["request_id"], "uncertain-cli");

@@ -1,6 +1,6 @@
 use super::*;
 use crate::backend::DeviceRegistry;
-use crate::test_support::identity_store_fixture;
+use crate::test_support::{cloud_device, identity_store_fixture};
 use axum::{body::Body, http::Request};
 use gafctl_api::unix_millis;
 use http_body_util::BodyExt;
@@ -22,6 +22,18 @@ async fn send(app: Router, method: &str, uri: &str, body: Option<serde_json::Val
 async fn json_body(response: Response) -> serde_json::Value {
     let bytes = response.into_body().collect().await.unwrap().to_bytes();
     serde_json::from_slice(&bytes).unwrap()
+}
+
+fn register_cloud(
+    registry: &mut DeviceRegistry,
+    account: &str,
+    devices: &[(&str, &str)],
+) -> Vec<DeviceId> {
+    let devices: Vec<_> = devices
+        .iter()
+        .map(|(id, name)| cloud_device(id, name))
+        .collect();
+    registry.reconcile_quickconnect(account, &devices).unwrap()
 }
 
 const DEVICE_ID: &str = "configured";
@@ -88,21 +100,14 @@ async fn startup_without_ble_has_empty_inventory_and_no_configured_state() {
 async fn cloud_only_and_mixed_startup_never_alias_cloud_devices_to_configured() {
     let (_directory, path) = identity_store_fixture();
     let mut cloud_registry = DeviceRegistry::load(&path).unwrap();
-    let cloud_ids = cloud_registry
-        .reconcile_quickconnect(
-            "account-private",
-            &[
-                crate::backend::CloudDeviceInput::new(
-                    "provider-private-one".to_owned(),
-                    "Attic cloud fan".to_owned(),
-                ),
-                crate::backend::CloudDeviceInput::new(
-                    "provider-private-two".to_owned(),
-                    "Guest cloud fan".to_owned(),
-                ),
-            ],
-        )
-        .unwrap();
+    let cloud_ids = register_cloud(
+        &mut cloud_registry,
+        "account-private",
+        &[
+            ("provider-private-one", "Attic cloud fan"),
+            ("provider-private-two", "Guest cloud fan"),
+        ],
+    );
     let cloud_only = router(DeviceService::with_registry(cloud_registry));
     let inventory = send(cloud_only, "GET", "/api/v2/devices", None).await;
     let body = json_body(inventory).await;
@@ -112,21 +117,14 @@ async fn cloud_only_and_mixed_startup_never_alias_cloud_devices_to_configured() 
     assert_ne!(cloud_ids[1].as_str(), DEVICE_ID);
 
     let mut mixed_registry = DeviceRegistry::load(&path).unwrap();
-    mixed_registry
-        .reconcile_quickconnect(
-            "account-private",
-            &[
-                crate::backend::CloudDeviceInput::new(
-                    "provider-private-two".to_owned(),
-                    "Guest cloud fan".to_owned(),
-                ),
-                crate::backend::CloudDeviceInput::new(
-                    "provider-private-one".to_owned(),
-                    "Attic cloud fan".to_owned(),
-                ),
-            ],
-        )
-        .unwrap();
+    register_cloud(
+        &mut mixed_registry,
+        "account-private",
+        &[
+            ("provider-private-two", "Guest cloud fan"),
+            ("provider-private-one", "Attic cloud fan"),
+        ],
+    );
     let mixed = router(DeviceService::with_ble_device(
         "private-ble-id".to_owned(),
         mixed_registry,
@@ -141,21 +139,14 @@ async fn cloud_only_and_mixed_startup_never_alias_cloud_devices_to_configured() 
 async fn v2_discovery_lists_backends_and_rejects_cloud_command_for_ble() {
     let (_directory, path) = identity_store_fixture();
     let mut registry = DeviceRegistry::load(&path).unwrap();
-    let cloud_ids = registry
-        .reconcile_quickconnect(
-            "synthetic-account",
-            &[
-                crate::backend::CloudDeviceInput::new(
-                    "synthetic-provider-a".to_owned(),
-                    "Attic fan".to_owned(),
-                ),
-                crate::backend::CloudDeviceInput::new(
-                    "synthetic-provider-b".to_owned(),
-                    "Guest fan".to_owned(),
-                ),
-            ],
-        )
-        .unwrap();
+    let cloud_ids = register_cloud(
+        &mut registry,
+        "synthetic-account",
+        &[
+            ("synthetic-provider-a", "Attic fan"),
+            ("synthetic-provider-b", "Guest fan"),
+        ],
+    );
     registry.set_quickconnect_writes_enabled(true);
     let app = router(DeviceService::with_ble_device(
         "synthetic-ble-id".to_owned(),

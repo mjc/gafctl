@@ -252,7 +252,7 @@ fn valid_identity(value: &str) -> bool {
 mod tests {
     use super::super::{DeviceRegistry, test_support::*};
     use super::*;
-    use crate::test_support::identity_store_fixture;
+    use crate::test_support::{cloud_device, identity_store_fixture};
     use serde_json::json;
 
     #[test]
@@ -384,10 +384,7 @@ mod tests {
         let cloud = registry
             .reconcile_quickconnect(
                 "test-account",
-                &[CloudDeviceInput::new(
-                    "private-provider".to_owned(),
-                    "Cloud fan".to_owned(),
-                )],
+                &[cloud_device("private-provider", "Cloud fan")],
             )
             .unwrap()
             .pop()
@@ -408,10 +405,7 @@ mod tests {
         restored
             .reconcile_quickconnect(
                 "test-account",
-                &[CloudDeviceInput::new(
-                    "private-provider".to_owned(),
-                    "Renamed cloud fan".to_owned(),
-                )],
+                &[cloud_device("private-provider", "Renamed cloud fan")],
             )
             .unwrap();
         let ble = restored

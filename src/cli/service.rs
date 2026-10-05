@@ -289,49 +289,43 @@ mod tests {
     fn every_service_control_maps_to_the_existing_wire_contract() {
         for (args, expected) in [
             (
-                vec!["preset", "automatic-105-f-30-percent"],
+                "preset automatic-105-f-30-percent".split_whitespace(),
                 json!({"kind":"legacy_preset","preset":"automatic105_f30_percent"}),
             ),
             (
-                vec!["preset", "automatic-105-1-f-30-1-percent"],
+                "preset automatic-105-1-f-30-1-percent".split_whitespace(),
                 json!({"kind":"legacy_preset","preset":"automatic105_1_f30_1_percent"}),
             ),
             (
-                vec!["preset", "timer-clear"],
+                "preset timer-clear".split_whitespace(),
                 json!({"kind":"legacy_preset","preset":"timer_clear"}),
             ),
             (
-                vec!["preset", "timer-one-minute"],
+                "preset timer-one-minute".split_whitespace(),
                 json!({"kind":"legacy_preset","preset":"timer_one_minute"}),
             ),
             (
-                vec!["mode", "off"],
+                "mode off".split_whitespace(),
                 json!({"kind":"quick_connect_mode","mode":"off"}),
             ),
             (
-                vec!["mode", "automatic"],
+                "mode automatic".split_whitespace(),
                 json!({"kind":"quick_connect_mode","mode":"automatic"}),
             ),
             (
-                vec!["mode", "timer"],
+                "mode timer".split_whitespace(),
                 json!({"kind":"quick_connect_mode","mode":"timer"}),
             ),
             (
-                vec!["mode", "manual"],
+                "mode manual".split_whitespace(),
                 json!({"kind":"quick_connect_mode","mode":"manual"}),
             ),
             (
-                vec![
-                    "targets",
-                    "--temperature-f",
-                    "90",
-                    "--humidity-percent",
-                    "80",
-                ],
+                "targets --temperature-f 90 --humidity-percent 80".split_whitespace(),
                 json!({"kind":"quick_connect_targets","temperature_f":90,"humidity_percent":80}),
             ),
             (
-                vec!["timer-duration", "360"],
+                "timer-duration 360".split_whitespace(),
                 json!({"kind":"quick_connect_timer_duration","minutes":360}),
             ),
         ] {

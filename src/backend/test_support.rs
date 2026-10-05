@@ -3,10 +3,6 @@ use gafctl_api::{
     DeviceBackend, DeviceSettings, DeviceState, QuickConnectModeStatus, StateProvenance,
 };
 
-pub(super) fn cloud_device(provider_id: &str, name: &str) -> CloudDeviceInput {
-    CloudDeviceInput::new(provider_id.to_owned(), name.to_owned())
-}
-
 pub(super) fn ids_by_name(registry: &DeviceRegistry) -> BTreeMap<String, String> {
     registry
         .descriptors()

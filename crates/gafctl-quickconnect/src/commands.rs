@@ -326,49 +326,29 @@ mod tests {
     }
 
     #[test]
-    fn mode_change_has_six_exact_fields_and_preserves_current_settings() {
-        let command = QuickConnectCommand::SetMode {
-            mode: QuickConnectCommandMode::Manual,
-        };
-
-        let body = build_settings_body(&command, &current_settings()).unwrap();
-
-        assert_eq!(
-            serde_json::to_value(body).unwrap(),
-            json!({
-                "automaticMode": false,
-                "desiredTemp": 105,
-                "desiredHumidity": 42,
-                "timerMode": false,
-                "timerValue": 60,
-                "fanMode": true
-            })
-        );
-    }
-
-    #[test]
-    fn every_mode_uses_one_exclusive_flag_tuple() {
-        let modes = [
+    fn every_mode_has_the_exact_body_and_preserves_current_settings() {
+        for (mode, [automatic, timer, manual]) in [
             (QuickConnectCommandMode::Off, [false, false, false]),
             (QuickConnectCommandMode::Automatic, [true, false, false]),
             (QuickConnectCommandMode::Timer, [false, true, false]),
             (QuickConnectCommandMode::Manual, [false, false, true]),
-        ];
-        let bodies = modes.map(|(mode, _)| {
-            build_settings_body(&QuickConnectCommand::SetMode { mode }, &current_settings())
-                .unwrap()
-        });
-        let flags = bodies.map(|body| {
-            let body = serde_json::to_value(body).unwrap();
-            [
-                body["automaticMode"].as_bool().unwrap(),
-                body["timerMode"].as_bool().unwrap(),
-                body["fanMode"].as_bool().unwrap(),
-            ]
-        });
-        let expected = modes.map(|(_, flags)| flags);
-
-        assert_eq!(flags, expected);
+        ] {
+            let body =
+                build_settings_body(&QuickConnectCommand::SetMode { mode }, &current_settings())
+                    .unwrap();
+            assert_eq!(
+                serde_json::to_value(body).unwrap(),
+                json!({
+                    "automaticMode": automatic,
+                    "desiredTemp": 105,
+                    "desiredHumidity": 42,
+                    "timerMode": timer,
+                    "timerValue": 60,
+                    "fanMode": manual
+                }),
+                "{mode:?}"
+            );
+        }
     }
 
     #[test]

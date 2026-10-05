@@ -366,7 +366,7 @@ impl DeviceRegistry {
 mod tests {
     use super::test_support::*;
     use super::*;
-    use crate::test_support::identity_store_fixture;
+    use crate::test_support::{cloud_device, identity_store_fixture};
     use gafctl_api::{DeviceSettings, DeviceState, QuickConnectModeStatus};
 
     fn command_families() -> impl Iterator<Item = (DeviceCommand, DeviceBackend)> {

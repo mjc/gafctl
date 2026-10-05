@@ -1,4 +1,5 @@
 use super::*;
+use crate::test_support::cloud_device;
 
 #[tokio::test]
 async fn detail_failure_keeps_device_registered_while_other_state_and_ble_remain_available() {
@@ -52,22 +53,10 @@ async fn invalid_inventory_marks_only_that_accounts_current_state_unavailable() 
     let (_directory, path) = identity_store_fixture();
     let mut registry = DeviceRegistry::load(&path).unwrap();
     let first = registry
-        .reconcile_quickconnect(
-            "account-a",
-            &[crate::backend::CloudDeviceInput::new(
-                "provider-a".to_owned(),
-                "One".to_owned(),
-            )],
-        )
+        .reconcile_quickconnect("account-a", &[cloud_device("provider-a", "One")])
         .unwrap();
     let second = registry
-        .reconcile_quickconnect(
-            "account-b",
-            &[crate::backend::CloudDeviceInput::new(
-                "provider-a".to_owned(),
-                "Two".to_owned(),
-            )],
-        )
+        .reconcile_quickconnect("account-b", &[cloud_device("provider-a", "Two")])
         .unwrap();
     let first_runtime = registry.runtime(&first[0]).unwrap();
     let second_runtime = registry.runtime(&second[0]).unwrap();

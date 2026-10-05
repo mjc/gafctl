@@ -206,6 +206,8 @@ fn request_carries_frame_response_and_operation_together() {
     ]
     .into_iter()
     .for_each(|(command, wire, response)| {
+        assert_eq!(command.frame(), wire);
+        assert_eq!(command.response_id(), response);
         let request = Request::from(command);
         assert!(match request.frame() {
             gafctl_protocol::RequestFrame::Read(_) => true,

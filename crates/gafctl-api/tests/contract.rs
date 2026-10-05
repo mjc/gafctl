@@ -257,23 +257,13 @@ fn available_state_rejects_inconsistent_backend_and_measurements() {
             "provenance":{"backend":"legacy_ble","fetched_at_unix_ms":123,"observed_at_unix_ms":120}}});
     let valid: DeviceStateV2Response = serde_json::from_value(value.clone()).unwrap();
     assert!(valid.validate().is_ok());
-    for invalid in [
-        {
-            let mut value = value.clone();
-            value["state"]["provenance"]["backend"] = json!("quick_connect");
-            value
-        },
-        {
-            let mut value = value.clone();
-            value["backend"] = json!("quick_connect");
-            value
-        },
-        {
-            let mut value = value.clone();
-            value["state"]["humidity_percent"] = json!(101);
-            value
-        },
+    for (pointer, replacement) in [
+        ("/state/provenance/backend", json!("quick_connect")),
+        ("/backend", json!("quick_connect")),
+        ("/state/humidity_percent", json!(101)),
     ] {
+        let mut invalid = value.clone();
+        *invalid.pointer_mut(pointer).unwrap() = replacement;
         let parsed: DeviceStateV2Response = serde_json::from_value(invalid).unwrap();
         assert!(parsed.validate().is_err());
     }

@@ -1,24 +1,8 @@
 use bytes::Bytes;
 use gafctl_protocol::{
     AutomaticThresholds, ControlCommand, Frame, FrameDecoder, FrameError, HumidityTenthsPercent,
-    Minutes, ReadCommand, ReadbackError, TemperatureTenthsF, TimerState,
+    Minutes, ReadbackError, TemperatureTenthsF, TimerState,
 };
-
-#[test]
-fn read_only_commands_encode_the_observed_line_frames() {
-    let cases = [
-        (ReadCommand::Identity, b"#idg\n".as_slice(), *b"idr"),
-        (ReadCommand::Mode, b"#dmg\n".as_slice(), *b"dmr"),
-        (ReadCommand::Sensors, b"#sdg\n".as_slice(), *b"sdr"),
-        (ReadCommand::AutoThresholds, b"#atg\n".as_slice(), *b"atr"),
-        (ReadCommand::Timer, b"#ttg\n".as_slice(), *b"ttr"),
-    ];
-
-    cases.into_iter().for_each(|(command, expected, response)| {
-        assert_eq!(command.frame(), expected);
-        assert_eq!(command.response_id(), response);
-    });
-}
 
 #[test]
 fn automatic_threshold_write_uses_tenths_and_uppercase_hex() {

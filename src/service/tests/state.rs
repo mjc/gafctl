@@ -80,6 +80,8 @@ async fn reusable_client_reads_the_actual_service_router_without_physical_access
     assert_eq!(snapshot.temperature_f, Some(97.0));
     assert_eq!(snapshot.estimated_running, None);
     let serialized = serde_json::to_string(&snapshot).unwrap();
+    assert!(serialized.contains("\"estimated_running\":null"));
+    assert!(serialized.contains("\"controller_fan_on\":false"));
     assert!(!serialized.contains("private-suffix"));
     assert!(!serialized.contains("private-peripheral-id"));
 }

@@ -7,7 +7,6 @@ use axum::{
 };
 use gafctl_api::{CommandId, ControlPreset, DeviceControlV2Request, DeviceControlV2Response};
 use http_body_util::BodyExt;
-use std::time::Instant;
 use tower::ServiceExt;
 
 #[tokio::test]
@@ -140,13 +139,4 @@ fn snapshot_projection_requires_every_field_to_decode() {
             "field {field}"
         );
     }
-}
-
-#[test]
-fn snapshot_projection_does_not_expose_identity_suffix_or_claim_airflow() {
-    let snapshot = snapshot_at(Instant::now(), SystemTime::now());
-    let projected = serde_json::to_string(&project_legacy_snapshot(&snapshot)).unwrap();
-    assert!(!projected.contains("private-suffix"));
-    assert!(projected.contains("\"estimated_running\":null"));
-    assert!(projected.contains("\"controller_fan_on\":false"));
 }

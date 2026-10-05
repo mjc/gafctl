@@ -1,7 +1,7 @@
 use super::quickconnect::QuickConnectBackend;
 use super::*;
 use crate::api::router;
-use crate::test_support::identity_store_fixture;
+use crate::test_support::{cloud_device, identity_store_fixture};
 use axum::{
     Json, Router,
     body::Body,
@@ -198,10 +198,7 @@ pub(crate) async fn refresh_fixture() -> (
     let id = registry
         .reconcile_quickconnect(
             "synthetic-account",
-            &[crate::backend::CloudDeviceInput::new(
-                "private-fixture-id".to_owned(),
-                "Vent".to_owned(),
-            )],
+            &[cloud_device("private-fixture-id", "Vent")],
         )
         .unwrap()
         .pop()

@@ -286,7 +286,7 @@ fn state_is_fresh(state: &DeviceState, now_unix_ms: u64) -> bool {
 mod tests {
     use super::super::{DeviceRegistry, test_support::*};
     use super::*;
-    use crate::test_support::identity_store_fixture;
+    use crate::test_support::{cloud_device, identity_store_fixture};
     use gafctl_api::{DeviceSettings, QuickConnectModeStatus};
     async fn assert_observation(
         runtime: &DeviceRuntime,

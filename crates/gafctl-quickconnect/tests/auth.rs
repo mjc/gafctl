@@ -155,18 +155,7 @@ async fn concurrent_unauthorized_reads_share_one_replacement_login() {
         .route("/gaf/device/deviceList", get(authorize_by_token))
         .with_state(Arc::clone(&login_count));
     let (base_url, _server) = start_server(app).await;
-    let client = QuickConnectClient::new(
-        Credentials::new(
-            "fan@example.invalid",
-            "synthetic-password",
-            AccountRole::Contractor,
-        ),
-        QuickConnectConfig::new(
-            base_url.join("cognito/").unwrap(),
-            base_url.join("gaf/").unwrap(),
-        ),
-    )
-    .unwrap();
+    let client = test_client(base_url);
 
     let (first, second) = tokio::join!(client.read_inventory(), client.read_inventory());
 
@@ -272,7 +261,7 @@ async fn transient_refresh_login_failure_is_retried_within_its_budget() {
     let login_count = Arc::new(AtomicUsize::new(0));
     let app = Router::new()
         .route("/cognito/login", post(transient_refresh_login))
-        .route("/gaf/device/deviceList", get(reject_then_accept))
+        .route("/gaf/device/deviceList", get(authorize_by_token))
         .with_state(Arc::clone(&login_count));
     let (base_url, _server) = start_server(app).await;
     let client = test_client(base_url);
@@ -287,7 +276,7 @@ async fn exhausted_refresh_retries_return_the_original_transient_failure() {
     let device_requests = Arc::new(AtomicUsize::new(0));
     let app = Router::new()
         .route("/cognito/login", post(failing_refresh_login))
-        .route("/gaf/device/deviceList", get(reject_initial_token))
+        .route("/gaf/device/deviceList", get(reject_every_read))
         .with_state((Arc::clone(&login_count), Arc::clone(&device_requests)));
     let (base_url, _server) = start_server(app).await;
     let client = test_client(base_url);
@@ -695,28 +684,6 @@ async fn transient_refresh_login(State(login_count): State<Arc<AtomicUsize>>) ->
     }
 }
 
-async fn reject_then_accept(
-    State(_login_count): State<Arc<AtomicUsize>>,
-    headers: HeaderMap,
-) -> Response<Body> {
-    match headers
-        .get("authorization")
-        .and_then(|value| value.to_str().ok())
-    {
-        Some("first-token") => (
-            StatusCode::UNAUTHORIZED,
-            Json(json!({"message": "expired"})),
-        )
-            .into_response(),
-        Some("replacement-token") => Json(json!({"responseData": []})).into_response(),
-        _ => (
-            StatusCode::UNAUTHORIZED,
-            Json(json!({"message": "missing"})),
-        )
-            .into_response(),
-    }
-}
-
 async fn failing_refresh_login(
     State((login_count, _)): State<(Arc<AtomicUsize>, Arc<AtomicUsize>)>,
 ) -> Response<Body> {
@@ -728,17 +695,6 @@ async fn failing_refresh_login(
         )
             .into_response(),
     }
-}
-
-async fn reject_initial_token(
-    State((_, device_requests)): State<(Arc<AtomicUsize>, Arc<AtomicUsize>)>,
-) -> Response<Body> {
-    device_requests.fetch_add(1, Ordering::SeqCst);
-    (
-        StatusCode::UNAUTHORIZED,
-        Json(json!({"message": "expired"})),
-    )
-        .into_response()
 }
 
 async fn failing_initial_login(
