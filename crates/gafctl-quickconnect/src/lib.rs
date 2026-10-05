@@ -178,7 +178,12 @@ impl QuickConnectClient {
 
     /// Read the device list response without interpreting provider-specific records.
     pub async fn list_devices(&self) -> Result<Value, ClientError> {
-        validate_inventory_response(self.get_json("device/deviceList").await?)
+        let url = self
+            .config
+            .device_base_url
+            .join("device/deviceList")
+            .map_err(|_| ClientError::InvalidEndpoint)?;
+        validate_inventory_response(self.get_url_with_retry(url).await?)
     }
 
     /// Read typed inventory without waiting for device detail requests.
@@ -188,7 +193,11 @@ impl QuickConnectClient {
 
     /// Read one device detail record using its provider ID as an encoded query value.
     pub async fn device_detail(&self, provider_id: &str) -> Result<Value, ClientError> {
-        let mut url = endpoint(&self.config.device_base_url, "device")?;
+        let mut url = self
+            .config
+            .device_base_url
+            .join("device")
+            .map_err(|_| ClientError::InvalidEndpoint)?;
         url.query_pairs_mut().append_pair("deviceId", provider_id);
         validate_device_response(self.get_url_with_retry(url).await?)
     }
@@ -200,17 +209,6 @@ impl QuickConnectClient {
     ) -> Result<QuickConnectDeviceState, ClientError> {
         let payload = self.device_detail(provider_id).await?;
         model::parse_device_state(payload, unix_millis(SystemTime::now()))
-    }
-
-    /// POST device settings once. Writes are never retried or reauthenticated automatically.
-    pub async fn save_device_settings(
-        &self,
-        provider_id: &str,
-        body: &QuickConnectSettingsBody,
-    ) -> Result<Value, ClientError> {
-        let prepared = self.prepare_settings_write().await?;
-        self.save_device_settings_prepared(provider_id, body, prepared)
-            .await
     }
 
     /// Complete account authentication before the caller performs its final admission check.
@@ -240,12 +238,6 @@ impl QuickConnectClient {
             return Err(ClientError::Authentication);
         }
         response_json(response, self.config.max_response_bytes).await
-    }
-
-    /// GET a JSON response from a safe path below the configured device API root.
-    pub async fn get_json(&self, path: &str) -> Result<Value, ClientError> {
-        self.get_url_with_retry(endpoint(&self.config.device_base_url, path)?)
-            .await
     }
 
     async fn get_url_with_retry(&self, url: Url) -> Result<Value, ClientError> {
@@ -353,8 +345,11 @@ impl QuickConnectClient {
     }
 
     async fn login_once(&self) -> Result<String, RequestFailure> {
-        let url =
-            endpoint(&self.config.auth_base_url, "login").map_err(RequestFailure::final_error)?;
+        let url = self
+            .config
+            .auth_base_url
+            .join("login")
+            .map_err(|_| RequestFailure::final_error(ClientError::InvalidEndpoint))?;
         let body = LoginRequest {
             user_name: self.credentials.username.trim(),
             password: STANDARD.encode(self.credentials.password.as_bytes()),
@@ -511,29 +506,10 @@ async fn response_json(
     Ok(payload)
 }
 
-fn endpoint(base: &Url, path: &str) -> Result<Url, ClientError> {
-    if path.starts_with('/')
-        || path.chars().next().is_some_and(char::is_whitespace)
-        || path.contains('\\')
-        || path
-            .chars()
-            .any(|character| character == '%' || character == '?' || character == '#')
-        || path.chars().any(char::is_control)
-        || path
-            .split('/')
-            .any(|segment| segment == ".." || segment.contains(':'))
-    {
-        return Err(ClientError::InvalidEndpoint);
-    }
-    let joined = base.join(path).map_err(|_| ClientError::InvalidEndpoint)?;
-    let root = base.path();
-    if joined.origin() != base.origin() || !joined.path().starts_with(root) {
-        return Err(ClientError::InvalidEndpoint);
-    }
-    Ok(joined)
-}
-
 fn validate_api_root(url: &Url) -> Result<(), ClientError> {
+    if !url.path().ends_with('/') {
+        return Err(ClientError::InvalidEndpoint);
+    }
     let is_loopback = url.host_str().is_some_and(|host| {
         host.eq_ignore_ascii_case("localhost")
             || host

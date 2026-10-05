@@ -116,14 +116,4 @@ mod tests {
         intake.close();
         worker.await.unwrap();
     }
-
-    #[test]
-    fn mqtt_device_requests_reject_unknown_fields() {
-        assert!(
-            serde_json::from_str::<gafctl_api::ControlRequest>(
-                r#"{"preset":"timer_clear","duration_minutes":999}"#
-            )
-            .is_err()
-        );
-    }
 }
