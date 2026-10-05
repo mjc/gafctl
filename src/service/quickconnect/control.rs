@@ -108,23 +108,6 @@ impl QuickConnectControlIntent {
     }
 }
 
-#[cfg(test)]
-impl QuickConnectBackend {
-    fn with_policy(
-        registry: Arc<tokio::sync::RwLock<crate::backend::DeviceRegistry>>,
-        client: gafctl_quickconnect::QuickConnectClient,
-        account_id: impl Into<Arc<str>>,
-        policy: QuickConnectControlPolicy,
-    ) -> Self {
-        Self {
-            registry,
-            client,
-            account_id: account_id.into(),
-            policy,
-        }
-    }
-}
-
 impl QuickConnectBackend {
     pub(in crate::service) async fn execute(
         &self,
@@ -493,7 +476,7 @@ mod tests {
             atomic::{AtomicBool, AtomicUsize, Ordering},
         },
         time::Duration,
-        time::{SystemTime, UNIX_EPOCH},
+        time::SystemTime,
     };
 
     use axum::{
@@ -579,12 +562,11 @@ mod tests {
         .for_each(|command| assert!(QuickConnectControlIntent::new(123, command).is_none()));
     }
 
-    #[derive(Clone)]
+    #[derive(Clone, Default)]
     struct MockState {
         detail_reads: Arc<AtomicUsize>,
         settings_writes: Arc<AtomicUsize>,
         login_delay_ms: Arc<AtomicUsize>,
-        detail_delay_ms: Arc<AtomicUsize>,
         pre_detail_delay_ms: Arc<AtomicUsize>,
         delayed_pre_details: Arc<AtomicUsize>,
         post_detail_delay_ms: Arc<AtomicUsize>,
@@ -613,22 +595,8 @@ mod tests {
         writes_enabled: bool,
     ) -> ControlFixture {
         let mock = MockState {
-            detail_reads: Arc::new(AtomicUsize::new(0)),
-            settings_writes: Arc::new(AtomicUsize::new(0)),
-            login_delay_ms: Arc::new(AtomicUsize::new(0)),
-            detail_delay_ms: Arc::new(AtomicUsize::new(0)),
-            pre_detail_delay_ms: Arc::new(AtomicUsize::new(0)),
-            delayed_pre_details: Arc::new(AtomicUsize::new(0)),
-            post_detail_delay_ms: Arc::new(AtomicUsize::new(0)),
-            delayed_post_details: Arc::new(AtomicUsize::new(0)),
-            login_started: Arc::new(tokio::sync::Notify::new()),
-            mismatch_preserved_humidity: Arc::new(AtomicBool::new(false)),
-            mismatch_once: Arc::new(AtomicBool::new(false)),
-            fail_detail_after_write: Arc::new(AtomicBool::new(false)),
             post_status: Arc::new(AtomicUsize::new(200)),
-            saved_body: Arc::new(tokio::sync::Mutex::new(None)),
-            post_readback_started: Arc::new(tokio::sync::Notify::new()),
-            pre_read_started: Arc::new(tokio::sync::Notify::new()),
+            ..MockState::default()
         };
         let app = Router::new()
             .route("/cognito/login", post(login))
@@ -652,12 +620,10 @@ mod tests {
             .unwrap();
         registry.set_quickconnect_writes_enabled(writes_enabled);
         let registry = Arc::new(RwLock::new(registry));
-        let service = QuickConnectBackend::with_policy(
-            Arc::clone(&registry),
-            client,
-            "synthetic-account",
+        let service = QuickConnectBackend {
             policy,
-        );
+            ..QuickConnectBackend::new(Arc::clone(&registry), client, "synthetic-account")
+        };
         ControlFixture {
             service,
             device_id,
@@ -669,13 +635,7 @@ mod tests {
     }
 
     fn fresh_intent(command: DeviceCommand) -> QuickConnectControlIntent {
-        let now_unix_ms = u64::try_from(
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_millis(),
-        )
-        .unwrap();
+        let now_unix_ms = unix_millis(SystemTime::now()).unwrap();
         QuickConnectControlIntent::new(now_unix_ms, command).unwrap()
     }
 
@@ -1006,7 +966,7 @@ mod tests {
         } else if delayed_pre {
             state.pre_detail_delay_ms.load(Ordering::SeqCst)
         } else {
-            state.detail_delay_ms.load(Ordering::SeqCst)
+            0
         };
         sleep(Duration::from_millis(delay_ms as u64)).await;
         state.detail_reads.fetch_add(1, Ordering::SeqCst);

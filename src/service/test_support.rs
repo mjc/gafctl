@@ -56,11 +56,7 @@ pub(super) async fn cloud_poll_fixture_detail(
         }
     }
     fixture.active.fetch_sub(1, SeqCst);
-    Json(serde_json::json!({"responseData":{
-        "deviceConfig":{"setTemperature":78,"setHumidity":44},
-        "deviceSettings":{"automaticMode":true,"timerMode":false,"fanMode":false,
-            "setTemperature":105,"setHumidity":40,"humidityMonitor":true}
-    }}))
+    Json(cloud_detail_payload())
 }
 
 pub(super) async fn cloud_poll_fixture(
@@ -80,12 +76,7 @@ pub(super) async fn cloud_poll_fixture(
         ..CloudPollFixture::default()
     });
     let app = Router::new()
-        .route(
-            "/cognito/login",
-            post(|| async {
-                Json(serde_json::json!({"responseData":{"idToken":"synthetic-token"}}))
-            }),
-        )
+        .route("/cognito/login", post(mock_login))
         .route(
             "/gaf/device/deviceList",
             get(|State(fixture): State<Arc<CloudPollFixture>>| async move {
@@ -153,6 +144,14 @@ pub(super) async fn mock_duplicate_inventory() -> Json<serde_json::Value> {
     }))
 }
 
+fn cloud_detail_payload() -> serde_json::Value {
+    serde_json::json!({"responseData": {
+        "deviceConfig": {"setTemperature": 78, "setHumidity": 44},
+        "deviceSettings": {"automaticMode": true, "timerMode": false, "fanMode": false,
+            "setTemperature": 105, "setHumidity": 40, "humidityMonitor": true}
+    }})
+}
+
 pub(super) async fn mock_detail(
     uri: axum::http::Uri,
 ) -> (axum::http::StatusCode, Json<serde_json::Value>) {
@@ -165,22 +164,7 @@ pub(super) async fn mock_detail(
             Json(serde_json::json!({"message": "synthetic failure"})),
         );
     }
-    (
-        axum::http::StatusCode::OK,
-        Json(serde_json::json!({
-            "responseData": {
-                "deviceConfig": {"setTemperature": 78, "setHumidity": 44},
-                "deviceSettings": {
-                    "automaticMode": true,
-                    "timerMode": false,
-                    "fanMode": false,
-                    "setTemperature": 105,
-                    "setHumidity": 40,
-                    "humidityMonitor": true
-                }
-            }
-        })),
-    )
+    (axum::http::StatusCode::OK, Json(cloud_detail_payload()))
 }
 
 pub(super) async fn wait_for_cloud_reads(fixture: &CloudPollFixture, count: usize) {
@@ -224,12 +208,7 @@ pub(crate) async fn refresh_fixture() -> (
         .unwrap();
     let fixture = Arc::new(RefreshFixture::default());
     let app = Router::new()
-        .route(
-            "/cognito/login",
-            post(|| async {
-                Json(serde_json::json!({"responseData": {"idToken": "synthetic-token"}}))
-            }),
-        )
+        .route("/cognito/login", post(mock_login))
         .route("/gaf/device", get(refresh_fixture_detail))
         .with_state(Arc::clone(&fixture));
     let (client, server) = crate::test_support::mock_client(app).await;
@@ -256,14 +235,7 @@ pub(super) async fn refresh_fixture_detail(
             Json(serde_json::json!({"message":"synthetic failure"})),
         );
     }
-    (
-        StatusCode::OK,
-        Json(serde_json::json!({"responseData": {
-            "deviceConfig": {"setTemperature": 78, "setHumidity": 44},
-            "deviceSettings": {"automaticMode":true,"timerMode":false,"fanMode":false,
-                "setTemperature":105,"setHumidity":40,"humidityMonitor":true}
-        }})),
-    )
+    (StatusCode::OK, Json(cloud_detail_payload()))
 }
 
 pub(super) fn snapshot_at(started_at: Instant, observed_at: SystemTime) -> DeviceSnapshot {

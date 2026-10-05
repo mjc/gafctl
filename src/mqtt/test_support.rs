@@ -111,7 +111,7 @@ pub(super) fn mqtt_device(proxy_id: ProxyId, id: &str) -> DeviceDescriptor {
     }
 }
 
-pub(super) fn config(port: u16, discovery_enabled: bool) -> MqttConfig {
+pub(crate) fn config(port: u16, discovery_enabled: bool) -> MqttConfig {
     MqttConfig {
         host: "127.0.0.1".to_owned(),
         port,

@@ -288,34 +288,25 @@ mod tests {
 
     #[test]
     fn cleanup_accepts_only_established_absence_or_stopped_state() {
-        assert!(super::dbus_cleanup_is_complete(
-            Some("org.bluez.Error.NotConnected"),
-            None
-        ));
-        assert!(super::dbus_cleanup_is_complete(
-            Some("org.freedesktop.DBus.Error.UnknownObject"),
-            None
-        ));
-        assert!(super::dbus_cleanup_is_complete(
-            Some("org.bluez.Error.DoesNotExist"),
-            None
-        ));
-        assert!(super::dbus_cleanup_is_complete(
-            Some("org.bluez.Error.Failed"),
-            Some("No discovery started")
-        ));
-        assert!(!super::dbus_cleanup_is_complete(
-            Some("org.bluez.Error.Failed"),
-            Some("le-connection-abort-by-local")
-        ));
-        assert!(!super::dbus_cleanup_is_complete(
-            Some("org.freedesktop.DBus.Error.NoReply"),
-            None
-        ));
-        assert!(!super::dbus_cleanup_is_complete(
-            Some("org.bluez.Error.NotReady"),
-            None
-        ));
+        for (name, message, completed) in [
+            ("org.bluez.Error.NotConnected", None, true),
+            ("org.freedesktop.DBus.Error.UnknownObject", None, true),
+            ("org.bluez.Error.DoesNotExist", None, true),
+            ("org.bluez.Error.Failed", Some("No discovery started"), true),
+            (
+                "org.bluez.Error.Failed",
+                Some("le-connection-abort-by-local"),
+                false,
+            ),
+            ("org.freedesktop.DBus.Error.NoReply", None, false),
+            ("org.bluez.Error.NotReady", None, false),
+        ] {
+            assert_eq!(
+                super::dbus_cleanup_is_complete(Some(name), message),
+                completed,
+                "{name} {message:?}"
+            );
+        }
     }
 
     #[test]

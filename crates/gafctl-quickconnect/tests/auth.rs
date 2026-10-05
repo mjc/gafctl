@@ -81,62 +81,34 @@ async fn login_trims_username_encodes_utf8_password_and_sends_literal_token_head
 
 #[test]
 fn api_roots_require_tls_except_for_loopback_http() {
-    let credentials = || Credentials::new("user", "password", AccountRole::Contractor);
-    let https = reqwest::Url::parse("https://api.example.invalid/root/").unwrap();
-    let loopback = reqwest::Url::parse("http://127.0.0.1:8080/root/").unwrap();
-    let ipv6_loopback = reqwest::Url::parse("http://[::1]:8080/root/").unwrap();
-    let localhost = reqwest::Url::parse("http://localhost:8080/root/").unwrap();
-    let public_http = reqwest::Url::parse("http://api.example.invalid/root/").unwrap();
-    let other_scheme = reqwest::Url::parse("ftp://api.example.invalid/root/").unwrap();
-    let nested = reqwest::Url::parse("https://api.example.invalid/nested/root/").unwrap();
-    let file_base = reqwest::Url::parse("https://api.example.invalid/nested/root").unwrap();
-
-    assert!(
-        QuickConnectClient::new(
-            credentials(),
-            QuickConnectConfig::new(nested.clone(), nested.clone()),
-        )
-        .is_ok()
-    );
-    for (auth, device) in [(file_base.clone(), nested.clone()), (nested, file_base)] {
+    let https = "https://api.example.invalid/root/";
+    let nested = "https://api.example.invalid/nested/root/";
+    let file_base = "https://api.example.invalid/nested/root";
+    let loopback = "http://127.0.0.1:8080/root/";
+    for (auth, device, valid) in [
+        (nested, nested, true),
+        (file_base, nested, false),
+        (nested, file_base, false),
+        (https, https, true),
+        (loopback, "http://localhost:8080/root/", true),
+        ("http://[::1]:8080/root/", loopback, true),
+        ("http://api.example.invalid/root/", https, false),
+        (https, "ftp://api.example.invalid/root/", false),
+    ] {
+        let result = QuickConnectClient::new(
+            Credentials::new("user", "password", AccountRole::Contractor),
+            QuickConnectConfig::new(auth.parse().unwrap(), device.parse().unwrap()),
+        );
         assert_eq!(
-            QuickConnectClient::new(credentials(), QuickConnectConfig::new(auth, device)).err(),
-            Some(gafctl_quickconnect::ClientError::InvalidEndpoint)
+            result.err(),
+            if valid {
+                None
+            } else {
+                Some(gafctl_quickconnect::ClientError::InvalidEndpoint)
+            },
+            "auth={auth} device={device}"
         );
     }
-
-    assert!(
-        QuickConnectClient::new(
-            credentials(),
-            QuickConnectConfig::new(https.clone(), https.clone()),
-        )
-        .is_ok()
-    );
-    assert!(
-        QuickConnectClient::new(
-            credentials(),
-            QuickConnectConfig::new(loopback.clone(), localhost),
-        )
-        .is_ok()
-    );
-    assert!(
-        QuickConnectClient::new(
-            credentials(),
-            QuickConnectConfig::new(ipv6_loopback, loopback.clone()),
-        )
-        .is_ok()
-    );
-    assert!(
-        QuickConnectClient::new(
-            credentials(),
-            QuickConnectConfig::new(public_http.clone(), https.clone()),
-        )
-        .is_err()
-    );
-    assert!(
-        QuickConnectClient::new(credentials(), QuickConnectConfig::new(https, other_scheme),)
-            .is_err()
-    );
 }
 
 #[tokio::test]
@@ -148,10 +120,7 @@ async fn read_only_poll_keeps_inventory_when_one_detail_fetch_fails() {
         .route("/gaf/device", get(detail_by_id))
         .with_state(Arc::clone(&failed_detail_requests));
     let (base_url, _server) = start_server(app).await;
-    let client = test_client(
-        base_url,
-        Credentials::new("user", "password", AccountRole::Contractor),
-    );
+    let client = test_client(base_url);
 
     let inventory = client.read_inventory().await.unwrap();
     let failed = client.read_device_state(inventory[0].provider_id()).await;
@@ -215,10 +184,7 @@ async fn repeated_auth_rejection_stops_after_one_retry() {
         .route("/gaf/device/deviceList", get(reject_every_read))
         .with_state((Arc::clone(&login_count), Arc::clone(&device_requests)));
     let (base_url, _server) = start_server(app).await;
-    let client = test_client(
-        base_url,
-        Credentials::new("user", "password", AccountRole::Contractor),
-    );
+    let client = test_client(base_url);
 
     assert_eq!(
         client.read_inventory().await.unwrap_err(),
@@ -237,10 +203,7 @@ async fn transient_failures_do_not_reset_the_single_reauthentication_allowance()
         .route("/gaf/device/deviceList", get(auth_then_transient_then_auth))
         .with_state((Arc::clone(&login_count), Arc::clone(&device_requests)));
     let (base_url, _server) = start_server(app).await;
-    let client = test_client(
-        base_url,
-        Credentials::new("user", "password", AccountRole::Contractor),
-    );
+    let client = test_client(base_url);
 
     assert_eq!(
         client.read_inventory().await.unwrap_err(),
@@ -292,10 +255,7 @@ async fn settings_rejection_keeps_the_provider_service_status() {
         .route("/cognito/login", post(successful_login))
         .route("/gaf/deviceMode/fan", post(reject_settings));
     let (base_url, _server) = start_server(app).await;
-    let client = test_client(
-        base_url,
-        Credentials::new("user", "password", AccountRole::Contractor),
-    );
+    let client = test_client(base_url);
 
     let prepared = client.prepare_settings_write().await.unwrap();
     assert_eq!(
@@ -315,10 +275,7 @@ async fn transient_refresh_login_failure_is_retried_within_its_budget() {
         .route("/gaf/device/deviceList", get(reject_then_accept))
         .with_state(Arc::clone(&login_count));
     let (base_url, _server) = start_server(app).await;
-    let client = test_client(
-        base_url,
-        Credentials::new("user", "password", AccountRole::Contractor),
-    );
+    let client = test_client(base_url);
 
     assert!(client.read_inventory().await.is_ok());
     assert_eq!(login_count.load(Ordering::SeqCst), 3);
@@ -333,10 +290,7 @@ async fn exhausted_refresh_retries_return_the_original_transient_failure() {
         .route("/gaf/device/deviceList", get(reject_initial_token))
         .with_state((Arc::clone(&login_count), Arc::clone(&device_requests)));
     let (base_url, _server) = start_server(app).await;
-    let client = test_client(
-        base_url,
-        Credentials::new("user", "password", AccountRole::Contractor),
-    );
+    let client = test_client(base_url);
 
     assert_eq!(
         client.read_inventory().await.unwrap_err(),
@@ -355,10 +309,7 @@ async fn exhausted_initial_login_retries_do_not_restart_the_login_budget() {
         .route("/gaf/device/deviceList", get(count_device_request))
         .with_state((Arc::clone(&login_count), Arc::clone(&device_requests)));
     let (base_url, _server) = start_server(app).await;
-    let client = test_client(
-        base_url,
-        Credentials::new("user", "password", AccountRole::Contractor),
-    );
+    let client = test_client(base_url);
 
     assert_eq!(
         client.read_inventory().await.unwrap_err(),
@@ -374,10 +325,7 @@ async fn successful_http_response_with_unknown_inventory_shape_is_a_schema_error
         .route("/cognito/login", post(successful_login))
         .route("/gaf/device/deviceList", get(invalid_inventory));
     let (base_url, _server) = start_server(app).await;
-    let client = test_client(
-        base_url,
-        Credentials::new("user", "password", AccountRole::Contractor),
-    );
+    let client = test_client(base_url);
 
     assert_eq!(
         client.read_inventory().await.unwrap_err(),
@@ -393,10 +341,7 @@ async fn device_detail_encodes_provider_identifier_as_a_query_value() {
         .route("/gaf/device", get(capture_detail_query))
         .with_state(Arc::clone(&captured_query));
     let (base_url, _server) = start_server(app).await;
-    let client = test_client(
-        base_url,
-        Credentials::new("user", "password", AccountRole::Contractor),
-    );
+    let client = test_client(base_url);
 
     let state = client.read_device_state("fan&other=secret").await.unwrap();
     assert_eq!(state.settings.mode, DeviceModeStatus::Unknown);
@@ -411,10 +356,7 @@ async fn device_detail_encodes_provider_identifier_as_a_query_value() {
 async fn missing_login_token_is_an_authentication_error() {
     let app = Router::new().route("/cognito/login", post(login_without_token));
     let (base_url, _server) = start_server(app).await;
-    let client = test_client(
-        base_url,
-        Credentials::new("user", "password", AccountRole::Contractor),
-    );
+    let client = test_client(base_url);
 
     assert_eq!(
         client.read_inventory().await.unwrap_err(),
@@ -426,10 +368,7 @@ async fn missing_login_token_is_an_authentication_error() {
 async fn login_client_error_status_is_an_authentication_error() {
     let app = Router::new().route("/cognito/login", post(reject_login));
     let (base_url, _server) = start_server(app).await;
-    let client = test_client(
-        base_url,
-        Credentials::new("user", "password", AccountRole::Contractor),
-    );
+    let client = test_client(base_url);
 
     assert_eq!(
         client.read_inventory().await.unwrap_err(),
@@ -447,10 +386,7 @@ async fn reads_retry_bounded_server_errors_and_writes_are_never_retried() {
         .route("/gaf/deviceMode/fan", post(fail_write))
         .with_state((Arc::clone(&read_count), Arc::clone(&write_count)));
     let (base_url, _server) = start_server(app).await;
-    let client = test_client(
-        base_url,
-        Credentials::new("user", "password", AccountRole::Contractor),
-    );
+    let client = test_client(base_url);
 
     assert!(client.read_inventory().await.is_ok());
     assert_eq!(read_count.load(Ordering::SeqCst), 3);
@@ -487,7 +423,7 @@ async fn retry_after_does_not_extend_exhausted_read_or_login_budget() {
                 }))
                 .with_state((Arc::clone(&attempts), fail_login));
             let (base_url, _server) = start_server(app).await;
-            let client = test_client(base_url, Credentials::new("user", "password", AccountRole::Contractor));
+            let client = test_client(base_url);
             let result = tokio::time::timeout(std::time::Duration::from_secs(2), client.read_inventory()).await;
             assert_eq!(result.unwrap().unwrap_err(), gafctl_quickconnect::ClientError::HttpStatus(503));
             assert_eq!(attempts.load(Ordering::SeqCst), 3);
@@ -554,10 +490,7 @@ async fn redirects_are_not_followed_with_account_authorization() {
         .route("/gaf/collect", get(collect_redirect))
         .with_state(Arc::clone(&redirected_requests));
     let (base_url, _server) = start_server(app).await;
-    let client = test_client(
-        base_url,
-        Credentials::new("user", "password", AccountRole::Contractor),
-    );
+    let client = test_client(base_url);
 
     assert_eq!(
         client.read_inventory().await.unwrap_err(),
@@ -649,9 +582,9 @@ async fn authorize_by_token(headers: HeaderMap) -> (axum::http::StatusCode, Json
     }
 }
 
-fn test_client(base_url: reqwest::Url, credentials: Credentials) -> QuickConnectClient {
+fn test_client(base_url: reqwest::Url) -> QuickConnectClient {
     QuickConnectClient::new(
-        credentials,
+        Credentials::new("user", "password", AccountRole::Contractor),
         QuickConnectConfig::new(
             base_url.join("cognito/").unwrap(),
             base_url.join("gaf/").unwrap(),

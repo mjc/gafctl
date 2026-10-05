@@ -360,18 +360,14 @@ impl DeviceRegistry {
         };
         Arc::clone(&device.runtime)
     }
-
-    #[cfg(test)]
-    fn identity_count(&self) -> usize {
-        self.identities.bindings.len()
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::test_support::*;
     use super::*;
-    use gafctl_api::{DeviceSettings, DeviceState, QuickConnectModeStatus, StateProvenance};
+    use crate::test_support::identity_store_fixture;
+    use gafctl_api::{DeviceSettings, DeviceState, QuickConnectModeStatus};
 
     fn command_families() -> impl Iterator<Item = (DeviceCommand, DeviceBackend)> {
         [
@@ -422,7 +418,7 @@ mod tests {
 
     #[test]
     fn dispatch_checks_command_family_and_enabled_capabilities() {
-        let (_directory, path) = registry_fixture();
+        let (_directory, path) = identity_store_fixture();
         let mut registry = DeviceRegistry::load(&path).unwrap();
         registry.register_configured_ble();
         let ble = DeviceId::configured_ble();
@@ -466,7 +462,7 @@ mod tests {
 
     #[test]
     fn cloud_control_targets_require_account_read_and_write_permissions() {
-        let (_directory, path) = registry_fixture();
+        let (_directory, path) = identity_store_fixture();
         let mut registry = DeviceRegistry::load(&path).unwrap();
         let id = registry
             .reconcile_quickconnect("account-a", &[cloud_device("provider-a", "Fan")])
@@ -524,7 +520,7 @@ mod tests {
 
     #[test]
     fn descriptors_resolve_registered_ids_and_follow_renames() {
-        let (_directory, path) = registry_fixture();
+        let (_directory, path) = identity_store_fixture();
         let mut registry = DeviceRegistry::load(&path).unwrap();
         registry.register_configured_ble();
         let id = registry
@@ -553,7 +549,7 @@ mod tests {
 
     #[tokio::test]
     async fn reregistering_a_device_updates_its_descriptor_and_preserves_its_runtime() {
-        let (_directory, path) = registry_fixture();
+        let (_directory, path) = identity_store_fixture();
         let mut registry = DeviceRegistry::load(&path).unwrap();
         let id = registry
             .reconcile_quickconnect("account-a", &[cloud_device("provider-a", "Original")])
@@ -572,12 +568,7 @@ mod tests {
                 humidity_monitor: None,
             },
             estimated_running: None,
-            diagnostics: None,
-            provenance: StateProvenance {
-                backend: DeviceBackend::QuickConnect,
-                fetched_at_unix_ms: Some(1_000),
-                observed_at_unix_ms: None,
-            },
+            ..observed_state(Some(1_000))
         };
         runtime.set_state(state.clone()).await;
         let transaction = runtime.acquire_transaction().await;
@@ -601,7 +592,7 @@ mod tests {
 
     #[test]
     fn inactive_backend_ownership_does_not_require_mqtt() {
-        let (_directory, path) = registry_fixture();
+        let (_directory, path) = identity_store_fixture();
         let mut registry = DeviceRegistry::load(&path).unwrap();
         registry.register_configured_ble();
         let cloud = registry
@@ -628,7 +619,7 @@ mod tests {
 
     #[test]
     fn state_and_command_entity_sources_are_selected_per_device() {
-        let (_directory, path) = registry_fixture();
+        let (_directory, path) = identity_store_fixture();
         let mut registry = DeviceRegistry::load(&path).unwrap();
         registry.register_configured_ble();
         let cloud_id = registry

@@ -286,28 +286,8 @@ fn state_is_fresh(state: &DeviceState, now_unix_ms: u64) -> bool {
 mod tests {
     use super::super::{DeviceRegistry, test_support::*};
     use super::*;
-    use gafctl_api::{DeviceBackend, DeviceSettings, QuickConnectModeStatus, StateProvenance};
-    fn observed_state(fetched_at_unix_ms: Option<u64>) -> DeviceState {
-        DeviceState {
-            temperature_f: Some(102.0),
-            humidity_percent: Some(43.0),
-            settings: DeviceSettings::QuickConnect {
-                mode: QuickConnectModeStatus::Automatic,
-                automatic_temperature_f: Some(105),
-                automatic_humidity_percent: Some(40),
-                timer_duration_minutes: None,
-                humidity_monitor: Some(true),
-            },
-            estimated_running: Some(true),
-            diagnostics: None,
-            provenance: StateProvenance {
-                backend: DeviceBackend::QuickConnect,
-                fetched_at_unix_ms,
-                observed_at_unix_ms: None,
-            },
-        }
-    }
-
+    use crate::test_support::identity_store_fixture;
+    use gafctl_api::{DeviceSettings, QuickConnectModeStatus};
     async fn assert_observation(
         runtime: &DeviceRuntime,
         state: Option<DeviceState>,
@@ -334,95 +314,65 @@ mod tests {
         )
         .await;
 
-        let generation = runtime.begin_state_read();
-        assert!(runtime.mark_detail_unavailable_if_current(generation).await);
-        assert!(runtime.mark_detail_unavailable_if_current(generation).await);
-        assert_observation(
-            &runtime,
-            None,
-            DeviceInventoryStatus::Present,
-            Some("QuickConnect device detail unavailable"),
-        )
-        .await;
-        runtime.set_state(state.clone()).await;
-        assert_observation(
-            &runtime,
-            Some(state.clone()),
-            DeviceInventoryStatus::Present,
-            None,
-        )
-        .await;
-
-        let generation = runtime.begin_state_read();
-        assert!(runtime.mark_missing_if_current(generation).await);
-        assert!(runtime.mark_missing_if_current(generation).await);
-        assert_observation(
-            &runtime,
-            None,
-            DeviceInventoryStatus::Missing,
-            Some("QuickConnect device absent from inventory"),
-        )
-        .await;
-        runtime.set_state(state.clone()).await;
-        assert_observation(
-            &runtime,
-            Some(state.clone()),
-            DeviceInventoryStatus::Present,
-            None,
-        )
-        .await;
-
-        let generation = runtime.begin_state_read();
-        assert!(
-            runtime
-                .mark_inventory_unavailable_if_current(generation)
-                .await
-        );
-        assert!(
-            runtime
-                .mark_inventory_unavailable_if_current(generation)
-                .await
-        );
-        assert_observation(
-            &runtime,
-            None,
-            DeviceInventoryStatus::Unavailable,
-            Some("QuickConnect inventory unavailable"),
-        )
-        .await;
-        runtime.set_state(state.clone()).await;
-        assert_observation(
-            &runtime,
-            Some(state.clone()),
-            DeviceInventoryStatus::Present,
-            None,
-        )
-        .await;
-
-        let generation = runtime.begin_control_intent();
-        assert!(
-            runtime
-                .mark_control_state_unavailable_if_current(generation)
-                .await
-        );
-        assert!(
-            runtime
-                .mark_control_state_unavailable_if_current(generation)
-                .await
-        );
-        assert_observation(
-            &runtime,
-            None,
-            DeviceInventoryStatus::Present,
-            Some("QuickConnect control readback unavailable"),
-        )
-        .await;
-        assert!(
-            runtime
-                .set_control_state_if_current(generation, state.clone())
-                .await
-        );
-        assert_observation(&runtime, Some(state), DeviceInventoryStatus::Present, None).await;
+        for (reason, status, error) in [
+            (
+                RuntimeUnavailableReason::Detail,
+                DeviceInventoryStatus::Present,
+                "QuickConnect device detail unavailable",
+            ),
+            (
+                RuntimeUnavailableReason::Missing,
+                DeviceInventoryStatus::Missing,
+                "QuickConnect device absent from inventory",
+            ),
+            (
+                RuntimeUnavailableReason::Inventory,
+                DeviceInventoryStatus::Unavailable,
+                "QuickConnect inventory unavailable",
+            ),
+            (
+                RuntimeUnavailableReason::ControlReadback,
+                DeviceInventoryStatus::Present,
+                "QuickConnect control readback unavailable",
+            ),
+        ] {
+            let generation = match reason {
+                RuntimeUnavailableReason::ControlReadback => runtime.begin_control_intent(),
+                _ => runtime.begin_state_read(),
+            };
+            for _ in 0..2 {
+                assert!(match reason {
+                    RuntimeUnavailableReason::Detail =>
+                        runtime.mark_detail_unavailable_if_current(generation).await,
+                    RuntimeUnavailableReason::Missing =>
+                        runtime.mark_missing_if_current(generation).await,
+                    RuntimeUnavailableReason::Inventory =>
+                        runtime
+                            .mark_inventory_unavailable_if_current(generation)
+                            .await,
+                    RuntimeUnavailableReason::ControlReadback =>
+                        runtime
+                            .mark_control_state_unavailable_if_current(generation)
+                            .await,
+                });
+            }
+            assert_observation(&runtime, None, status, Some(error)).await;
+            match reason {
+                RuntimeUnavailableReason::ControlReadback => assert!(
+                    runtime
+                        .set_control_state_if_current(generation, state.clone())
+                        .await
+                ),
+                _ => runtime.set_state(state.clone()).await,
+            }
+            assert_observation(
+                &runtime,
+                Some(state.clone()),
+                DeviceInventoryStatus::Present,
+                None,
+            )
+            .await;
+        }
     }
 
     #[tokio::test]
@@ -498,7 +448,7 @@ mod tests {
 
     #[tokio::test]
     async fn each_device_owns_independent_state_and_transaction_lock() {
-        let (_directory, path) = registry_fixture();
+        let (_directory, path) = identity_store_fixture();
         let mut registry = DeviceRegistry::load(&path).unwrap();
         let ids = registry
             .reconcile_quickconnect(
@@ -519,7 +469,6 @@ mod tests {
         let stale_poll = first.begin_state_read();
         let control_generation = first.begin_control_intent();
         let confirmed = DeviceState {
-            temperature_f: Some(102.0),
             humidity_percent: None,
             settings: DeviceSettings::QuickConnect {
                 mode: QuickConnectModeStatus::Automatic,
@@ -528,13 +477,7 @@ mod tests {
                 timer_duration_minutes: None,
                 humidity_monitor: None,
             },
-            estimated_running: Some(true),
-            diagnostics: None,
-            provenance: StateProvenance {
-                backend: DeviceBackend::QuickConnect,
-                fetched_at_unix_ms: Some(1),
-                observed_at_unix_ms: None,
-            },
+            ..observed_state(Some(1))
         };
         assert!(
             first

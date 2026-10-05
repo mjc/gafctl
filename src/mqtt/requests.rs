@@ -504,19 +504,10 @@ mod tests {
             invalid_id["request_id"] = json!("invalid id");
             assert!(parse_request(kind, &serde_json::to_vec(&invalid_id).unwrap()).is_none());
         });
-    }
-
-    #[test]
-    fn controls_require_bounded_typed_correlated_requests() {
-        let parsed = parse_request(RequestKind::Control, &request("command-1")).unwrap();
-        assert_eq!(parsed.request_id().as_str(), "command-1");
-        for payload in [b"not json".as_slice(), br#"{"request_id":"invalid id","issued_at_unix_ms":1,"command":{"kind":"quick_connect_mode","mode":"automatic"}}"#.as_slice(), br#"{"request_id":"id","command":{"kind":"quick_connect_mode","mode":"automatic"}}"#.as_slice(), br#"{"request_id":"id","issued_at_unix_ms":1,"preset":"timer_clear"}"#.as_slice()] {
-            assert!(parse_request(RequestKind::Control, payload).is_none());
-        }
         assert!(
             parse_request(
                 RequestKind::Control,
-                &vec![b' '; MAX_CONTROL_REQUEST_BYTES + 1]
+                br#"{"request_id":"id","issued_at_unix_ms":1,"preset":"timer_clear"}"#,
             )
             .is_none()
         );
@@ -644,78 +635,78 @@ mod tests {
 
     #[tokio::test]
     async fn native_broker_rejects_retained_and_stale_requests_and_correlates_results() {
-        let broker = start_native_broker().await;
-        let device = mqtt_device(ProxyId::default(), "qc-one");
-        let topics = Topics(device.proxy_id);
-        let (observer, mut received) = observed_client("control-observer", broker.port);
-        observer
-            .subscribe(topics.process_availability(), QoS::AtLeastOnce)
-            .await
-            .unwrap();
-        observer
-            .subscribe(
-                topics.device(&device.id, "control/result"),
-                QoS::AtLeastOnce,
-            )
-            .await
-            .unwrap();
-        let mut bridge = start(config(broker.port, false), snapshot(device.clone()));
-        receive_topic(&mut received, &topics.process_availability()).await;
-        observer
-            .publish(
-                topics.device(&device.id, "control/set"),
-                request("retained"),
-                PublishOptions::at_least_once().retained(),
-            )
-            .await
-            .unwrap();
-        let result =
-            receive_topic(&mut received, &topics.device(&device.id, "control/result")).await;
-        let result: Value = serde_json::from_slice(&result.payload).unwrap();
-        assert_eq!(result["request_id"], "retained");
-        assert_eq!(result["status"], "retained_request");
-        assert!(bridge.device_requests.try_recv().is_err());
-        let stale = json!({"request_id":"stale", "issued_at_unix_ms":1, "command":{"kind":"quick_connect_mode","mode":"off"}});
-        observer
-            .publish(
-                topics.device(&device.id, "control/set"),
-                serde_json::to_vec(&stale).unwrap(),
-                PublishOptions::at_least_once(),
-            )
-            .await
-            .unwrap();
-        let result =
-            receive_topic(&mut received, &topics.device(&device.id, "control/result")).await;
-        assert_eq!(
-            serde_json::from_slice::<Value>(&result.payload).unwrap()["status"],
-            "stale_request"
-        );
-        observer
-            .publish(
-                topics.device(&device.id, "control/set"),
-                request("confirmed"),
-                PublishOptions::at_least_once(),
-            )
-            .await
-            .unwrap();
-        let work = timeout(Duration::from_secs(5), bridge.device_requests.recv())
-            .await
-            .unwrap()
-            .unwrap();
-        work.reply
-            .send(MqttReply::Control(DeviceControlV2Response {
-                request_id: work.request.request_id().as_str().to_owned(),
-                status: "confirmed".into(),
-            }))
-            .ok()
-            .expect("control reply receiver ended");
-        let result =
-            receive_topic(&mut received, &topics.device(&device.id, "control/result")).await;
-        assert_eq!(result.qos, QoS::AtLeastOnce);
-        assert!(!result.retain);
-        let result: Value = serde_json::from_slice(&result.payload).unwrap();
-        assert_eq!(result["request_id"], "confirmed");
-        assert_eq!(result["status"], "confirmed");
+        for (kind, suffix, discovery, confirmed_status) in [
+            (RequestKind::Control, "control", false, "confirmed"),
+            (RequestKind::Refresh, "refresh", true, "fresh"),
+        ] {
+            let broker = start_native_broker().await;
+            let device = mqtt_device(ProxyId::default(), "request-fixture");
+            let topics = Topics(device.proxy_id);
+            let (observer, mut received) = observed_client("request-observer", broker.port);
+            observer
+                .subscribe(topics.process_availability(), QoS::AtLeastOnce)
+                .await
+                .unwrap();
+            let result_topic = topics.device(&device.id, &format!("{suffix}/result"));
+            observer
+                .subscribe(&result_topic, QoS::AtLeastOnce)
+                .await
+                .unwrap();
+            let mut bridge = start(config(broker.port, discovery), snapshot(device.clone()));
+            receive_topic(&mut received, &topics.process_availability()).await;
+            for (request_id, stale, retain, expected) in [
+                ("retained", false, true, "retained_request"),
+                ("stale", true, false, "stale_request"),
+                ("confirmed", false, false, confirmed_status),
+            ] {
+                let issued_at_unix_ms = if stale {
+                    1
+                } else {
+                    unix_millis(SystemTime::now()).unwrap()
+                };
+                let mut payload =
+                    json!({"request_id":request_id,"issued_at_unix_ms":issued_at_unix_ms});
+                if kind == RequestKind::Control {
+                    payload["command"] = json!({"kind":"quick_connect_mode","mode":"automatic"});
+                }
+                observer
+                    .publish(
+                        topics.device(&device.id, &format!("{suffix}/set")),
+                        serde_json::to_vec(&payload).unwrap(),
+                        PublishOptions::at_least_once().retain(retain),
+                    )
+                    .await
+                    .unwrap();
+                if expected == confirmed_status {
+                    let work = timeout(Duration::from_secs(5), bridge.device_requests.recv())
+                        .await
+                        .unwrap()
+                        .unwrap();
+                    assert_eq!(work.request.kind(), kind);
+                    assert_eq!(work.request.request_id().as_str(), request_id);
+                    let reply = match kind {
+                        RequestKind::Control => MqttReply::Control(DeviceControlV2Response {
+                            request_id: work.request.request_id().as_str().to_owned(),
+                            status: gafctl_api::ControlStatus::Confirmed,
+                        }),
+                        RequestKind::Refresh => MqttReply::Refresh {
+                            request_id: work.request.request_id().clone(),
+                            status: gafctl_api::DeviceRefreshStatus::Fresh,
+                        },
+                    };
+                    work.reply.send(reply).ok().expect("reply receiver ended");
+                }
+                let result = receive_topic(&mut received, &result_topic).await;
+                assert_eq!(result.qos, QoS::AtLeastOnce);
+                assert!(!result.retain);
+                let result: Value = serde_json::from_slice(&result.payload).unwrap();
+                assert_eq!(result["request_id"], request_id);
+                assert_eq!(result["status"], expected);
+                if expected != confirmed_status {
+                    assert!(bridge.device_requests.try_recv().is_err());
+                }
+            }
+        }
     }
 
     #[tokio::test]
@@ -775,79 +766,5 @@ mod tests {
         assert_eq!(result["request_id"], "shutdown-reply");
         assert_eq!(result["status"], "confirmed");
         draining.await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn native_broker_refresh_rejects_retained_and_stale_and_correlates_reads() {
-        let broker = start_native_broker().await;
-        let device = mqtt_device(ProxyId::default(), "refresh-fixture");
-        let topics = Topics(device.proxy_id);
-        let (observer, mut received) = observed_client("refresh-observer", broker.port);
-        observer
-            .subscribe(topics.process_availability(), QoS::AtLeastOnce)
-            .await
-            .unwrap();
-        let result_topic = topics.device(&device.id, "refresh/result");
-        observer
-            .subscribe(&result_topic, QoS::AtLeastOnce)
-            .await
-            .unwrap();
-        let mut bridge = start(config(broker.port, true), snapshot(device.clone()));
-        receive_topic(&mut received, &topics.process_availability()).await;
-        for (request_id, issued_at_unix_ms, retain, expected) in [
-            (
-                "retained-read",
-                unix_millis(SystemTime::now()).unwrap(),
-                true,
-                "retained_request",
-            ),
-            ("stale-read", 1, false, "stale_request"),
-        ] {
-            observer
-                .publish(
-                    topics.device(&device.id, "refresh/set"),
-                    serde_json::to_vec(
-                        &json!({"request_id":request_id,"issued_at_unix_ms":issued_at_unix_ms}),
-                    )
-                    .unwrap(),
-                    PublishOptions::at_least_once().retain(retain),
-                )
-                .await
-                .unwrap();
-            let result = receive_topic(&mut received, &result_topic).await;
-            let result: Value = serde_json::from_slice(&result.payload).unwrap();
-            assert_eq!(result["request_id"], request_id);
-            assert_eq!(result["status"], expected);
-            assert!(bridge.device_requests.try_recv().is_err());
-        }
-        observer
-            .publish(
-                topics.device(&device.id, "refresh/set"),
-                serde_json::to_vec(&json!({
-                    "request_id":"read-confirmed",
-                    "issued_at_unix_ms":unix_millis(SystemTime::now()).unwrap()
-                }))
-                .unwrap(),
-                PublishOptions::at_least_once(),
-            )
-            .await
-            .unwrap();
-        let work = timeout(Duration::from_secs(5), bridge.device_requests.recv())
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(work.request.kind(), RequestKind::Refresh);
-        work.reply
-            .send(MqttReply::Refresh {
-                request_id: work.request.request_id().clone(),
-                status: gafctl_api::DeviceRefreshStatus::Fresh,
-            })
-            .ok()
-            .unwrap();
-        let result = receive_topic(&mut received, &result_topic).await;
-        assert!(!result.retain);
-        let result: Value = serde_json::from_slice(&result.payload).unwrap();
-        assert_eq!(result["request_id"], "read-confirmed");
-        assert_eq!(result["status"], "fresh");
     }
 }
