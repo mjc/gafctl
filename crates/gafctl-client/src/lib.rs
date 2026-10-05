@@ -317,11 +317,6 @@ impl Client {
 }
 
 /// A control ready to submit after checking device capabilities.
-///
-/// ```compile_fail
-/// use gafctl_client::PreparedControl;
-/// let intent = PreparedControl { command: todo!() };
-/// ```
 #[must_use]
 pub struct PreparedControl<'a> {
     client: &'a Client,
