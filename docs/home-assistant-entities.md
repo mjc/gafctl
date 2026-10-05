@@ -154,9 +154,22 @@ publish service state too. Every proxy has its own namespace.
 
 Read `proxy_id` and device `id` from `/api/v2/devices`. Device topics use
 `gafctl/{proxy_id}/{id}/...`; discovery uses
-`homeassistant/{component}/gafctl/{identifier}_{key}/config`, with both IDs in the
-identifier. MQTT client IDs include the proxy UUID so separate services can
-share a broker.
+`homeassistant/device/gafctl/{identifier}/config`, with both IDs in the
+identifier. Each retained device configuration contains all its entities under
+`components`, with shared device and availability metadata. Entity unique IDs
+stay unchanged when upgrading from individual discovery topics. Gafctl sends
+nonretained HA migration messages before publishing the device configuration,
+then clears the previous retained topics after the broker accepts the new
+configuration. Keep the discovery ACL above during the upgrade.
+MQTT client IDs include the proxy UUID so separate services can share a broker.
+
+If migration markers or replacement publication fail before the broker accepts
+the new configuration, the previous retained configurations remain unchanged.
+After acceptance, interrupted cleanup is retried while the new configuration
+remains retained. Gafctl retries on the next state update or broker reconnect.
+HA can temporarily unload entities after receiving a migration message; a
+successful retry restores them. If the replacement continues to fail, restarting
+HA or reconnecting its MQTT integration replays the previous configurations.
 
 Device state and availability messages are retained. Process availability has
 its own last-will topic, `gafctl/{proxy_id}/availability`. It does not replace each fan's
@@ -223,4 +236,6 @@ unavailable device. Other controls require both process and device availability.
 Numbers display confirmed state and send whole, bounded values. Switch-off uses
 the backend conditional-off command so a different current mode is preserved.
 Selectors for original-controller thresholds and timer settings are separate.
-Unavailable capabilities have their retained discovery configurations cleared.
+Unavailable capabilities receive platform-only removal entries in the device
+configuration, including after a service restart. Switching to HTTP ownership
+clears the retained device configuration.

@@ -170,8 +170,9 @@ with enum variants. Refresh and rejection replies retain validated command IDs
 through serialization.
 
 MQTT number controls share setting bounds, units, and command fields, with
-explicit backend differences. Discovery publication and cleanup topics use
-those same definitions.
+explicit backend differences. Device discovery shares metadata at the root and
+uses the same component catalogue for publication, capability removal, and
+cleanup of individual discovery topics during upgrades.
 
 Shared legacy snapshot normalization lives in `src/legacy_projection.rs`.
 Direct BLE output retains partial readings and field errors; the service

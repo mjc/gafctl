@@ -10,66 +10,96 @@ pub(super) fn configs(devices: &[DeviceDescriptor]) -> impl Iterator<Item = (Str
         .filter(|device| {
             device.state_source == EntitySource::Mqtt && device.command_source == EntitySource::Mqtt
         })
-        .flat_map(device_configs)
+        .map(device_config)
 }
 
-pub(super) fn candidates(
+pub(super) fn component_topics(
     topics: Topics,
     identities: &[(DeviceId, DeviceBackend)],
 ) -> impl Iterator<Item = String> + '_ {
     identities.iter().flat_map(move |(id, backend)| {
-        sensors(*backend)
-            .map(move |sensor| topics.discovery(id, "sensor", sensor.key))
-            .chain([
-                topics.discovery(id, "select", "preset"),
-                topics.discovery(id, "select", "mode"),
-                topics.discovery(id, "sensor", "control_result"),
-                topics.discovery(id, "sensor", "controller_fan_flag"),
-                topics.discovery(id, "select", "automatic_thresholds"),
-                topics.discovery(id, "select", "timer"),
-            ])
-            .chain(
-                number_controls(*backend)
-                    .map(move |control| topics.discovery(id, "number", control.key)),
-            )
-            .chain([
-                topics.discovery(id, "button", "refresh"),
-                topics.discovery(id, "button", "all_off"),
-            ])
-            .chain(
-                binary_sensors(*backend)
-                    .map(move |sensor| topics.discovery(id, "binary_sensor", sensor.key)),
-            )
-            .chain(
-                ["automatic", "timer", "manual"]
-                    .into_iter()
-                    .map(move |mode| topics.discovery(id, "switch", &format!("{mode}_mode"))),
-            )
+        possible_components(*backend)
+            .chain([("select", "preset"), ("sensor", "controller_fan_flag")])
+            .map(move |(platform, key)| component_topic(topics, id, platform, key))
     })
 }
 
-fn device_configs(device: &DeviceDescriptor) -> impl Iterator<Item = (String, Value)> + '_ {
+fn component_topic(topics: Topics, id: &DeviceId, platform: &str, key: &str) -> String {
+    format!(
+        "homeassistant/{platform}/gafctl/{}_{key}/config",
+        topics.identifier(id)
+    )
+}
+
+fn possible_components(
+    backend: DeviceBackend,
+) -> impl Iterator<Item = (&'static str, &'static str)> {
+    sensors(backend)
+        .map(|sensor| ("sensor", sensor.key))
+        .chain([
+            ("select", "mode"),
+            ("sensor", "control_result"),
+            ("select", "automatic_thresholds"),
+            ("select", "timer"),
+        ])
+        .chain(number_controls(backend).map(|control| ("number", control.key)))
+        .chain([("button", "refresh"), ("button", "all_off")])
+        .chain(binary_sensors(backend).map(|sensor| ("binary_sensor", sensor.key)))
+        .chain([
+            ("switch", "automatic_mode"),
+            ("switch", "timer_mode"),
+            ("switch", "manual_mode"),
+        ])
+}
+
+fn device_config(device: &DeviceDescriptor) -> (String, Value) {
+    let topics = Topics(device.proxy_id);
+    let mut components = possible_components(device.backend)
+        .map(|(platform, key)| (component_key(platform, key), json!({"platform": platform})))
+        .collect::<serde_json::Map<_, _>>();
+    active_components(device).for_each(|(key, config)| {
+        components.insert(key, config);
+    });
+    (
+        topics.discovery(&device.id),
+        json!({
+            "device": {"identifiers": [topics.identifier(&device.id)], "name": device.name, "manufacturer": "GAF"},
+            "origin": {"name": "gafctl", "sw_version": env!("CARGO_PKG_VERSION")},
+            "state_topic": topics.device(&device.id, "state"),
+            "availability": [
+                {"topic": topics.process_availability()},
+                {"topic": topics.device(&device.id, "availability")},
+            ],
+            "availability_mode": "all",
+            "payload_available": "online",
+            "payload_not_available": "offline",
+            "components": components,
+        }),
+    )
+}
+
+fn active_components(device: &DeviceDescriptor) -> impl Iterator<Item = (String, Value)> + '_ {
     sensors(device.backend)
         .filter(|_| device.capabilities.read_state)
-        .map(|sensor| (topic(device, "sensor", sensor.key), sensor.config(device)))
+        .map(|sensor| component("sensor", sensor.key, sensor.config(device)))
         .chain(control_configs(device))
         .chain(
             binary_sensors(device.backend)
                 .filter(|_| device.capabilities.read_state)
-                .map(|sensor| {
-                    (
-                        topic(device, "binary_sensor", sensor.key),
-                        sensor.config(device),
-                    )
-                }),
+                .map(|sensor| component("binary_sensor", sensor.key, sensor.config(device))),
         )
         .chain(number_configs(device))
         .chain(button_configs(device))
         .chain(switch_configs(device))
 }
 
-fn topic(device: &DeviceDescriptor, domain: &str, key: &str) -> String {
-    Topics(device.proxy_id).discovery(&device.id, domain, key)
+fn component(platform: &str, key: &str, mut config: Value) -> (String, Value) {
+    config["platform"] = json!(platform);
+    (component_key(platform, key), config)
+}
+
+fn component_key(domain: &str, key: &str) -> String {
+    format!("{domain}_{key}")
 }
 
 fn base(device: &DeviceDescriptor, key: &str, name: &str, field: &str) -> Value {
@@ -77,20 +107,7 @@ fn base(device: &DeviceDescriptor, key: &str, name: &str, field: &str) -> Value 
     json!({
         "name": name,
         "unique_id": format!("{}_{key}", topics.identifier(&device.id)),
-        "state_topic": topics.device(&device.id, "state"),
         "value_template": nullable_template(field),
-        "availability": [
-            {"topic": topics.process_availability()},
-            {"topic": topics.device(&device.id, "availability")},
-        ],
-        "availability_mode": "all",
-        "payload_available": "online",
-        "payload_not_available": "offline",
-        "device": {
-            "identifiers": [topics.identifier(&device.id)],
-            "name": device.name,
-            "manufacturer": "GAF",
-        },
     })
 }
 
@@ -289,7 +306,7 @@ fn control_configs(device: &DeviceDescriptor) -> impl Iterator<Item = (String, V
         let mut config = base(device, "control_result", "Last control result", "status");
         config["state_topic"] = json!(Topics(device.proxy_id).device(&device.id, "control/result"));
         config["entity_category"] = json!("diagnostic");
-        (topic(device, "sensor", "control_result"), config)
+        component("sensor", "control_result", config)
     });
     selectors.chain(mode).chain(result)
 }
@@ -313,7 +330,7 @@ fn select_config(
     if kind == "legacy_preset" {
         config["value_template"] = json!(preset_readback_template(key));
     }
-    (topic(device, "select", key), config)
+    component("select", key, config)
 }
 
 fn preset_readback_template(key: &str) -> &'static str {
@@ -370,7 +387,8 @@ impl BinarySensor {
         config["payload_on"] = json!("ON");
         config["payload_off"] = json!("OFF");
         config["entity_category"] = json!("diagnostic");
-        config["json_attributes_topic"] = config["state_topic"].clone();
+        config["json_attributes_topic"] =
+            json!(Topics(device.proxy_id).device(&device.id, "state"));
         config["json_attributes_template"] = json!(format!(
             "{{{{ {{'provenance':'{}','last_error':value_json.last_error}} | to_json }}}}",
             self.provenance
@@ -479,7 +497,7 @@ impl NumberControl {
 fn number_configs(device: &DeviceDescriptor) -> impl Iterator<Item = (String, Value)> + '_ {
     number_controls(device.backend)
         .filter(|control| device.capabilities.commands.contains(&control.capability))
-        .map(|control| (topic(device, "number", control.key), control.config(device)))
+        .map(|control| component("number", control.key, control.config(device)))
 }
 
 fn number_controls(backend: DeviceBackend) -> impl Iterator<Item = NumberControl> {
@@ -568,7 +586,7 @@ fn button_configs(device: &DeviceDescriptor) -> impl Iterator<Item = (String, Va
         config["availability"] = json!([{"topic":Topics(device.proxy_id).process_availability()}]);
         config["command_template"] = json!(request_template(None));
         config["entity_category"] = json!("diagnostic");
-        (topic(device, "button", "refresh"), config)
+        component("button", "refresh", config)
     });
     let off = device
         .capabilities
@@ -579,7 +597,7 @@ fn button_configs(device: &DeviceDescriptor) -> impl Iterator<Item = (String, Va
             config["command_template"] = json!(command_template(
                 "{\"kind\":\"quick_connect_mode\",\"mode\":\"off\"}"
             ));
-            (topic(device, "button", "all_off"), config)
+            component("button", "all_off", config)
         });
     refresh.into_iter().chain(off)
 }
@@ -612,16 +630,279 @@ fn switch_configs(device: &DeviceDescriptor) -> impl Iterator<Item = (String, Va
             set_command_topic(&mut config, device, "control/set");
             config["optimistic"] = json!(false);
             config["command_template"] = json!(command_template(&format!("{{% if value == 'ON' %}}{{\"kind\":\"quick_connect_mode\",\"mode\":\"{mode}\"}}{{% elif value == 'OFF' %}}{{\"kind\":\"quick_connect_conditional_off\",\"only_if_current\":\"{mode}\"}}{{% else %}}null{{% endif %}}")));
-            (topic(device, "switch", &key), config)
+            component("switch", &key, config)
         })
 }
 
 #[cfg(test)]
 mod tests {
-    use super::super::{discovery, test_support::mqtt_device};
+    use super::super::test_support::mqtt_device;
     use super::*;
     use gafctl_api::ProxyId;
     use std::collections::HashSet;
+
+    fn mqtt_ble() -> DeviceDescriptor {
+        let mut device = DeviceDescriptor::configured_ble();
+        device.state_source = EntitySource::Mqtt;
+        device.command_source = EntitySource::Mqtt;
+        device
+    }
+
+    #[test]
+    fn mqtt_owned_device_has_one_grouped_discovery_with_distinct_component_keys() {
+        let device = mqtt_device(ProxyId::default(), "grouped");
+        let generated = configs(std::slice::from_ref(&device)).collect::<Vec<_>>();
+        assert_eq!(generated.len(), 1);
+        assert_eq!(
+            generated[0].0,
+            Topics(device.proxy_id).discovery(&device.id)
+        );
+        let config = &generated[0].1;
+        for (key, platform) in [
+            ("sensor_mode", "sensor"),
+            ("select_mode", "select"),
+            ("binary_sensor_automatic_mode", "binary_sensor"),
+            ("switch_automatic_mode", "switch"),
+        ] {
+            assert_eq!(config["components"][key]["platform"], platform);
+        }
+        assert_eq!(config["origin"]["name"], "gafctl");
+        assert_eq!(config["origin"]["sw_version"], env!("CARGO_PKG_VERSION"));
+        assert_eq!(
+            config["device"]["identifiers"][0],
+            Topics(device.proxy_id).identifier(&device.id)
+        );
+        let temperature = &config["components"]["sensor_temperature"];
+        assert_eq!(
+            temperature["unique_id"],
+            format!(
+                "{}_temperature",
+                Topics(device.proxy_id).identifier(&device.id)
+            )
+        );
+        assert_eq!(temperature["device_class"], "temperature");
+        assert_eq!(temperature["state_class"], "measurement");
+        assert_eq!(temperature["unit_of_measurement"], "°F");
+        for component in config["components"].as_object().unwrap().values() {
+            assert!(component.get("device").is_none());
+            assert!(component.get("origin").is_none());
+            assert!(component.get("availability_mode").is_none());
+        }
+    }
+
+    #[test]
+    fn grouped_discovery_preserves_shared_metadata_and_component_overrides() {
+        let device = mqtt_device(ProxyId::default(), "cloud");
+        let topics = Topics(device.proxy_id);
+        let (_, config) = configs(std::slice::from_ref(&device)).next().unwrap();
+        assert_eq!(config["availability_mode"], "all");
+        assert_eq!(
+            config["availability"][0]["topic"],
+            topics.process_availability()
+        );
+        assert_eq!(
+            config["availability"][1]["topic"],
+            topics.device(&device.id, "availability")
+        );
+        assert_eq!(config["state_topic"], topics.device(&device.id, "state"));
+        assert_eq!(
+            config["components"]["sensor_control_result"]["state_topic"],
+            topics.device(&device.id, "control/result")
+        );
+        assert_eq!(
+            config["components"]["button_refresh"]["availability"],
+            json!([{"topic": topics.process_availability()}])
+        );
+        assert!(
+            config["components"]["button_refresh"]
+                .get("value_template")
+                .is_none()
+        );
+        let other = mqtt_device(ProxyId::default(), "cloud");
+        assert_ne!(
+            configs(&[other]).next().unwrap().0,
+            topics.discovery(&device.id)
+        );
+    }
+
+    #[test]
+    fn inactive_components_have_only_platform_tombstones_and_old_topics_use_same_catalogue() {
+        for mut device in [mqtt_ble(), mqtt_device(ProxyId::default(), "cloud")] {
+            let topics = Topics(device.proxy_id);
+            let migration = component_topics(topics, &[(device.id.clone(), device.backend)])
+                .collect::<HashSet<_>>();
+            device.capabilities.read_state = false;
+            device.capabilities.commands.clear();
+            let (_, config) = configs(std::slice::from_ref(&device)).next().unwrap();
+            for (platform, key) in possible_components(device.backend) {
+                assert_eq!(
+                    config["components"][component_key(platform, key)],
+                    json!({"platform": platform})
+                );
+                assert!(migration.contains(&format!(
+                    "homeassistant/{platform}/gafctl/{}_{key}/config",
+                    topics.identifier(&device.id)
+                )));
+            }
+            assert!(migration.contains(&component_topic(topics, &device.id, "select", "preset")));
+            assert!(migration.contains(&component_topic(
+                topics,
+                &device.id,
+                "sensor",
+                "controller_fan_flag"
+            )));
+            assert!(config["components"].get("select_preset").is_none());
+            assert!(
+                config["components"]
+                    .get("sensor_controller_fan_flag")
+                    .is_none()
+            );
+        }
+    }
+
+    #[test]
+    fn number_components_preserve_backend_metadata_and_capability_tombstones() {
+        for device in [mqtt_ble(), mqtt_device(ProxyId::default(), "cloud")] {
+            let (_, config) = configs(std::slice::from_ref(&device)).next().unwrap();
+            let expected = match device.backend {
+                DeviceBackend::LegacyBle => [
+                    (
+                        "legacy_automatic_temperature",
+                        "temperature_f",
+                        "state.settings.automatic_temperature_tenths_f / 10",
+                        90,
+                        120,
+                        1,
+                        "°F",
+                    ),
+                    (
+                        "legacy_automatic_humidity",
+                        "humidity_percent",
+                        "state.settings.automatic_humidity_tenths_percent / 10",
+                        30,
+                        80,
+                        1,
+                        "%",
+                    ),
+                    (
+                        "legacy_timer",
+                        "minutes",
+                        "state.settings.timer_original_minutes",
+                        0,
+                        360,
+                        1,
+                        "min",
+                    ),
+                ],
+                DeviceBackend::QuickConnect => [
+                    (
+                        "quick_connect_automatic_temperature",
+                        "temperature_f",
+                        "state.settings.automatic_temperature_f",
+                        90,
+                        120,
+                        1,
+                        "°F",
+                    ),
+                    (
+                        "quick_connect_automatic_humidity",
+                        "humidity_percent",
+                        "state.settings.automatic_humidity_percent",
+                        30,
+                        80,
+                        1,
+                        "%",
+                    ),
+                    (
+                        "quick_connect_timer_duration",
+                        "minutes",
+                        "state.settings.timer_duration_minutes",
+                        30,
+                        360,
+                        30,
+                        "min",
+                    ),
+                ],
+            };
+            for (control, (kind, field, reading, minimum, maximum, step, unit)) in
+                number_controls(device.backend).zip(expected)
+            {
+                let component = &config["components"][component_key("number", control.key)];
+                assert_eq!(component["platform"], "number");
+                assert_eq!(component["min"], minimum);
+                assert_eq!(component["max"], maximum);
+                assert_eq!(component["step"], step);
+                assert_eq!(component["unit_of_measurement"], unit);
+                assert_eq!(component["mode"], "box");
+                assert_eq!(component["optimistic"], false);
+                assert_eq!(component["qos"], 1);
+                assert_eq!(
+                    component["command_topic"],
+                    Topics(device.proxy_id).device(&device.id, "control/set")
+                );
+                let command = format!(
+                    "{{\"kind\":\"{kind}\",\"{field}\":{{{{ (number | int if number is number and value is not boolean and number == number | int else none) | to_json }}}}}}"
+                );
+                assert_eq!(
+                    component["command_template"],
+                    format!(
+                        "{{% set number = value | float(default=none) %}}{}",
+                        command_template(&command)
+                    )
+                );
+                let expected_reading = if device.backend == DeviceBackend::LegacyBle
+                    && control.key == "timer_duration"
+                {
+                    "{% set reading = ((value_json.state or {}).get('settings') or {}).get('timer_original_minutes') %}{{ reading if reading is number and 0 <= reading <= 360 else none }}".to_owned()
+                } else {
+                    nullable_template(reading)
+                };
+                assert_eq!(component["value_template"], expected_reading);
+                let mut limited = device.clone();
+                limited
+                    .capabilities
+                    .commands
+                    .retain(|capability| *capability != control.capability);
+                let (_, limited_config) = configs(&[limited]).next().unwrap();
+                assert_eq!(
+                    limited_config["components"][component_key("number", control.key)],
+                    json!({"platform": "number"})
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn namespaced_templates_preserve_unknown_readings_and_freshness() {
+        let devices = [mqtt_ble(), mqtt_device(ProxyId::default(), "cloud-fixture")];
+        let generated = configs(&devices).collect::<Vec<_>>();
+        let components = &generated[0].1["components"];
+        assert!(
+            components["sensor_freshness"]["value_template"]
+                .as_str()
+                .unwrap()
+                .contains("unknown")
+        );
+        assert!(
+            components["sensor_automatic_temperature_threshold"]["value_template"]
+                .as_str()
+                .unwrap()
+                .contains("if reading is number else none")
+        );
+        if let Some(path) = std::env::var_os("GAFCTL_DISCOVERY_FIXTURE") {
+            std::fs::write(path, serde_json::to_vec_pretty(&generated).unwrap()).unwrap();
+        }
+    }
+
+    #[test]
+    fn ble_discovery_does_not_override_http_ownership() {
+        let mut device = DeviceDescriptor::configured_ble();
+        assert_eq!(configs(std::slice::from_ref(&device)).count(), 0);
+        device.state_source = EntitySource::Mqtt;
+        assert_eq!(configs(std::slice::from_ref(&device)).count(), 0);
+        device.command_source = EntitySource::Mqtt;
+        assert_eq!(configs(std::slice::from_ref(&device)).count(), 1);
+    }
 
     #[test]
     fn request_envelopes_preserve_control_and_refresh_payloads() {
@@ -631,265 +912,6 @@ mod tests {
         assert_eq!(
             request_template(Some(command)),
             format!("{prefix},\"command\":{command}}}")
-        );
-    }
-
-    #[test]
-    fn generated_number_configs_preserve_backend_metadata_and_cleanup_topics() {
-        let mut ble = DeviceDescriptor::configured_ble();
-        ble.state_source = EntitySource::Mqtt;
-        ble.command_source = EntitySource::Mqtt;
-        let cloud = mqtt_device(ble.proxy_id, "cloud");
-        [
-            (ble, [
-                ("automatic_temperature", "legacy_automatic_temperature", "temperature_f", "state.settings.automatic_temperature_tenths_f / 10", 90, 120, 1, "°F"),
-                ("automatic_humidity", "legacy_automatic_humidity", "humidity_percent", "state.settings.automatic_humidity_tenths_percent / 10", 30, 80, 1, "%"),
-                ("timer_duration", "legacy_timer", "minutes", "state.settings.timer_original_minutes", 0, 360, 1, "min"),
-            ]),
-            (cloud, [
-                ("automatic_temperature", "quick_connect_automatic_temperature", "temperature_f", "state.settings.automatic_temperature_f", 90, 120, 1, "°F"),
-                ("automatic_humidity", "quick_connect_automatic_humidity", "humidity_percent", "state.settings.automatic_humidity_percent", 30, 80, 1, "%"),
-                ("timer_duration", "quick_connect_timer_duration", "minutes", "state.settings.timer_duration_minutes", 30, 360, 30, "min"),
-            ]),
-        ]
-        .into_iter()
-        .for_each(|(device, expected)| {
-            let topics = Topics(device.proxy_id);
-            let generated = configs(std::slice::from_ref(&device)).collect::<Vec<_>>();
-            let cleanup = candidates(topics, &[(device.id.clone(), device.backend)])
-                .collect::<HashSet<_>>();
-            assert_eq!(number_configs(&device).count(), expected.len());
-            expected.into_iter().for_each(|(key, kind, field, reading, min, max, step, unit)| {
-                let topic = topics.discovery(&device.id, "number", key);
-                let (_, config) = generated.iter().find(|(candidate, _)| candidate == &topic).unwrap();
-                assert!(cleanup.contains(&topic));
-                assert_eq!(config["min"], json!(min));
-                assert_eq!(config["max"], json!(max));
-                assert_eq!(config["step"], json!(step));
-                assert_eq!(config["unit_of_measurement"], unit);
-                assert_eq!(config["mode"], "box");
-                assert_eq!(config["optimistic"], false);
-                assert_eq!(config["command_topic"], topics.device(&device.id, "control/set"));
-                let command = format!(
-                    "{{\"kind\":\"{kind}\",\"{field}\":{{{{ (number | int if number is number and value is not boolean and number == number | int else none) | to_json }}}}}}"
-                );
-                assert_eq!(config["command_template"], format!(
-                    "{{% set number = value | float(default=none) %}}{}", command_template(&command)
-                ));
-                let expected_reading = if device.backend == DeviceBackend::LegacyBle && key == "timer_duration" {
-                    "{% set reading = ((value_json.state or {}).get('settings') or {}).get('timer_original_minutes') %}{{ reading if reading is number and 0 <= reading <= 360 else none }}".to_owned()
-                } else {
-                    nullable_template(reading)
-                };
-                assert_eq!(config["value_template"], expected_reading);
-            });
-            // Old discovery keys still need cleanup after an ownership change.
-            assert!(cleanup.contains(&topics.discovery(&device.id, "select", "preset")));
-            assert!(cleanup.contains(&topics.discovery(&device.id, "sensor", "controller_fan_flag")));
-        });
-    }
-
-    #[test]
-    fn generated_number_configs_filter_capabilities_without_losing_cleanup_topics() {
-        [
-            (
-                DeviceDescriptor::configured_ble(),
-                vec![
-                    (vec![], vec![]),
-                    (
-                        vec![CommandCapability::LegacyAutomaticTemperature],
-                        vec!["automatic_temperature"],
-                    ),
-                    (
-                        vec![CommandCapability::LegacyAutomaticHumidity],
-                        vec!["automatic_humidity"],
-                    ),
-                    (vec![CommandCapability::LegacyTimer], vec!["timer_duration"]),
-                    (vec![CommandCapability::QuickConnectTargets], vec![]),
-                ],
-            ),
-            (
-                mqtt_device(ProxyId::default(), "cloud"),
-                vec![
-                    (vec![], vec![]),
-                    (
-                        vec![CommandCapability::QuickConnectTargets],
-                        vec!["automatic_temperature", "automatic_humidity"],
-                    ),
-                    (
-                        vec![CommandCapability::QuickConnectTimerDuration],
-                        vec!["timer_duration"],
-                    ),
-                    (vec![CommandCapability::QuickConnectMode], vec![]),
-                    (vec![CommandCapability::LegacyTimer], vec![]),
-                ],
-            ),
-        ]
-        .into_iter()
-        .for_each(|(mut device, cases)| {
-            device.state_source = EntitySource::Mqtt;
-            device.command_source = EntitySource::Mqtt;
-            let topics = Topics(device.proxy_id);
-            let cleanup =
-                candidates(topics, &[(device.id.clone(), device.backend)]).collect::<HashSet<_>>();
-            cases.into_iter().for_each(|(commands, expected_keys)| {
-                device.capabilities.commands = commands;
-                let expected = expected_keys
-                    .into_iter()
-                    .map(|key| topics.discovery(&device.id, "number", key))
-                    .collect::<HashSet<_>>();
-                let actual = number_configs(&device)
-                    .map(|(topic, _)| topic)
-                    .collect::<HashSet<_>>();
-                assert_eq!(actual, expected);
-                assert!(actual.is_subset(&cleanup));
-            });
-            [
-                "automatic_temperature",
-                "automatic_humidity",
-                "timer_duration",
-            ]
-            .into_iter()
-            .for_each(|key| {
-                assert!(cleanup.contains(&topics.discovery(&device.id, "number", key)))
-            });
-        });
-    }
-
-    #[test]
-    fn mqtt_discovery_includes_applicable_ha_entities_and_cleanup_candidates() {
-        let mut ble = DeviceDescriptor::configured_ble();
-        ble.state_source = EntitySource::Mqtt;
-        ble.command_source = EntitySource::Mqtt;
-        let cloud = mqtt_device(ble.proxy_id, "cloud");
-        for (device, expected) in [
-            (
-                &ble,
-                vec![
-                    ("binary_sensor", "controller_fan_flag"),
-                    ("number", "automatic_temperature"),
-                    ("number", "automatic_humidity"),
-                    ("number", "timer_duration"),
-                    ("button", "refresh"),
-                    ("select", "automatic_thresholds"),
-                    ("select", "timer"),
-                ],
-            ),
-            (
-                &cloud,
-                vec![
-                    ("binary_sensor", "running_estimate"),
-                    ("binary_sensor", "ota_in_progress"),
-                    ("sensor", "signal_strength_raw"),
-                    ("sensor", "verified_raw"),
-                    ("binary_sensor", "automatic_mode"),
-                    ("binary_sensor", "humidity_monitor"),
-                    ("number", "automatic_temperature"),
-                    ("number", "automatic_humidity"),
-                    ("number", "timer_duration"),
-                    ("switch", "automatic_mode"),
-                    ("switch", "timer_mode"),
-                    ("switch", "manual_mode"),
-                    ("button", "all_off"),
-                    ("button", "refresh"),
-                ],
-            ),
-        ] {
-            let topics = Topics(device.proxy_id);
-            let configs = discovery::configs(std::slice::from_ref(device)).collect::<Vec<_>>();
-            let candidates = discovery::candidates(topics, &[(device.id.clone(), device.backend)])
-                .collect::<HashSet<_>>();
-            for (domain, key) in expected {
-                let topic = topics.discovery(&device.id, domain, key);
-                assert!(
-                    configs.iter().any(|(candidate, _)| candidate == &topic),
-                    "{domain}/{key}"
-                );
-                assert!(candidates.contains(&topic), "cleanup {domain}/{key}");
-            }
-        }
-    }
-
-    #[test]
-    fn namespaced_templates_preserve_unknown_readings_and_freshness() {
-        let mut device = DeviceDescriptor::configured_ble();
-        device.state_source = EntitySource::Mqtt;
-        device.command_source = EntitySource::Mqtt;
-        let cloud = mqtt_device(device.proxy_id, "cloud-fixture");
-        let devices = [device, cloud];
-        let configs = discovery::configs(&devices).collect::<Vec<_>>();
-        assert!(configs.iter().any(|(topic, config)| {
-            topic.ends_with("_freshness/config")
-                && config["value_template"]
-                    .as_str()
-                    .unwrap()
-                    .contains("unknown")
-        }));
-        let threshold = configs
-            .iter()
-            .find(|(topic, _)| topic.ends_with("_automatic_temperature_threshold/config"))
-            .unwrap();
-        assert!(
-            threshold.1["value_template"]
-                .as_str()
-                .unwrap()
-                .contains("if reading is number else none")
-        );
-        if let Some(path) = std::env::var_os("GAFCTL_DISCOVERY_FIXTURE") {
-            std::fs::write(path, serde_json::to_vec_pretty(&configs).unwrap()).unwrap();
-        }
-    }
-
-    #[test]
-    fn ble_discovery_does_not_override_http_ownership() {
-        let mut device = DeviceDescriptor::configured_ble();
-        assert!(
-            discovery::configs(std::slice::from_ref(&device))
-                .next()
-                .is_none()
-        );
-        device.state_source = EntitySource::Mqtt;
-        assert!(
-            discovery::configs(std::slice::from_ref(&device))
-                .next()
-                .is_none()
-        );
-        device.command_source = EntitySource::Mqtt;
-        assert!(discovery::configs(std::slice::from_ref(&device)).count() > 10);
-    }
-
-    #[test]
-    fn discovery_has_sensor_metadata_and_distinct_availability_per_proxy() {
-        let device = mqtt_device(ProxyId::default(), "same-id");
-        let topics = Topics(device.proxy_id);
-        let configs = discovery::configs(std::slice::from_ref(&device)).collect::<Vec<_>>();
-        let temperature = configs
-            .iter()
-            .find(|(topic, _)| topic.ends_with("_temperature/config"))
-            .unwrap();
-        assert_eq!(temperature.1["device_class"], "temperature");
-        assert_eq!(temperature.1["state_class"], "measurement");
-        assert_eq!(temperature.1["unit_of_measurement"], "°F");
-        assert!(
-            configs
-                .iter()
-                .all(|(topic, config)| config["availability_mode"] == "all"
-                    && config["availability"][0]["topic"] == topics.process_availability()
-                    && if topic.ends_with("_refresh/config") {
-                        config["availability"].as_array().unwrap().len() == 1
-                    } else {
-                        config["availability"][1]["topic"]
-                            == topics.device(&device.id, "availability")
-                    })
-        );
-        let other = mqtt_device(ProxyId::default(), "same-id");
-        let other_topics = discovery::configs(&[other])
-            .map(|(topic, _)| topic)
-            .collect::<HashSet<_>>();
-        assert!(
-            configs
-                .iter()
-                .all(|(topic, _)| !other_topics.contains(topic))
         );
     }
 }
