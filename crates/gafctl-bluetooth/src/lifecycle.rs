@@ -219,14 +219,23 @@ mod tests {
 
     #[test]
     fn operation_and_cleanup_errors_are_both_reported() {
+        let operation = anyhow::anyhow!("query failed").context("query context");
+        let operation_source = operation.as_ref() as *const dyn std::error::Error;
         let error = finish_with_cleanup::<()>(
-            Err(anyhow::anyhow!("query failed")),
-            Err(anyhow::anyhow!("disconnect failed")),
+            Err(operation),
+            Err(anyhow::anyhow!("disconnect failed").context("cleanup context")),
         )
         .expect_err("both failures should remain visible");
 
-        assert!(error.to_string().contains("query failed"));
-        assert!(error.to_string().contains("disconnect failed"));
+        assert_eq!(
+            error.to_string(),
+            "operation failed (query context: query failed); cleanup also failed (cleanup context: disconnect failed)"
+        );
+        let composite = error.downcast_ref::<CleanupFailed>().unwrap();
+        let source = std::error::Error::source(composite).unwrap();
+        assert!(std::ptr::eq(source, operation_source));
+        assert_eq!(source.to_string(), "query context");
+        assert_eq!(source.source().unwrap().to_string(), "query failed");
     }
 
     #[test]
@@ -433,6 +442,7 @@ mod tests {
         .expect_err("cleanup failure prevents reconnecting");
 
         assert!(format!("{error:#}").contains("disconnect failed"));
+        assert!(!ProbeError::is_transient_connect_failure(&error));
         assert_eq!(attempts.get(), 1);
     }
 }

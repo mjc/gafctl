@@ -1,5 +1,4 @@
 use crate::service::{DeviceService, ServiceError};
-use anyhow::{Context, Result};
 use axum::{
     Json, Router,
     extract::{Path, State},
@@ -14,18 +13,6 @@ use gafctl_api::{
 };
 use gafctl_api::{DeviceDescriptor, DeviceId, EntitySources};
 use serde::Serialize;
-use tokio::net::TcpListener;
-
-pub(crate) async fn serve_http_until_shutdown(
-    listener: TcpListener,
-    app: Router,
-    shutdown: impl std::future::Future<Output = ()> + Send + 'static,
-) -> Result<()> {
-    axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown)
-        .await
-        .context("HTTP server failed")
-}
 
 pub(crate) fn router(state: DeviceService) -> Router {
     Router::new()

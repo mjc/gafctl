@@ -1,4 +1,4 @@
-use std::{error::Error as StdError, fmt, io};
+use std::{error::Error as StdError, io};
 
 use anyhow::Error;
 use gafctl_protocol::{FrameError, PayloadError, ReadbackError, UnexpectedResponse};
@@ -133,26 +133,12 @@ fn dbus_cleanup_is_complete(name: Option<&str>, message: Option<&str>) -> bool {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, ThisError)]
+#[error("operation failed ({operation:#}); cleanup also failed ({cleanup:#})")]
 pub(super) struct CleanupFailed {
+    #[source]
     pub(super) operation: Error,
     pub(super) cleanup: Error,
-}
-
-impl fmt::Display for CleanupFailed {
-    fn fmt(&self, output: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            output,
-            "operation failed ({:#}); cleanup also failed ({:#})",
-            self.operation, self.cleanup
-        )
-    }
-}
-
-impl StdError for CleanupFailed {
-    fn source(&self) -> Option<&(dyn StdError + 'static)> {
-        self.operation.chain().next()
-    }
 }
 
 #[derive(Debug, ThisError)]

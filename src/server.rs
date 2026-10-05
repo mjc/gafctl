@@ -1,13 +1,10 @@
-use crate::{
-    api::{router, serve_http_until_shutdown},
-    backend::DeviceRegistry,
-    service::DeviceService,
-};
+use crate::{api::router, backend::DeviceRegistry, service::DeviceService};
 use anyhow::{Context, Result};
 use futures_util::StreamExt;
 use std::time::Duration;
 use tokio::{
     net::TcpListener,
+    task::JoinSet,
     time::{MissedTickBehavior, interval},
 };
 use tokio_stream::wrappers::IntervalStream;
@@ -63,37 +60,33 @@ pub(crate) async fn serve(config: config::ServerConfig) -> Result<()> {
     let app = router(state.clone());
     let poll_state = state.state_polling_enabled();
     let poll_quickconnect = state.quickconnect_polling_enabled();
-    let mut polls = Vec::new();
+    let mut polls = JoinSet::new();
+    let mut stop_polls = Vec::new();
     if poll_state {
-        polls.push(tokio::spawn(poll_device(
-            state.clone(),
-            DEFAULT_POLL_INTERVAL,
-        )));
+        stop_polls.push(polls.spawn(poll_device(state.clone(), DEFAULT_POLL_INTERVAL)));
     }
     if poll_quickconnect {
-        polls.push(tokio::spawn(poll_quickconnect_device(
+        stop_polls.push(polls.spawn(poll_quickconnect_device(
             state.clone(),
             DEFAULT_POLL_INTERVAL,
         )));
     }
 
     tracing::info!(%address, "Gafctl API listening");
-    let stop_polls = polls
-        .iter()
-        .map(tokio::task::JoinHandle::abort_handle)
-        .collect::<Vec<_>>();
     #[cfg(feature = "mqtt")]
     let mqtt_intake = mqtt.as_ref().map(|runtime| runtime.intake.clone());
-    let result = serve_http_until_shutdown(listener, app, async move {
-        shutdown_signal().await;
-        #[cfg(feature = "mqtt")]
-        if let Some(intake) = mqtt_intake {
-            intake.close();
-        }
-        stop_polls.iter().for_each(tokio::task::AbortHandle::abort);
-    })
-    .await;
-    polls.iter().for_each(|poll| poll.abort());
+    let result = axum::serve(listener, app)
+        .with_graceful_shutdown(async move {
+            shutdown_signal().await;
+            #[cfg(feature = "mqtt")]
+            if let Some(intake) = mqtt_intake {
+                intake.close();
+            }
+            stop_polls.iter().for_each(tokio::task::AbortHandle::abort);
+        })
+        .await
+        .context("HTTP server failed");
+    polls.abort_all();
     let cleanup_deadline = tokio::time::Instant::now() + SHUTDOWN_CLEANUP_TIMEOUT;
     #[cfg(feature = "mqtt")]
     if let Some(mqtt) = &mut mqtt {

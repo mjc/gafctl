@@ -15,9 +15,6 @@ use crate::{
     },
 };
 
-#[cfg(all(test, target_os = "linux"))]
-pub(super) const BACKEND: &str = "btleplug";
-
 struct ConnectedPeripheral<'a> {
     peripheral: &'a Peripheral,
     operation_timeout: Duration,
