@@ -40,11 +40,8 @@ impl Topics {
         format!("gafctl_{}_{}", self.0, id.as_str())
     }
 
-    pub(super) fn discovery(self, id: &DeviceId, domain: &str, key: &str) -> String {
-        format!(
-            "homeassistant/{domain}/gafctl/{}_{key}/config",
-            self.identifier(id)
-        )
+    pub(super) fn discovery(self, id: &DeviceId) -> String {
+        format!("homeassistant/device/gafctl/{}/config", self.identifier(id))
     }
 }
 
@@ -74,9 +71,9 @@ mod tests {
         let device = mqtt_device(ProxyId::default(), "configured");
         let topics = Topics(device.proxy_id);
         assert_eq!(
-            topics.discovery(&device.id, "sensor", "temperature"),
+            topics.discovery(&device.id),
             format!(
-                "homeassistant/sensor/gafctl/{}_temperature/config",
+                "homeassistant/device/gafctl/{}/config",
                 topics.identifier(&device.id)
             )
         );

@@ -9,7 +9,7 @@ use gafctl_api::{
     DeviceInventoryStatus, DeviceSettings, DeviceState, DeviceStateV2Response,
     QuickConnectModeStatus, StateProvenance, unix_millis,
 };
-use rumqttc_next::{MqttOptions, MqttOptionsBuilder, Publish};
+use rumqttc_next::{IncomingPacketSizeLimit, MqttOptions, MqttOptionsBuilder, Publish};
 use serde_json::json;
 use tokio::{
     net::{TcpListener, TcpStream},
@@ -58,6 +58,33 @@ pub(super) async fn start_native_broker() -> NativeBroker {
     broker
 }
 
+pub(super) async fn start_native_broker_with_packet_limit(limit: usize) -> NativeBroker {
+    use std::io::Write;
+
+    let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    drop(listener);
+    let directory = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("target/mqtt-tests");
+    std::fs::create_dir_all(&directory).unwrap();
+    let mut config = tempfile::NamedTempFile::new_in(directory).unwrap();
+    writeln!(
+        config,
+        "listener {port} 127.0.0.1\nallow_anonymous true\nmax_packet_size {limit}"
+    )
+    .unwrap();
+    let process = Command::new("mosquitto")
+        .arg("-c")
+        .arg(config.path())
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let broker = NativeBroker { process, port };
+    wait_for_native_broker(port).await;
+    broker
+}
+
 fn launch_native_broker(port: u16) -> Child {
     Command::new("mosquitto")
         .args(["-p", &port.to_string()])
@@ -84,6 +111,7 @@ async fn wait_for_native_broker(port: u16) {
 pub(super) fn test_mqtt_options(client_id: &str, port: u16) -> MqttOptions {
     MqttOptionsBuilder::new(client_id, ("127.0.0.1", port))
         .keep_alive(5)
+        .incoming_packet_size_limit(IncomingPacketSizeLimit::Bytes(64 * 1024))
         .credentials("gafctl-test", "gafctl-test")
         .build()
 }

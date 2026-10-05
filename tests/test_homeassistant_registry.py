@@ -31,6 +31,11 @@ from homeassistant.components.mqtt import number as mqtt_number
 from homeassistant.components.mqtt import select as mqtt_select
 from homeassistant.components.mqtt import sensor as mqtt_sensor
 from homeassistant.components.mqtt import switch as mqtt_switch
+from homeassistant.components.mqtt.discovery import (
+    MQTTDiscoveryPayload,
+    _merge_common_device_options,
+)
+from homeassistant.components.mqtt.schemas import DEVICE_DISCOVERY_SCHEMA
 from homeassistant.components.sensor import SensorDeviceClass, SensorStateClass
 from homeassistant.config_entries import ConfigEntries, ConfigEntry, ConfigEntryState
 from homeassistant.const import (
@@ -998,7 +1003,8 @@ class RegistryTests(unittest.IsolatedAsyncioTestCase):
                 },
             }
         }
-        for topic, config in configs:
+        checked = set()
+        for key, domain, config in configs:
             schemas = {
                 "sensor": mqtt_sensor,
                 "select": mqtt_select,
@@ -1007,24 +1013,57 @@ class RegistryTests(unittest.IsolatedAsyncioTestCase):
                 "button": mqtt_button,
                 "switch": mqtt_switch,
             }
-            schemas[topic.split("/")[1]].DISCOVERY_SCHEMA(config)
+            schemas[domain].DISCOVERY_SCHEMA(config)
             template = config.get("value_template")
-            if not template or topic.endswith("_control_result/config"):
+            if not template or key == "sensor_control_result":
                 continue
             rendered = [
                 Template(template, self.hass).async_render({"value_json": payload})
                 for payload in (initial, expired, partial, normal)
             ]
-            if topic.endswith("_automatic_temperature_threshold/config"):
+            if key == "sensor_automatic_temperature_threshold":
+                checked.add(key)
                 self.assertEqual(rendered, [None, None, None, 105.0])
-            if topic.endswith("_freshness/config"):
+            if key == "sensor_freshness":
+                checked.add(key)
                 self.assertEqual(rendered, ["unknown", "stale", "fresh", "fresh"])
+        self.assertEqual(
+            checked, {"sensor_automatic_temperature_threshold", "sensor_freshness"}
+        )
 
     async def discovery_configs(self):
         fixture = os.environ.get("GAFCTL_DISCOVERY_FIXTURE")
         if not fixture:
             self.skipTest("set GAFCTL_DISCOVERY_FIXTURE to generated discovery configs")
-        return await asyncio.to_thread(read_discovery_fixture, fixture)
+        documents = await asyncio.to_thread(read_discovery_fixture, fixture)
+        self.assertTrue(documents, "generated discovery fixture has no devices")
+        configs = []
+        for topic, document in documents:
+            DEVICE_DISCOVERY_SCHEMA(document)
+            identifier = document["device"]["identifiers"][0]
+            self.assertEqual(topic, f"homeassistant/device/gafctl/{identifier}/config")
+            self.assertEqual(document["device"]["manufacturer"], "GAF")
+            self.assertEqual(document["availability_mode"], "all")
+            self.assertEqual(document["payload_available"], "online")
+            self.assertEqual(document["payload_not_available"], "offline")
+            self.assertEqual(len(document["availability"]), 2)
+            for key, component in document["components"].items():
+                domain = component["platform"]
+                self.assertTrue(key.startswith(f"{domain}_"))
+                if len(component) == 1:
+                    continue
+                config = MQTTDiscoveryPayload(component)
+                del config["platform"]
+                config["device"] = document["device"]
+                config["origin"] = document["origin"]
+                _merge_common_device_options(config, document)
+                self.assertEqual(
+                    config["unique_id"],
+                    f"{identifier}_{key.removeprefix(f'{domain}_')}",
+                )
+                configs.append((key, domain, config))
+        self.assertTrue(configs, "generated discovery fixture has no active components")
+        return configs
 
     def render_command(self, template: str, value: object) -> dict[str, object]:
         return json.loads(
@@ -1043,13 +1082,14 @@ class RegistryTests(unittest.IsolatedAsyncioTestCase):
     async def test_generated_mqtt_commands_preserve_types_and_switch_conditions(
         self,
     ) -> None:
-        for topic, config in await self.discovery_configs():
+        checked = set()
+        for key, domain, config in await self.discovery_configs():
             template = config.get("command_template")
             if not template:
                 continue
             render = partial(self.render_command, template)
-            domain = topic.split("/")[1]
             if domain == "number":
+                checked.add("number")
                 valid = render(config["min"])
                 self.assertTrue(valid["request_id"])
                 self.assertGreater(valid["issued_at_unix_ms"], 0)
@@ -1058,6 +1098,7 @@ class RegistryTests(unittest.IsolatedAsyncioTestCase):
                 for value in (True, "garbage", 90.5, None):
                     self.assertIsNone(render(value)["command"][value_field])
             elif domain == "switch":
+                checked.add("switch")
                 mode = config["unique_id"].rsplit("_", 2)[-2]
                 self.assertEqual(
                     render("ON")["command"],
@@ -1068,24 +1109,29 @@ class RegistryTests(unittest.IsolatedAsyncioTestCase):
                     {"kind": "quick_connect_conditional_off", "only_if_current": mode},
                 )
                 self.assertIsNone(render("invalid")["command"])
-            elif topic.endswith("_refresh/config"):
+            elif key == "button_refresh":
+                checked.add("refresh")
                 self.assertEqual(
                     set(render("PRESS")), {"request_id", "issued_at_unix_ms"}
                 )
                 self.assertEqual(len(config["availability"]), 1)
+        self.assertEqual(checked, {"number", "switch", "refresh"})
 
     async def test_generated_mqtt_binary_modes_and_presets_preserve_unknown(
         self,
     ) -> None:
-        for topic, config in await self.discovery_configs():
+        checked = set()
+        for key, domain, config in await self.discovery_configs():
             render = partial(self.render_settings, config)
-            if "/binary_sensor/" in topic and topic.endswith("_mode/config"):
+            if domain == "binary_sensor" and key.endswith("_mode"):
+                checked.add("binary_mode")
                 mode = config["unique_id"].rsplit("_", 2)[-2]
                 self.assertEqual(render({"mode": mode}), "ON")
                 self.assertEqual(render({"mode": "off"}), "OFF")
                 self.assertIsNone(render({"mode": "conflicting"}))
                 self.assertIsNone(render({}))
-            elif topic.endswith("_automatic_thresholds/config"):
+            elif key == "select_automatic_thresholds":
+                checked.add("automatic_thresholds")
                 self.assertEqual(
                     render(
                         {
@@ -1096,7 +1142,8 @@ class RegistryTests(unittest.IsolatedAsyncioTestCase):
                     ),
                     "automatic105_f30_percent",
                 )
-            elif "/select/" in topic and topic.endswith("_timer/config"):
+            elif key == "select_timer":
+                checked.add("timer")
                 self.assertEqual(
                     render(
                         {
@@ -1110,6 +1157,7 @@ class RegistryTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIsNone(
                     render({"timer_remaining_minutes": 0, "timer_original_minutes": 1})
                 )
+        self.assertEqual(checked, {"binary_mode", "automatic_thresholds", "timer"})
 
     async def test_refresh_validates_owner_and_proxy_before_and_after_reading(self):
         entry = await self.entry()

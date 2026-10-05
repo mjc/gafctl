@@ -1,7 +1,7 @@
 use std::{collections::HashSet, sync::Arc};
 
 use crate::service::publication::StateSnapshot;
-use futures_util::{Stream, StreamExt, future, stream};
+use futures_util::{Stream, StreamExt, TryStreamExt, future, stream};
 use gafctl_api::DeviceStateV2Response;
 use rumqttc_next::{AsyncClient, PublishOptions};
 use tokio::sync::watch;
@@ -118,7 +118,7 @@ fn inactive_discovery_topics(
 ) -> impl Iterator<Item = String> {
     previous
         .into_iter()
-        .chain(discovery::candidates(topics, identities))
+        .chain(identities.iter().map(|(id, _)| topics.discovery(id)))
         .filter(|topic| !active.contains(topic))
         .collect::<HashSet<_>>()
         .into_iter()
@@ -131,31 +131,136 @@ async fn publish_discovery(
     enabled: bool,
     previous: HashSet<String>,
 ) -> HashSet<String> {
-    let configs = discovery::configs(&snapshot.descriptors)
-        .filter(|_| enabled)
-        .collect::<Vec<_>>();
-    let active = configs
+    let configs = snapshot
+        .descriptors
         .iter()
-        .map(|(topic, _)| topic.clone())
+        .filter(|_| enabled)
+        .flat_map(|device| {
+            discovery::configs(std::slice::from_ref(device))
+                .map(move |(topic, config)| (device, topic, config))
+        })
+        .collect::<Vec<_>>();
+    let desired = configs
+        .iter()
+        .map(|(_, topic, _)| topic.clone())
         .collect::<HashSet<_>>();
-    stream::iter(inactive_discovery_topics(
+    let mut active = previous
+        .intersection(&desired)
+        .cloned()
+        .collect::<HashSet<_>>();
+    let inactive_identities = snapshot
+        .discovery_identities
+        .iter()
+        .filter(|(id, _)| !desired.contains(&topics.discovery(id)))
+        .cloned()
+        .collect::<Vec<_>>();
+    let inactive_topics = inactive_discovery_topics(
         topics,
         &snapshot.discovery_identities,
-        previous,
-        &active,
-    ))
-    .for_each(|topic| publish_retained(client, topic, Vec::new()))
-    .await;
-    stream::iter(configs)
-        .for_each(|(topic, config)| publish_discovery_config(client, topic, config))
-        .await;
+        previous.clone(),
+        &desired,
+    )
+    .chain(discovery::component_topics(topics, &inactive_identities));
+    if !publish_discovery_messages(client, inactive_topics, b"").await {
+        return previous;
+    }
+    for (device, topic, config) in configs {
+        let identity = (device.id.clone(), device.backend);
+        if publish_device_discovery(
+            client,
+            topics,
+            &identity,
+            topic.clone(),
+            config,
+            !previous.contains(&topic),
+        )
+        .await
+        {
+            active.insert(topic);
+        } else {
+            break;
+        }
+    }
     active
 }
 
-async fn publish_discovery_config(client: &AsyncClient, topic: String, config: serde_json::Value) {
-    match serde_json::to_vec(&config) {
-        Ok(payload) => publish_retained(client, topic, payload).await,
-        Err(error) => tracing::error!(%error, "could not serialize MQTT discovery config"),
+async fn publish_device_discovery(
+    client: &AsyncClient,
+    topics: Topics,
+    identity: &(DeviceId, DeviceBackend),
+    topic: String,
+    config: serde_json::Value,
+    migrating: bool,
+) -> bool {
+    if migrating
+        && !publish_component_messages(client, topics, identity, br#"{"migrate_discovery":true}"#)
+            .await
+    {
+        return false;
+    }
+    let payload = match serde_json::to_vec(&config) {
+        Ok(payload) => payload,
+        Err(error) => {
+            tracing::error!(%error, "could not serialize MQTT discovery config");
+            return false;
+        }
+    };
+    if !publish_discovery_message(client, topic, payload).await {
+        return false;
+    }
+    !migrating || publish_component_messages(client, topics, identity, b"").await
+}
+
+async fn publish_component_messages(
+    client: &AsyncClient,
+    topics: Topics,
+    identity: &(DeviceId, DeviceBackend),
+    payload: &[u8],
+) -> bool {
+    publish_discovery_messages(
+        client,
+        discovery::component_topics(topics, std::slice::from_ref(identity)),
+        payload,
+    )
+    .await
+}
+
+async fn publish_discovery_messages(
+    client: &AsyncClient,
+    topics: impl IntoIterator<Item = String>,
+    payload: &[u8],
+) -> bool {
+    stream::iter(topics)
+        .map(Ok::<_, ()>)
+        .try_fold((), |(), topic| async move {
+            publish_discovery_message(client, topic, payload.to_vec())
+                .await
+                .then_some(())
+                .ok_or(())
+        })
+        .await
+        .is_ok()
+}
+
+async fn publish_discovery_message(client: &AsyncClient, topic: String, payload: Vec<u8>) -> bool {
+    let completion = tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        let notice = client
+            .publish_tracked(topic, payload, PublishOptions::at_least_once().retained())
+            .await?;
+        notice.wait_completion_async().await?;
+        Ok::<(), anyhow::Error>(())
+    })
+    .await;
+    match completion {
+        Ok(Ok(())) => true,
+        Ok(Err(error)) => {
+            tracing::warn!(%error, "could not complete retained MQTT discovery publication");
+            false
+        }
+        Err(error) => {
+            tracing::warn!(%error, "retained MQTT discovery publication timed out");
+            false
+        }
     }
 }
 
@@ -232,6 +337,280 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn native_broker_migrates_existing_component_discovery_before_clearing_it() {
+        let broker = start_native_broker().await;
+        let device = mqtt_device(ProxyId::default(), "migration");
+        let topics = Topics(device.proxy_id);
+        let identities = [(device.id.clone(), device.backend)];
+        let old_topics = discovery::component_topics(topics, &identities).collect::<HashSet<_>>();
+        let old_topic = format!(
+            "homeassistant/sensor/gafctl/{}_temperature/config",
+            topics.identifier(&device.id)
+        );
+        let grouped_topic = format!(
+            "homeassistant/device/gafctl/{}/config",
+            topics.identifier(&device.id)
+        );
+        let (observer, mut received) = observed_client("migration-observer", broker.port);
+        observer
+            .subscribe("homeassistant/#", QoS::AtLeastOnce)
+            .await
+            .unwrap();
+        observer
+            .publish(
+                &old_topic,
+                br#"{"unique_id":"existing"}"#.to_vec(),
+                PublishOptions::at_least_once().retained(),
+            )
+            .await
+            .unwrap();
+        receive_topic(&mut received, &old_topic).await;
+        let (client, _) = observed_client("migration-publisher", broker.port);
+        publish_discovery(&client, topics, &snapshot(device), true, HashSet::new()).await;
+        let first = timeout(Duration::from_secs(15), received.next())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(old_topics.contains(std::str::from_utf8(&first.topic).unwrap()));
+        assert_eq!(
+            serde_json::from_slice::<Value>(&first.payload).unwrap()["migrate_discovery"],
+            true
+        );
+        let rest = timeout(
+            Duration::from_secs(15),
+            received
+                .by_ref()
+                .take(old_topics.len() * 2)
+                .collect::<Vec<_>>(),
+        )
+        .await
+        .unwrap();
+        let messages = std::iter::once(first).chain(rest).collect::<Vec<_>>();
+        assert!(messages[..old_topics.len()].iter().all(|message| {
+            old_topics.contains(std::str::from_utf8(&message.topic).unwrap())
+                && serde_json::from_slice::<Value>(&message.payload).unwrap()["migrate_discovery"]
+                    == true
+        }));
+        assert_eq!(messages[old_topics.len()].topic, grouped_topic);
+        assert!(messages[old_topics.len() + 1..].iter().all(|message| {
+            old_topics.contains(std::str::from_utf8(&message.topic).unwrap())
+                && message.payload.is_empty()
+        }));
+        let (late, mut replayed) = observed_client("migration-late-observer", broker.port);
+        late.subscribe("homeassistant/#", QoS::AtLeastOnce)
+            .await
+            .unwrap();
+        let retained = timeout(Duration::from_secs(15), replayed.next())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(retained.topic, grouped_topic);
+        assert!(retained.retain);
+        assert!(
+            timeout(Duration::from_millis(200), replayed.next())
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn native_broker_replaces_lost_capabilities_without_repeating_migration() {
+        let broker = start_native_broker().await;
+        let mut device = mqtt_device(ProxyId::default(), "capabilities");
+        let topics = Topics(device.proxy_id);
+        let grouped_topic = topics.discovery(&device.id);
+        let (observer, mut received) = observed_client("capability-observer", broker.port);
+        observer
+            .subscribe("homeassistant/#", QoS::AtLeastOnce)
+            .await
+            .unwrap();
+        let (client, _) = observed_client("capability-publisher", broker.port);
+        let previous = publish_discovery(
+            &client,
+            topics,
+            &snapshot(device.clone()),
+            true,
+            HashSet::new(),
+        )
+        .await;
+        receive_topic(&mut received, &grouped_topic).await;
+        // Fence all initial migration clears before observing the next update.
+        client
+            .publish(
+                "homeassistant/fence",
+                b"ready".to_vec(),
+                PublishOptions::at_least_once(),
+            )
+            .await
+            .unwrap();
+        receive_topic(&mut received, "homeassistant/fence").await;
+        device.capabilities.commands.clear();
+        publish_discovery(&client, topics, &snapshot(device), true, previous).await;
+        let update = timeout(Duration::from_secs(15), received.next())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(update.topic, grouped_topic);
+        let config: Value = serde_json::from_slice(&update.payload).unwrap();
+        assert_eq!(
+            config["components"]["select_mode"],
+            serde_json::json!({"platform": "select"})
+        );
+        assert_eq!(
+            config["components"]["switch_automatic_mode"],
+            serde_json::json!({"platform": "switch"})
+        );
+        assert!(config["components"]["sensor_temperature"]["unique_id"].is_string());
+        assert!(
+            timeout(Duration::from_millis(200), received.next())
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn native_broker_rejected_grouped_discovery_preserves_old_migration_configs() {
+        let broker = super::super::test_support::start_native_broker_with_packet_limit(2_048).await;
+        let device = mqtt_device(ProxyId::default(), "packet-limit");
+        let topics = Topics(device.proxy_id);
+        let identities = [(device.id.clone(), device.backend)];
+        let old_topics = discovery::component_topics(topics, &identities).collect::<HashSet<_>>();
+        let old_topic = format!(
+            "homeassistant/sensor/gafctl/{}_temperature/config",
+            topics.identifier(&device.id)
+        );
+        let (observer, mut received) = observed_client("rejected-group-observer", broker.port);
+        observer
+            .subscribe("homeassistant/#", QoS::AtLeastOnce)
+            .await
+            .unwrap();
+        observer
+            .publish(
+                &old_topic,
+                br#"{"unique_id":"existing"}"#.to_vec(),
+                PublishOptions::at_least_once().retained(),
+            )
+            .await
+            .unwrap();
+        receive_topic(&mut received, &old_topic).await;
+        let (client, _) = observed_client("rejected-group-publisher", broker.port);
+        assert!(
+            publish_discovery(&client, topics, &snapshot(device), true, HashSet::new())
+                .await
+                .is_empty()
+        );
+        let markers = timeout(
+            Duration::from_secs(15),
+            received.by_ref().take(old_topics.len()).collect::<Vec<_>>(),
+        )
+        .await
+        .unwrap();
+        assert!(markers.iter().all(|message| {
+            old_topics.contains(std::str::from_utf8(&message.topic).unwrap())
+                && serde_json::from_slice::<Value>(&message.payload).unwrap()["migrate_discovery"]
+                    == true
+        }));
+        assert!(
+            timeout(Duration::from_millis(200), received.next())
+                .await
+                .is_err()
+        );
+        let (late, mut retained) = observed_client("rejected-group-late", broker.port);
+        late.subscribe(&old_topic, QoS::AtLeastOnce).await.unwrap();
+        assert!(
+            !receive_topic(&mut retained, &old_topic)
+                .await
+                .payload
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn rejected_discovery_admission_is_not_remembered_as_a_completed_migration() {
+        let device = mqtt_device(ProxyId::default(), "rejected-migration");
+        let topics = Topics(device.proxy_id);
+        let (client, eventloop) =
+            AsyncClient::builder(super::super::test_support::test_mqtt_options("closed", 1))
+                .build();
+        drop(eventloop);
+        let snapshot = snapshot(device.clone());
+        assert!(
+            publish_discovery(&client, topics, &snapshot, true, HashSet::new())
+                .await
+                .is_empty()
+        );
+        let previous = HashSet::from([topics.discovery(&device.id)]);
+        assert_eq!(
+            publish_discovery(&client, topics, &snapshot, false, previous.clone()).await,
+            previous
+        );
+    }
+
+    #[tokio::test]
+    async fn native_broker_disabled_discovery_clears_grouped_and_old_retained_configs() {
+        let broker = start_native_broker().await;
+        let device = mqtt_device(ProxyId::default(), "disabled");
+        let topics = Topics(device.proxy_id);
+        let grouped_topic = topics.discovery(&device.id);
+        let old_topic = format!(
+            "homeassistant/sensor/gafctl/{}_temperature/config",
+            topics.identifier(&device.id)
+        );
+        let (observer, mut received) = observed_client("disabled-observer", broker.port);
+        observer
+            .subscribe("homeassistant/#", QoS::AtLeastOnce)
+            .await
+            .unwrap();
+        for topic in [&grouped_topic, &old_topic] {
+            observer
+                .publish(
+                    topic,
+                    b"existing".to_vec(),
+                    PublishOptions::at_least_once().retained(),
+                )
+                .await
+                .unwrap();
+            receive_topic(&mut received, topic).await;
+        }
+        let (client, _) = observed_client("disabled-publisher", broker.port);
+        assert!(
+            publish_discovery(&client, topics, &snapshot(device), false, HashSet::new())
+                .await
+                .is_empty()
+        );
+        assert!(
+            receive_topic(&mut received, &grouped_topic)
+                .await
+                .payload
+                .is_empty()
+        );
+        assert!(
+            receive_topic(&mut received, &old_topic)
+                .await
+                .payload
+                .is_empty()
+        );
+        client
+            .publish(
+                "homeassistant/fence",
+                b"ready".to_vec(),
+                PublishOptions::at_least_once(),
+            )
+            .await
+            .unwrap();
+        receive_topic(&mut received, "homeassistant/fence").await;
+        let (late, mut replayed) = observed_client("disabled-late-observer", broker.port);
+        late.subscribe("homeassistant/#", QoS::AtLeastOnce)
+            .await
+            .unwrap();
+        assert!(
+            timeout(Duration::from_millis(200), replayed.next())
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
     async fn native_broker_retains_state_and_tombstones_http_owner_after_restart() {
         let broker = start_native_broker().await;
         let device = mqtt_device(ProxyId::default(), "configured");
@@ -244,7 +623,7 @@ mod tests {
         let bridge = start(config(broker.port, true), snapshot(device.clone()));
         let online = receive_topic(&mut received, &topics.process_availability()).await;
         assert_eq!(online.payload.as_ref(), b"online");
-        let discovery_topic = topics.discovery(&device.id, "sensor", "temperature");
+        let discovery_topic = topics.discovery(&device.id);
         observer
             .subscribe(&discovery_topic, QoS::AtLeastOnce)
             .await
@@ -338,17 +717,10 @@ mod tests {
         );
         drop(work);
         observer
-            .subscribe(
-                other.discovery(&second.id, "sensor", "temperature"),
-                QoS::AtLeastOnce,
-            )
+            .subscribe(other.discovery(&second.id), QoS::AtLeastOnce)
             .await
             .unwrap();
-        let discovered = receive_topic(
-            &mut received,
-            &other.discovery(&second.id, "sensor", "temperature"),
-        )
-        .await;
+        let discovered = receive_topic(&mut received, &other.discovery(&second.id)).await;
         assert!(!discovered.payload.is_empty());
         first_bridge
             .state_updates
@@ -364,20 +736,14 @@ mod tests {
             }));
         sleep(Duration::from_millis(100)).await;
         let (late, mut retained) = observed_client("late-observer", broker.port);
-        late.subscribe(
-            other.discovery(&second.id, "sensor", "temperature"),
-            QoS::AtLeastOnce,
-        )
-        .await
-        .unwrap();
-        assert!(
-            !receive_topic(
-                &mut retained,
-                &other.discovery(&second.id, "sensor", "temperature")
-            )
+        late.subscribe(other.discovery(&second.id), QoS::AtLeastOnce)
             .await
-            .payload
-            .is_empty()
+            .unwrap();
+        assert!(
+            !receive_topic(&mut retained, &other.discovery(&second.id))
+                .await
+                .payload
+                .is_empty()
         );
     }
 
@@ -393,7 +759,7 @@ mod tests {
             .unwrap();
         let bridge = start(config(broker.port, true), snapshot(device.clone()));
         receive_topic(&mut received, &topics.process_availability()).await;
-        let discovery_topic = topics.discovery(&device.id, "sensor", "temperature");
+        let discovery_topic = topics.discovery(&device.id);
         let state_topic = topics.device(&device.id, "state");
         for topic in [&discovery_topic, &state_topic] {
             observer.subscribe(topic, QoS::AtLeastOnce).await.unwrap();
@@ -417,20 +783,14 @@ mod tests {
                 .is_empty()
         );
         observer
-            .subscribe(
-                topics.discovery(&device.id, "sensor", "temperature"),
-                QoS::AtLeastOnce,
-            )
+            .subscribe(topics.discovery(&device.id), QoS::AtLeastOnce)
             .await
             .unwrap();
         assert!(
-            !receive_topic(
-                &mut received,
-                &topics.discovery(&device.id, "sensor", "temperature")
-            )
-            .await
-            .payload
-            .is_empty()
+            !receive_topic(&mut received, &topics.discovery(&device.id))
+                .await
+                .payload
+                .is_empty()
         );
         drop(bridge);
     }

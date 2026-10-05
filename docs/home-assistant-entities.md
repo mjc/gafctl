@@ -154,9 +154,13 @@ publish service state too. Every proxy has its own namespace.
 
 Read `proxy_id` and device `id` from `/api/v2/devices`. Device topics use
 `gafctl/{proxy_id}/{id}/...`; discovery uses
-`homeassistant/{component}/gafctl/{identifier}_{key}/config`, with both IDs in the
-identifier. MQTT client IDs include the proxy UUID so separate services can
-share a broker.
+`homeassistant/device/gafctl/{identifier}/config`, with both IDs in the
+identifier. Each retained device configuration contains all its entities under
+`components`, with shared device and availability metadata. Entity unique IDs
+stay unchanged when upgrading from individual discovery topics. Gafctl sends
+HA migration messages before publishing the device configuration, then clears
+the previous retained topics. Keep the discovery ACL above during the upgrade.
+MQTT client IDs include the proxy UUID so separate services can share a broker.
 
 Device state and availability messages are retained. Process availability has
 its own last-will topic, `gafctl/{proxy_id}/availability`. It does not replace each fan's
@@ -223,4 +227,6 @@ unavailable device. Other controls require both process and device availability.
 Numbers display confirmed state and send whole, bounded values. Switch-off uses
 the backend conditional-off command so a different current mode is preserved.
 Selectors for original-controller thresholds and timer settings are separate.
-Unavailable capabilities have their retained discovery configurations cleared.
+Unavailable capabilities receive platform-only removal entries in the device
+configuration, including after a service restart. Switching to HTTP ownership
+clears the retained device configuration.
