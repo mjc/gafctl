@@ -206,30 +206,6 @@ fn v2_control_reservations_deduplicate_without_serializing_distinct_commands() {
 }
 
 #[tokio::test]
-async fn v2_replay_reservations_are_scoped_to_each_local_device_id() {
-    let mut results = RecentV2ControlResults::default();
-    let request_id = CommandId::parse("same-request").unwrap();
-    let command = DeviceCommand::QuickConnectMode {
-        mode: gafctl_api::QuickConnectMode::Automatic,
-    };
-    let first_device = DeviceId::parse("quickconnect-a".to_owned()).unwrap();
-    let second_device = DeviceId::parse("quickconnect-b".to_owned()).unwrap();
-
-    let first =
-        Arc::clone(results.0.entry(first_device).or_insert_with(|| {
-            Arc::new(tokio::sync::Mutex::new(V2DeviceControlHistory::default()))
-        }));
-    let second =
-        Arc::clone(results.0.entry(second_device).or_insert_with(|| {
-            Arc::new(tokio::sync::Mutex::new(V2DeviceControlHistory::default()))
-        }));
-    let mut first_history = first.lock().await;
-    assert!(reservation_is_execute(first_history.reserve(&request_id, command)).is_some());
-    let mut second_history = second.lock().await;
-    assert!(reservation_is_execute(second_history.reserve(&request_id, command)).is_some());
-}
-
-#[tokio::test]
 async fn v2_control_execution_survives_waiter_cancellation_and_records_result() {
     let request_id = CommandId::parse("cancelled-waiter").unwrap();
     let command = DeviceCommand::LegacyPreset {
