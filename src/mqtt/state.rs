@@ -1,6 +1,7 @@
 use std::{collections::HashSet, sync::Arc};
 
 use crate::service::publication::StateSnapshot;
+use bytes::Bytes;
 use futures_util::{Stream, StreamExt, TryStreamExt, future, stream};
 use gafctl_api::DeviceStateV2Response;
 use rumqttc_next::{AsyncClient, PublishOptions};
@@ -16,11 +17,28 @@ struct StateSubscriptions {
     service: Option<DeviceService>,
 }
 
+struct StateUpdate {
+    snapshot: Arc<StateSnapshot>,
+    replay_discovery: bool,
+}
+
+#[derive(Default)]
+struct DiscoveryProgress {
+    active_topics: HashSet<String>,
+    complete: bool,
+    previous_snapshot: Option<Arc<StateSnapshot>>,
+}
+
+struct DiscoveryAttempt {
+    active_topics: HashSet<String>,
+    complete: bool,
+}
+
 fn state_payloads(
     state: watch::Receiver<Arc<StateSnapshot>>,
     connected: watch::Receiver<bool>,
     service: Option<DeviceService>,
-) -> impl Stream<Item = Arc<StateSnapshot>> {
+) -> impl Stream<Item = StateUpdate> {
     stream::unfold(
         StateSubscriptions {
             state,
@@ -34,17 +52,47 @@ fn state_payloads(
 
 async fn receive_state_update(
     mut subscriptions: StateSubscriptions,
-) -> Option<(Option<Arc<StateSnapshot>>, StateSubscriptions)> {
-    tokio::select! {
-        changed = subscriptions.state.changed() => changed.ok()?,
-        changed = subscriptions.connected.changed() => changed.ok()?,
-    }
-    let active = *subscriptions.connected.borrow_and_update();
+) -> Option<(Option<StateUpdate>, StateSubscriptions)> {
+    let trigger = tokio::select! {
+        changed = subscriptions.state.changed() => {
+            changed.ok()?;
+            StateUpdateTrigger::State
+        },
+        changed = subscriptions.connected.changed() => {
+            changed.ok()?;
+            StateUpdateTrigger::Connection
+        },
+    };
+    let payload = make_state_update(&mut subscriptions, trigger).await;
+    Some((payload, subscriptions))
+}
+
+#[derive(Clone, Copy)]
+enum StateUpdateTrigger {
+    State,
+    Connection,
+}
+
+async fn make_state_update(
+    subscriptions: &mut StateSubscriptions,
+    trigger: StateUpdateTrigger,
+) -> Option<StateUpdate> {
+    let connection_triggered = match trigger {
+        StateUpdateTrigger::State => false,
+        StateUpdateTrigger::Connection => true,
+    };
+    let (active, replay_discovery) = {
+        let connected = subscriptions.connected.borrow_and_update();
+        (*connected, connection_triggered || connected.has_changed())
+    };
     if active && let Some(service) = &subscriptions.service {
         service.publish_state().await;
     }
-    let payload = active.then(|| Arc::clone(&*subscriptions.state.borrow_and_update()));
-    Some((payload, subscriptions))
+    let snapshot = Arc::clone(&subscriptions.state.borrow_and_update());
+    active.then_some(StateUpdate {
+        snapshot,
+        replay_discovery,
+    })
 }
 
 pub(super) async fn publish_state_updates(
@@ -56,27 +104,42 @@ pub(super) async fn publish_state_updates(
     service: Option<DeviceService>,
 ) {
     state_payloads(state, connected, service)
-        .fold(HashSet::new(), |previous_topics, snapshot| {
+        .fold(DiscoveryProgress::default(), |mut progress, update| {
             let client = &client;
             async move {
-                let active = publish_discovery(
-                    client,
-                    topics,
-                    &snapshot,
-                    discovery_enabled,
-                    previous_topics,
-                )
-                .await;
-                stream::iter(snapshot.publications.iter())
+                let changed = progress
+                    .previous_snapshot
+                    .as_ref()
+                    .is_none_or(|previous| !same_discovery_state(previous, &update.snapshot));
+                if update.replay_discovery || changed || !progress.complete {
+                    let attempt = publish_discovery_attempt(
+                        client,
+                        topics,
+                        &update.snapshot,
+                        discovery_enabled,
+                        std::mem::take(&mut progress.active_topics),
+                    )
+                    .await;
+                    progress.active_topics = attempt.active_topics;
+                    progress.complete = attempt.complete;
+                }
+                stream::iter(update.snapshot.publications.iter())
                     .for_each(|publication| publish_device_state(client, topics, publication))
                     .await;
-                active
+                progress.previous_snapshot = Some(update.snapshot);
+                progress
             }
         })
         .await;
 }
 
-async fn publish_retained(client: &AsyncClient, topic: String, payload: Vec<u8>) {
+fn same_discovery_state(previous: &StateSnapshot, current: &StateSnapshot) -> bool {
+    previous.proxy_id == current.proxy_id
+        && previous.descriptors == current.descriptors
+        && previous.discovery_identities == current.discovery_identities
+}
+
+async fn publish_retained(client: &AsyncClient, topic: String, payload: Bytes) {
     if let Err(error) = client
         .publish(topic, payload, PublishOptions::at_least_once().retained())
         .await
@@ -88,18 +151,18 @@ async fn publish_retained(client: &AsyncClient, topic: String, payload: Vec<u8>)
 fn state_messages(
     topics: Topics,
     publication: &DeviceStateV2Response,
-) -> serde_json::Result<[(String, Vec<u8>); 2]> {
+) -> serde_json::Result<[(String, Bytes); 2]> {
     Ok([
         (
             topics.device(&publication.id, "state"),
-            serde_json::to_vec(publication)?,
+            Bytes::from(serde_json::to_vec(publication)?),
         ),
         (
             topics.device(&publication.id, "availability"),
             if publication.available {
-                b"online".to_vec()
+                Bytes::from_static(b"online")
             } else {
-                b"offline".to_vec()
+                Bytes::from_static(b"offline")
             },
         ),
     ])
@@ -134,13 +197,13 @@ fn inactive_discovery_topics(
         .into_iter()
 }
 
-async fn publish_discovery(
+async fn publish_discovery_attempt(
     client: &AsyncClient,
     topics: Topics,
     snapshot: &StateSnapshot,
     enabled: bool,
     previous: HashSet<String>,
-) -> HashSet<String> {
+) -> DiscoveryAttempt {
     let configs = snapshot
         .descriptors
         .iter()
@@ -174,13 +237,17 @@ async fn publish_discovery(
     if !publish_discovery_messages(
         client,
         inactive_topics,
-        b"",
+        Bytes::from_static(b""),
         PublishOptions::at_least_once().retained(),
     )
     .await
     {
-        return previous;
+        return DiscoveryAttempt {
+            active_topics: previous,
+            complete: false,
+        };
     }
+    let mut complete = true;
     for (device, topic, config) in configs {
         let identity = (device.id.clone(), device.backend);
         if publish_device_discovery(
@@ -195,10 +262,14 @@ async fn publish_discovery(
         {
             active.insert(topic);
         } else {
+            complete = false;
             break;
         }
     }
-    active
+    DiscoveryAttempt {
+        active_topics: active,
+        complete,
+    }
 }
 
 async fn publish_device_discovery(
@@ -214,7 +285,7 @@ async fn publish_device_discovery(
             client,
             topics,
             identity,
-            br#"{"migrate_discovery":true}"#,
+            Bytes::from_static(br#"{"migrate_discovery":true}"#),
             PublishOptions::at_least_once(),
         )
         .await
@@ -231,7 +302,7 @@ async fn publish_device_discovery(
     if !publish_discovery_message(
         client,
         topic,
-        payload,
+        Bytes::from(payload),
         PublishOptions::at_least_once().retained(),
     )
     .await
@@ -243,7 +314,7 @@ async fn publish_device_discovery(
             client,
             topics,
             identity,
-            b"",
+            Bytes::from_static(b""),
             PublishOptions::at_least_once().retained(),
         )
         .await
@@ -253,7 +324,7 @@ async fn publish_component_messages(
     client: &AsyncClient,
     topics: Topics,
     identity: &(DeviceId, DeviceBackend),
-    payload: &[u8],
+    payload: Bytes,
     options: PublishOptions,
 ) -> bool {
     publish_discovery_messages(
@@ -268,15 +339,16 @@ async fn publish_component_messages(
 async fn publish_discovery_messages(
     client: &AsyncClient,
     topics: impl IntoIterator<Item = String>,
-    payload: &[u8],
+    payload: Bytes,
     options: PublishOptions,
 ) -> bool {
     stream::iter(topics)
         .map(Ok::<_, ()>)
         .try_fold((), |(), topic| {
             let options = options.clone();
+            let payload = payload.clone();
             async move {
-                publish_discovery_message(client, topic, payload.to_vec(), options)
+                publish_discovery_message(client, topic, payload, options)
                     .await
                     .then_some(())
                     .ok_or(())
@@ -289,7 +361,7 @@ async fn publish_discovery_messages(
 async fn publish_discovery_message(
     client: &AsyncClient,
     topic: String,
-    payload: Vec<u8>,
+    payload: Bytes,
     options: PublishOptions,
 ) -> bool {
     let completion = tokio::time::timeout(std::time::Duration::from_secs(30), async {
@@ -326,6 +398,29 @@ mod tests {
     use serde_json::Value;
     use std::time::Duration;
     use tokio::time::{sleep, timeout};
+
+    #[tokio::test]
+    async fn coalesced_state_and_reconnect_trigger_replays_discovery() {
+        let initial = Arc::new(snapshot(mqtt_device(ProxyId::default(), "reconnect-race")));
+        let (state_sender, state) = watch::channel(Arc::clone(&initial));
+        let (connected_sender, connected) = watch::channel(false);
+        let mut updated = (*initial).clone();
+        updated.publications[0].available = false;
+        state_sender.send_replace(Arc::new(updated));
+        connected_sender.send_replace(true);
+        let mut subscriptions = StateSubscriptions {
+            state,
+            connected,
+            service: None,
+        };
+
+        let state_update = make_state_update(&mut subscriptions, StateUpdateTrigger::State)
+            .await
+            .unwrap();
+        assert!(state_update.replay_discovery);
+        assert!(!state_update.snapshot.publications[0].available);
+        assert!(!subscriptions.connected.has_changed().unwrap());
+    }
 
     #[tokio::test]
     async fn server_mqtt_start_rechecks_retained_state_after_broker_reconnect() {
@@ -487,7 +582,7 @@ mod tests {
             .unwrap();
         receive_topic(&mut received, &old_topic).await;
         let (client, _) = observed_client("migration-publisher", broker.port);
-        publish_discovery(&client, topics, &snapshot(device), true, HashSet::new()).await;
+        publish_discovery_attempt(&client, topics, &snapshot(device), true, HashSet::new()).await;
         let first = timeout(Duration::from_secs(15), received.next())
             .await
             .unwrap()
@@ -546,7 +641,7 @@ mod tests {
             .await
             .unwrap();
         let (client, _) = observed_client("capability-publisher", broker.port);
-        let previous = publish_discovery(
+        let previous = publish_discovery_attempt(
             &client,
             topics,
             &snapshot(device.clone()),
@@ -566,7 +661,14 @@ mod tests {
             .unwrap();
         receive_topic(&mut received, "homeassistant/fence").await;
         device.capabilities.commands.clear();
-        publish_discovery(&client, topics, &snapshot(device), true, previous).await;
+        publish_discovery_attempt(
+            &client,
+            topics,
+            &snapshot(device),
+            true,
+            previous.active_topics,
+        )
+        .await;
         let update = timeout(Duration::from_secs(15), received.next())
             .await
             .unwrap()
@@ -617,7 +719,7 @@ mod tests {
             .unwrap();
         receive_topic(&mut received, &old_topic).await;
         let (client, _) = observed_client("rejected-group-publisher", broker.port);
-        let previous = publish_discovery(
+        let previous = publish_discovery_attempt(
             &client,
             topics,
             &snapshot(device.clone()),
@@ -625,7 +727,8 @@ mod tests {
             HashSet::new(),
         )
         .await;
-        assert!(previous.is_empty());
+        assert!(!previous.complete);
+        assert!(previous.active_topics.is_empty());
         let markers = timeout(
             Duration::from_secs(15),
             received.by_ref().take(old_topics.len()).collect::<Vec<_>>(),
@@ -652,7 +755,7 @@ mod tests {
             original
         );
         broker.restart().await;
-        assert_successful_migration_retry(broker.port, device, previous).await;
+        assert_successful_migration_retry(broker.port, device, previous.active_topics).await;
     }
 
     async fn assert_successful_migration_retry(
@@ -670,9 +773,14 @@ mod tests {
             .await
             .unwrap();
         let (client, _) = observed_client("retry-publisher", port);
-        let active =
-            publish_discovery(&client, topics, &snapshot(device.clone()), true, previous).await;
-        assert_eq!(active, HashSet::from([topics.discovery(&device.id)]));
+        let attempt =
+            publish_discovery_attempt(&client, topics, &snapshot(device.clone()), true, previous)
+                .await;
+        assert!(attempt.complete);
+        assert_eq!(
+            attempt.active_topics,
+            HashSet::from([topics.discovery(&device.id)])
+        );
         let messages = timeout(
             Duration::from_secs(15),
             received
@@ -747,7 +855,7 @@ mod tests {
         let _events = tokio_util::task::AbortOnDropHandle::new(tokio::spawn(
             eventloop.into_stream().for_each(|_| future::ready(())),
         ));
-        let previous = publish_discovery(
+        let previous = publish_discovery_attempt(
             &client,
             topics,
             &snapshot(device.clone()),
@@ -755,7 +863,8 @@ mod tests {
             HashSet::new(),
         )
         .await;
-        assert!(previous.is_empty());
+        assert!(!previous.complete);
+        assert!(previous.active_topics.is_empty());
         let marker = timeout(Duration::from_secs(15), received.next())
             .await
             .unwrap()
@@ -791,7 +900,7 @@ mod tests {
                 .all(|message| message.payload.as_ref() == original)
         );
         broker.restart().await;
-        assert_successful_migration_retry(broker.port, device, previous).await;
+        assert_successful_migration_retry(broker.port, device, previous.active_topics).await;
     }
 
     #[tokio::test]
@@ -803,16 +912,15 @@ mod tests {
                 .build();
         drop(eventloop);
         let snapshot = snapshot(device.clone());
-        assert!(
-            publish_discovery(&client, topics, &snapshot, true, HashSet::new())
-                .await
-                .is_empty()
-        );
+        let rejected =
+            publish_discovery_attempt(&client, topics, &snapshot, true, HashSet::new()).await;
+        assert!(!rejected.complete);
+        assert!(rejected.active_topics.is_empty());
         let previous = HashSet::from([topics.discovery(&device.id)]);
-        assert_eq!(
-            publish_discovery(&client, topics, &snapshot, false, previous.clone()).await,
-            previous
-        );
+        let disabled =
+            publish_discovery_attempt(&client, topics, &snapshot, false, previous.clone()).await;
+        assert!(!disabled.complete);
+        assert_eq!(disabled.active_topics, previous);
     }
 
     #[tokio::test]
@@ -842,11 +950,11 @@ mod tests {
             receive_topic(&mut received, topic).await;
         }
         let (client, _) = observed_client("disabled-publisher", broker.port);
-        assert!(
-            publish_discovery(&client, topics, &snapshot(device), false, HashSet::new())
-                .await
-                .is_empty()
-        );
+        let disabled =
+            publish_discovery_attempt(&client, topics, &snapshot(device), false, HashSet::new())
+                .await;
+        assert!(disabled.complete);
+        assert!(disabled.active_topics.is_empty());
         assert!(
             receive_topic(&mut received, &grouped_topic)
                 .await
@@ -937,7 +1045,7 @@ mod tests {
         let (client, _) = observed_client("restarted-publisher", broker.port);
         let mut inactive = snapshot(changed);
         inactive.descriptors.clear();
-        publish_discovery(&client, topics, &inactive, true, HashSet::new()).await;
+        publish_discovery_attempt(&client, topics, &inactive, true, HashSet::new()).await;
         let tombstone = receive_topic(&mut received, &discovery_topic).await;
         assert!(tombstone.payload.is_empty());
         drop(bridge);
@@ -1061,6 +1169,57 @@ mod tests {
                 .payload
                 .is_empty()
         );
+        drop(bridge);
+    }
+
+    #[tokio::test]
+    async fn ordinary_state_update_skips_discovery_but_descriptor_change_republishes() {
+        let broker = start_native_broker().await;
+        let device = mqtt_device(ProxyId::default(), "stable-discovery");
+        let topics = Topics(device.proxy_id);
+        let initial = snapshot(device);
+        let bridge = start_for_test(config(broker.port, true), initial.clone());
+        let (observer, mut received) = observed_client("stable-discovery-observer", broker.port);
+        let discovery_topic = topics.discovery(&initial.descriptors[0].id);
+        let state_topic = topics.device(&initial.descriptors[0].id, "state");
+        observer
+            .subscribe(&discovery_topic, QoS::AtLeastOnce)
+            .await
+            .unwrap();
+        let first_discovery = receive_topic(&mut received, &discovery_topic).await;
+        assert!(!first_discovery.payload.is_empty());
+        observer
+            .subscribe(&state_topic, QoS::AtLeastOnce)
+            .await
+            .unwrap();
+        receive_topic(&mut received, &state_topic).await;
+
+        let mut reading_update = initial.clone();
+        reading_update.publications[0].available = false;
+        reading_update.publications[0].inventory_status =
+            gafctl_api::DeviceInventoryStatus::Unavailable;
+        reading_update.publications[0].last_error = Some("reading unavailable".to_owned());
+        reading_update.publications[0].state = None;
+        bridge.state_updates.send_replace(Arc::new(reading_update));
+        let changed_state = receive_topic(&mut received, &state_topic).await;
+        assert!(
+            !serde_json::from_slice::<DeviceStateV2Response>(&changed_state.payload)
+                .unwrap()
+                .available
+        );
+        assert!(
+            timeout(Duration::from_millis(150), received.next())
+                .await
+                .is_err()
+        );
+
+        let mut descriptor_update = initial;
+        descriptor_update.descriptors[0].name.push_str(" updated");
+        bridge
+            .state_updates
+            .send_replace(Arc::new(descriptor_update));
+        let changed_discovery = receive_topic(&mut received, &discovery_topic).await;
+        assert_ne!(changed_discovery.payload, first_discovery.payload);
         drop(bridge);
     }
 }
