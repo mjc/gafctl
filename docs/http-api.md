@@ -46,8 +46,8 @@ curl http://127.0.0.1:8787/api/v2/devices
 ```
 
 A Bluetooth device descriptor contains these fields. This example shows one
-preset; the full capability list includes four presets and three adjustable
-controls:
+preset; the full capability list includes mode selection, three adjustable
+controls, and four fixed presets for API and CLI clients:
 
 ```json
 {
@@ -196,10 +196,11 @@ tenths field, checks request age again, then writes and verifies readback.
 Missing or unsupported readback prevents the write. An existing 100% humidity
 disable sentinel is preserved when changing temperature.
 
-The original controller advertises `legacy_automatic_temperature`,
+The original controller advertises `legacy_mode`, `legacy_automatic_temperature`,
 `legacy_automatic_humidity`, and `legacy_timer` capabilities. Broader values
 within the app ranges have not all been tested with readback on the controller.
-The four tested presets are also supported.
+The four tested presets remain available to API and CLI clients. Home Assistant
+uses Mode and the three adjustable number controls.
 
 QuickConnect commands:
 

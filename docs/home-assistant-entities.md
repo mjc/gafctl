@@ -21,7 +21,6 @@ For an original **GAF Master Flow Wi-Fi Attic Vent** (ERV5SMT or EGV5SMT):
 | Timer remaining | Remaining timer minutes |
 | Timer duration | Duration set when the timer started, minutes |
 | Mode | Automatic, Timer, or Off |
-| Automatic thresholds | Select 105.0 °F / 30.0% or 105.1 °F / 30.1% |
 | Target temperature | 90–120 °F in 1 °F steps |
 | Target humidity | 30–80% in 1% steps |
 | Run fan for | 0–360 minutes in 1-minute steps; zero stops the fan |
@@ -34,10 +33,10 @@ also leaves the fan off; it does not resume automatic operation.
 
 The Mode selector reports Off when the controller is in timer mode with its fan
 flag off. Controller mode remains a separate diagnostic of the raw device mode.
-The automatic threshold preset selector sets both thresholds and selects
-automatic mode. The threshold preset selector shows unknown when the current settings do not
-match an available choice. The
-presets were tested on one controller.
+Mode, Target temperature, Target humidity, and Run fan for appear together in
+Home Assistant's Controls section. Target temperature and Target humidity are
+the only threshold controls. Read-only diagnostics appear in Diagnostics;
+connection settings are in the integration's Reconfigure flow.
 
 The adjustable numbers use ranges and whole-unit steps from the original
 manufacturer app. Temperature and humidity commands change only the selected
@@ -191,7 +190,7 @@ and **retain disabled**:
 {
   "request_id": "attic-timer-1",
   "issued_at_unix_ms": 1790892000000,
-  "command": {"kind": "legacy_preset", "preset": "timer_one_minute"}
+  "command": {"kind": "legacy_timer", "minutes": 1}
 }
 ```
 
@@ -238,8 +237,10 @@ may complete even if its result is lost.
 Home Assistant does not expose a refresh button. Other controls require both
 process and device availability. Numbers display confirmed state and send
 whole, bounded values. Switch-off uses the backend conditional-off command so a
-different current mode is preserved. Selectors for original-controller
-thresholds and timer settings are separate. Unavailable capabilities receive
+different current mode is preserved. Original controllers expose one Mode
+selector and three number controls for temperature, humidity, and timer duration.
+MQTT discovery removes the former threshold preset and timer selectors.
+Unavailable capabilities receive
 platform-only removal entries in the device configuration, including after a
 service restart. Switching to HTTP ownership clears the retained device
 configuration.

@@ -28,8 +28,9 @@ describe a direct connection using the GAF Wi-Fi Vent app over Wi-Fi or Bluetoot
 The [GAF Wi-Fi Vent app's release notes](https://apps.apple.com/us/app/gaf-wi-fi-vent/id1388395737)
 say firmware **3.0.0** adds Bluetooth Low Energy support. The controller tested
 with Gafctl reports that version. Gafctl reads temperature, humidity, mode,
-automatic thresholds, and timer state. It supports fixed presets and adjustable
-HTTP/HA controls.
+automatic thresholds, and timer state. Home Assistant exposes Automatic, Timer,
+and Off modes with adjustable targets and timer duration. The HTTP API also
+supports these commands. Fixed presets remain available through the API and CLI.
 See the [README](../README.md#add-it-to-home-assistant) for the available controls.
 
 The original controller creates its own `GAFVent_XXXX` Wi-Fi access point. Gafctl

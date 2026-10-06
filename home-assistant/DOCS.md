@@ -46,6 +46,15 @@ The integration requires Home Assistant 2026.9.4 or newer. Restart Home Assistan
 and add it with `http://HOME_ASSISTANT_HOST:8787`. Select one entity source per
 fan.
 
+For an original controller, the integration groups Mode, Target temperature,
+Target humidity, and Run fan for in Controls. Changing either target selects
+Automatic and preserves the other target. Run fan for starts timed operation;
+zero stops the fan. Mode offers Automatic, Timer, and Off. Timer restarts the
+reported duration, or returns to Automatic if it is zero. Off and timer expiry
+leave the fan off until you select Automatic or start another timer. See the
+[entity guide](https://github.com/mjc/gafctl/blob/main/docs/home-assistant-entities.md)
+for readings, diagnostics, and QuickConnect controls.
+
 Port 8787 is exposed to the local network and has no login. Keep it on your
 trusted network. The health watchdog checks the server process; inspect device
 state to check whether a fan is available.

@@ -53,7 +53,10 @@ Gafctl. The firmware token `#pptP` has an unknown purpose.
 Writes require an accepted acknowledgement and matching readback. Automatic
 writes also require automatic mode. Timer writes require timer mode; clearing
 also requires the fan flag off. Missing, malformed, mismatched or already-expired
-readback leaves a write unconfirmed. Timer clear leaves timer mode active; write automatic thresholds to resume automatic operation.
+readback leaves a write unconfirmed. Timer clear leaves timer mode active with
+the fan off. Gafctl displays that state as Off. Selecting Automatic reads and
+reapplies the current thresholds. Selecting Timer restarts the reported positive
+duration; a zero duration selects Automatic.
 
 The identity suffix is opaque. `controller_fan_on` reports the controller flag;
 Gafctl keeps `estimated_running` null for this backend. Airflow is unmeasured.
@@ -122,7 +125,8 @@ roof/gable model field. The adjustable ranges come from the app; the tested
 values are listed above. The diagnostic probe accepts raw `u16` values whose
 full hardware range is untested.
 
-Direct Wi-Fi/TLS control, manual mode, standalone on/off, firmware update, reboot
+Direct Wi-Fi/TLS control, manual mode, a dedicated on/off protocol command,
+firmware update, reboot
 and reset are unsupported. The Wi-Fi listener port and authentication are
 unknown. The tested Bluetooth session recorded no pairing exchange.
 

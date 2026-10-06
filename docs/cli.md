@@ -70,6 +70,10 @@ timestamps. An unavailable device with `state: null` is a valid read. Use the
 
 ### Controls
 
+Fixed presets remain available through the CLI and API. Home Assistant uses
+Mode, Target temperature, Target humidity, and Run fan for instead. See the
+[entity guide](home-assistant-entities.md) for those controls.
+
 CLI preset names map to API values:
 
 | CLI preset | API value | Requested setting |

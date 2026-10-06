@@ -23,13 +23,11 @@ from .const import (
     UPDATE_INTERVAL,
 )
 from .controls import (
-    CONTROL_PRESETS,
     QUICKCONNECT_MODES,
     NumberControl,
     command_kinds,
     entity_keys,
     legacy_mode,
-    preset_matches,
 )
 from .models import (
     ApiError,
@@ -259,20 +257,6 @@ class GafctlCoordinator(DataUpdateCoordinator[DeviceState]):
             state = self._require_control(control.capability, control.backend)
             if control.reading(state) != validated:
                 raise ApiError("confirmed control has no matching current setting")
-
-    async def async_set_preset(self, preset: str) -> None:
-        if preset not in CONTROL_PRESETS:
-            raise ApiError("unsupported control preset")
-        async with self.command_lock:
-            self._require_active()
-            await self.async_refresh()
-            self._require_control("legacy_preset", "legacy_ble")
-            await self._async_submit_control(
-                {"kind": "legacy_preset", "preset": preset}
-            )
-            state = self._require_control("legacy_preset", "legacy_ble")
-            if not preset_matches(state, preset):
-                raise ApiError("confirmed control has no matching current preset")
 
     async def _async_submit_control(self, command: JsonObject) -> None:
         self._require_active()

@@ -121,7 +121,7 @@ class RegistryTests(unittest.IsolatedAsyncioTestCase):
             backend=backend,
             commands=["quick_connect_mode"]
             if operation == "mode"
-            else ["legacy_preset", "legacy_automatic_temperature"],
+            else ["legacy_automatic_temperature"],
         )
         self.hass.config_entries.async_update_entry(
             entry, data=entry.data | {"backend": backend}
@@ -136,12 +136,6 @@ class RegistryTests(unittest.IsolatedAsyncioTestCase):
                 )
             await self.hass.async_block_till_done()
         domain, service, key, fields = {
-            "preset": (
-                "select",
-                "select_option",
-                "automatic_thresholds",
-                {"option": "105.0°F / 30.0%"},
-            ),
             "mode": ("select", "select_option", "mode", {"option": "Automatic"}),
             "number": ("number", "set_value", "automatic_temperature", {"value": 105}),
         }[operation]
@@ -198,7 +192,7 @@ class RegistryTests(unittest.IsolatedAsyncioTestCase):
                 )
 
     async def test_queued_native_services_reject_unloaded_or_replaced_coordinator(self):
-        for operation in ("preset", "mode", "number"):
+        for operation in ("mode", "number"):
             for lifecycle in ("unloaded", "replaced", "unloading"):
                 with self.subTest(operation=operation, lifecycle=lifecycle):
                     entry, client, coordinator, call = await self.native_service_case(
@@ -237,7 +231,7 @@ class RegistryTests(unittest.IsolatedAsyncioTestCase):
                             await asyncio.gather(task, return_exceptions=True)
 
     async def test_native_services_recheck_lifecycle_after_preparatory_read(self):
-        for operation in ("preset", "mode", "number"):
+        for operation in ("mode", "number"):
             for lifecycle in ("unloaded", "replaced", "unloading"):
                 with self.subTest(operation=operation, lifecycle=lifecycle):
                     entry, client, coordinator, call = await self.native_service_case(
@@ -270,7 +264,7 @@ class RegistryTests(unittest.IsolatedAsyncioTestCase):
                         await asyncio.gather(task, return_exceptions=True)
 
     async def test_failed_native_unload_keeps_retained_services_usable(self):
-        for operation in ("preset", "mode", "number"):
+        for operation in ("mode", "number"):
             with self.subTest(operation=operation):
                 entry, client, coordinator, call = await self.native_service_case(
                     operation
@@ -295,7 +289,7 @@ class RegistryTests(unittest.IsolatedAsyncioTestCase):
                 )
 
     async def test_native_unload_does_not_cancel_or_replay_submitted_requests(self):
-        for operation in ("preset", "mode", "number"):
+        for operation in ("mode", "number"):
             with self.subTest(operation=operation):
                 entry, client, coordinator, call = await self.native_service_case(
                     operation
@@ -403,8 +397,15 @@ class RegistryTests(unittest.IsolatedAsyncioTestCase):
     ) -> None:
         entry = await self.entry()
         entry._async_set_state(self.hass, ConfigEntryState.SETUP_IN_PROGRESS, None)
-        sensor, _ = self.registered_sensor(entry)
+        sensor, registered = self.registered_sensor(entry)
         obsolete, _ = self.registered_sensor(entry, "obsolete")
+        obsolete_preset = self.entities.async_get_or_create(
+            "select",
+            "gafctl",
+            f"{entry.unique_id}_automatic_thresholds",
+            config_entry=entry,
+            device_id=registered.id,
+        )
         registered_device = self.devices.async_get_or_create(
             config_entry_id=entry.entry_id,
             identifiers={(entry.domain, entry.unique_id)},
@@ -437,6 +438,7 @@ class RegistryTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(entry.runtime_data._entities_loaded)
         self.assertIsNotNone(self.entities.async_get(sensor.entity_id))
         self.assertIsNone(self.entities.async_get(obsolete.entity_id))
+        self.assertIsNone(self.entities.async_get(obsolete_preset.entity_id))
         self.assertIsNone(self.entities.async_get(refresh_button.entity_id))
 
     async def test_setup_failure_preserves_registry_until_matching_device_is_resolved(
@@ -530,7 +532,6 @@ class RegistryTests(unittest.IsolatedAsyncioTestCase):
             partial(coordinator.async_set_mode, "invalid"),
             partial(coordinator.async_set_mode, "manual", only_if_current="automatic"),
             partial(coordinator.async_set_mode, "off", only_if_current="unknown"),
-            partial(coordinator.async_set_preset, "invalid"),
             *(
                 partial(coordinator.async_set_number, control, True)
                 for controls in NUMBER_CONTROLS.values()
@@ -923,7 +924,6 @@ class RegistryTests(unittest.IsolatedAsyncioTestCase):
             "mode": "quick_connect_mode",
             "legacy_mode": "legacy_mode",
             "number": "legacy_automatic_temperature",
-            "preset": "legacy_preset",
         }[operation]
         selected = device(backend=backend, commands=[capability])
         client = fake_client(devices=[selected])
@@ -948,14 +948,13 @@ class RegistryTests(unittest.IsolatedAsyncioTestCase):
             "number": partial(
                 coordinator.async_set_number, NUMBER_CONTROLS["legacy_ble"][0], 110
             ),
-            "preset": partial(coordinator.async_set_preset, "timer_one_minute"),
         }[operation]
         return (coordinator, client, selected, old, new, submit)
 
     async def test_all_controls_preserve_unknown_request_when_refresh_fails(
         self,
     ) -> None:
-        for operation in ("mode", "legacy_mode", "number", "preset"):
+        for operation in ("mode", "legacy_mode", "number"):
             with self.subTest(operation=operation):
                 coordinator, client, _, old, _, submit = await self.control_case(
                     operation
@@ -972,7 +971,7 @@ class RegistryTests(unittest.IsolatedAsyncioTestCase):
                 self.assertFalse(coordinator.command_lock.locked())
 
     async def test_all_controls_recheck_identity_ownership_and_capabilities(self):
-        for operation in ("mode", "legacy_mode", "number", "preset"):
+        for operation in ("mode", "legacy_mode", "number"):
             for phase in ("before", "after"):
                 changes = (
                     ("owner", "capability")
@@ -1014,7 +1013,7 @@ class RegistryTests(unittest.IsolatedAsyncioTestCase):
                         self.assertFalse(coordinator.command_lock.locked())
 
     async def test_all_controls_propagate_cancellation_without_replaying(self) -> None:
-        for operation in ("mode", "legacy_mode", "number", "preset"):
+        for operation in ("mode", "legacy_mode", "number"):
             for phase in ("submit", "readback"):
                 with self.subTest(operation=operation, phase=phase):
                     coordinator, client, _, old, _, submit = await self.control_case(
@@ -1048,17 +1047,6 @@ class RegistryTests(unittest.IsolatedAsyncioTestCase):
                     )
                     self.assertFalse(coordinator.command_lock.locked())
 
-    async def test_preset_requires_matching_readback(self) -> None:
-        _, client, _, old, new, submit = await self.control_case("preset")
-        client.fetch_state.side_effect = [old, old]
-        with self.assertRaisesRegex(ApiError, "no matching current preset"):
-            await submit()
-        client.set_control.assert_awaited_once()
-        client.set_control.reset_mock()
-        client.fetch_state.side_effect = [old, new]
-        await submit()
-        client.set_control.assert_awaited_once()
-
     async def test_state_backend_must_match_selected_inventory(self) -> None:
         from homeassistant.helpers.update_coordinator import UpdateFailed
 
@@ -1070,50 +1058,6 @@ class RegistryTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(ApiError):
             await submit()
         client.set_control.assert_not_called()
-
-    async def test_preset_confirmation_requires_mode_and_clear_fan_flag(self):
-        fields = {
-            "automatic105_f30_percent": {
-                "automatic_temperature_tenths_f": 1050,
-                "automatic_humidity_tenths_percent": 300,
-            },
-            "timer_one_minute": {
-                "timer_original_minutes": 1,
-                "timer_remaining_minutes": 1,
-            },
-            "timer_clear": {"timer_original_minutes": 0, "timer_remaining_minutes": 0},
-        }
-        cases = (
-            ("automatic105_f30_percent", "timer", False, False),
-            ("automatic105_f30_percent", "automatic", False, True),
-            ("timer_one_minute", "automatic", False, False),
-            ("timer_one_minute", "timer", True, True),
-            ("timer_clear", "timer", True, False),
-            ("timer_clear", "timer", None, False),
-            ("timer_clear", "timer", False, True),
-        )
-        for preset, mode, flag, matches in cases:
-            with self.subTest(preset=preset, mode=mode, flag=flag):
-                coordinator, client, _, old, _, _ = await self.control_case("preset")
-                client.fetch_state.side_effect = [
-                    old,
-                    old
-                    | {
-                        "state": readings(
-                            settings=legacy_settings(
-                                mode=mode, controller_fan_on=flag, **fields[preset]
-                            )
-                        )
-                    },
-                ]
-                if matches:
-                    await coordinator.async_set_preset(preset)
-                else:
-                    with self.assertRaisesRegex(ApiError, "no matching current preset"):
-                        await coordinator.async_set_preset(preset)
-                client.set_control.assert_awaited_once_with(
-                    "configured", {"kind": "legacy_preset", "preset": preset}
-                )
 
     async def asyncSetUp(self) -> None:
         await asyncio.to_thread(REGISTRY_FIXTURE_DIR.mkdir, parents=True, exist_ok=True)
@@ -1290,6 +1234,13 @@ class RegistryTests(unittest.IsolatedAsyncioTestCase):
         entry = await self.entry()
         sensor, registered = self.registered_sensor(entry)
         obsolete, _ = self.registered_sensor(entry, "obsolete")
+        obsolete_preset = self.entities.async_get_or_create(
+            "select",
+            "gafctl",
+            f"{entry.unique_id}_automatic_thresholds",
+            config_entry=entry,
+            device_id=registered.id,
+        )
         coordinator = coordinator_for(
             self.hass, AsyncMock(), device(owner="mqtt"), entry
         )
@@ -1298,6 +1249,7 @@ class RegistryTests(unittest.IsolatedAsyncioTestCase):
             await coordinator._reload_entry()
         self.assertIsNotNone(self.entities.async_get(sensor.entity_id))
         self.assertIsNone(self.entities.async_get(obsolete.entity_id))
+        self.assertIsNone(self.entities.async_get(obsolete_preset.entity_id))
         self.assertIsNotNone(self.devices.async_get(registered.id))
 
     async def test_reading_expiry_cannot_replace_newer_data_and_is_cancelled_on_unload(
@@ -1343,7 +1295,7 @@ class RegistryTests(unittest.IsolatedAsyncioTestCase):
             self.assertIs(coordinator.data, newer)
 
     async def test_confirmed_clear_timer_accepts_small_clock_skew(self):
-        coordinator, client, _, old, _, _ = await self.control_case("preset")
+        coordinator, client, _, old, _, _ = await self.control_case("legacy_mode")
         new = old | {
             "state": readings(
                 settings=legacy_settings(
@@ -1377,11 +1329,11 @@ class RegistryTests(unittest.IsolatedAsyncioTestCase):
                 },
                 new,
             ]
-            await coordinator.async_set_preset("timer_clear")
+            await coordinator.async_set_mode("off")
             self.assertIsNotNone(coordinator.current_readings)
             self.assertEqual(schedule.call_args.args[1], 90)
             client.set_control.assert_awaited_once_with(
-                "configured", {"kind": "legacy_preset", "preset": "timer_clear"}
+                "configured", {"kind": "legacy_mode", "mode": "off"}
             )
 
     async def test_legacy_mode_selector_submits_and_confirms_all_three_modes(self):
@@ -1393,7 +1345,15 @@ class RegistryTests(unittest.IsolatedAsyncioTestCase):
         ):
             with self.subTest(option=option):
                 entry = await self.entry()
-                selected = device(commands=["legacy_mode", "legacy_preset"])
+                selected = device(
+                    commands=[
+                        "legacy_mode",
+                        "legacy_preset",
+                        "legacy_automatic_temperature",
+                        "legacy_automatic_humidity",
+                        "legacy_timer",
+                    ]
+                )
                 old = state_data(state=reported_state())
                 updated = old | {
                     "state": reported_state(
@@ -1410,7 +1370,14 @@ class RegistryTests(unittest.IsolatedAsyncioTestCase):
                 coordinator = coordinator_for(self.hass, client, selected, entry)
                 coordinator.async_set_updated_data(old)
                 selectors = await self.platform_entities(gafctl_select, coordinator)
-                self.assertEqual(len(selectors), 2)
+                self.assertEqual(len(selectors), 1)
+                self.assertEqual(entity_keys(selected)["select"], {"mode"})
+                numbers = await self.platform_entities(gafctl_number, coordinator)
+                self.assertEqual(
+                    {item.name for item in selectors + numbers},
+                    {"Mode", "Target temperature", "Target humidity", "Run fan for"},
+                )
+                self.assertTrue(all(item.entity_category is None for item in numbers))
                 self.assertTrue(all(item.entity_category is None for item in selectors))
                 selector = next(
                     item for item in selectors if item.unique_id.endswith("_mode")
@@ -1805,7 +1772,7 @@ class RegistryTests(unittest.IsolatedAsyncioTestCase):
                     )
         self.assertEqual(checked, {"number", "switch", "legacy_mode"})
 
-    async def test_generated_mqtt_binary_modes_and_presets_preserve_unknown(
+    async def test_generated_mqtt_binary_modes_preserve_unknown(
         self,
     ) -> None:
         checked = set()
@@ -1818,19 +1785,7 @@ class RegistryTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(render({"mode": "off"}), "OFF")
                 self.assertIsNone(render({"mode": "conflicting"}))
                 self.assertIsNone(render({}))
-            elif key == "select_automatic_thresholds":
-                checked.add("automatic_thresholds")
-                self.assertEqual(
-                    render(
-                        {
-                            "mode": "timer",
-                            "automatic_temperature_tenths_f": 1050,
-                            "automatic_humidity_tenths_percent": 300,
-                        }
-                    ),
-                    "automatic105_f30_percent",
-                )
-        self.assertEqual(checked, {"binary_mode", "automatic_thresholds"})
+        self.assertEqual(checked, {"binary_mode"})
 
     async def test_poll_requires_current_proxy_identity_and_successful_inventory(self):
         from homeassistant.helpers.update_coordinator import UpdateFailed

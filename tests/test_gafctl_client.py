@@ -270,7 +270,7 @@ class ApiClientTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(ApiError, "selected device is unavailable"):
             CONTROLS.select_device(devices, "missing")
 
-    def test_number_bounds_and_timer_presets(self):
+    def test_number_bounds(self):
         self.assertEqual(
             {
                 c.key: (c.minimum, c.maximum, c.step)
@@ -302,26 +302,6 @@ class ApiClientTests(unittest.IsolatedAsyncioTestCase):
                     ):
                         with self.assertRaises(ApiError):
                             control.validate(invalid)
-        for remaining, original, expected in (
-            (0, 0, "timer_clear"),
-            (1, 1, "timer_one_minute"),
-            (0, 1, None),
-            (2, 1, None),
-            (1, 2, None),
-            (0, 2, None),
-        ):
-            with self.subTest(remaining=remaining, original=original):
-                self.assertEqual(
-                    CONTROLS.timer_control_preset(
-                        readings(
-                            settings=legacy_settings(
-                                timer_remaining_minutes=remaining,
-                                timer_original_minutes=original,
-                            )
-                        )
-                    ),
-                    expected,
-                )
 
     async def test_readings_preserve_reported_fields_and_unknown_values(self):
         raw = reported_state(

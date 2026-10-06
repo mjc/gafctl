@@ -116,14 +116,21 @@ For automatic startup and logs, follow the [service setup guide](docs/deployment
    Use the base address without `/api/v2`. Replace any prefilled address.
 5. Select the fans to add. Each selected fan gets its own integration entry.
 
-Home Assistant exposes measurements, diagnostics, selectors, adjustable target
-numbers and timer duration for the original controller. Numbers use
-90–120 °F, 30–80%, and 0–360 timer minutes in whole-unit steps. The service reads
-and preserves the unchanged target before writing. Fixed threshold presets are also available. The Mode selector offers Automatic,
-Timer, and Off. Automatic uses the current thresholds; Off stops the fan until
-you select Automatic or start another timer. Timer uses the reported duration,
-or returns to Automatic when no duration is set. The fan flag reports the
-controller's on/off state; airflow is unmeasured.
+For an original controller, Home Assistant groups these four controls together:
+
+| Control | What it does |
+| --- | --- |
+| Mode | Select Automatic, Timer, or Off |
+| Target temperature | Set 90–120 °F in 1 °F steps and select Automatic |
+| Target humidity | Set 30–80% in 1% steps and select Automatic |
+| Run fan for | Start a timer for 1–360 minutes; zero stops the fan |
+
+Automatic uses the current thresholds. Changing either target preserves the
+other target. Timer restarts the reported duration, or returns to Automatic
+when that duration is zero. Off stops the fan and disables automatic operation.
+An expired timer also leaves the fan off; select Automatic to resume automatic
+operation. Measurements and read-only diagnostics remain available. The fan
+flag reports the controller's on/off state; airflow is unmeasured.
 
 To change the API address, open the entry's menu and choose **Reconfigure**.
 The new address must report the same persistent proxy UUID, device ID and

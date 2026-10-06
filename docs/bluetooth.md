@@ -51,7 +51,9 @@ restores availability. Last raw observations remain in diagnostics.
 
 Controls retain their acknowledgement and then read settings, mode, sensors,
 and timer for confirmation. Partial threshold changes first read current
-settings so the unchanged threshold is preserved. These extra reads provide
+settings so the unchanged threshold is preserved. Automatic reapplies both
+current raw thresholds. Timer restarts the reported duration, or selects
+Automatic when it is zero. Off sends a zero-minute timer command. These extra reads provide
 Gafctl's control confirmation contract; Android's setter has no equivalent
 acknowledgement/readback check.
 

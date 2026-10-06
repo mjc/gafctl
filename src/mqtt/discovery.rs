@@ -39,6 +39,7 @@ fn possible_components(
         .chain([
             ("select", "mode"),
             ("sensor", "control_result"),
+            // Remove the former threshold preset and timer selectors.
             ("select", "automatic_thresholds"),
             ("select", "timer"),
         ])
@@ -261,32 +262,6 @@ fn ble_sensors(backend: DeviceBackend) -> impl Iterator<Item = Sensor> {
 }
 
 fn control_configs(device: &DeviceDescriptor) -> impl Iterator<Item = (String, Value)> + '_ {
-    let presets = device
-        .capabilities
-        .commands
-        .iter()
-        .filter_map(|capability| match capability {
-            CommandCapability::LegacyPreset(preset) => Some(<&'static str>::from(preset)),
-            CommandCapability::LegacyAutomaticTemperature
-            | CommandCapability::LegacyMode
-            | CommandCapability::LegacyAutomaticHumidity
-            | CommandCapability::LegacyTimer
-            | CommandCapability::QuickConnectMode
-            | CommandCapability::QuickConnectTargets
-            | CommandCapability::QuickConnectTimerDuration => None,
-        })
-        .collect::<Vec<_>>();
-    let selectors = [("automatic_thresholds", "Automatic thresholds", "automatic")]
-        .into_iter()
-        .filter_map(move |(key, name, prefix)| {
-            let options = presets
-                .iter()
-                .copied()
-                .filter(|preset| preset.starts_with(prefix))
-                .collect::<Vec<_>>();
-            (!options.is_empty())
-                .then(|| select_config(device, key, name, &options, "legacy_preset", "preset"))
-        });
     let legacy_mode = device
         .capabilities
         .commands
@@ -312,7 +287,7 @@ fn control_configs(device: &DeviceDescriptor) -> impl Iterator<Item = (String, V
         config["entity_category"] = json!("diagnostic");
         component("sensor", "control_result", config)
     });
-    selectors.chain(legacy_mode).chain(mode).chain(result)
+    legacy_mode.into_iter().chain(mode).chain(result)
 }
 
 fn legacy_mode_config(device: &DeviceDescriptor) -> (String, Value) {
@@ -348,19 +323,7 @@ fn select_config(
         "{{\"kind\":\"{kind}\",\"{field}\":{{{{ value | to_json }}}}}}"
     )));
     config["optimistic"] = json!(false);
-    if kind == "legacy_preset" {
-        config["value_template"] = json!(preset_readback_template(key));
-    }
     component("select", key, config)
-}
-
-fn preset_readback_template(key: &str) -> &'static str {
-    match key {
-        "automatic_thresholds" => {
-            "{% set settings = (value_json.state or {}).get('settings') or {} %}{% if settings.get('automatic_temperature_tenths_f') == 1050 and settings.get('automatic_humidity_tenths_percent') == 300 %}automatic105_f30_percent{% elif settings.get('automatic_temperature_tenths_f') == 1051 and settings.get('automatic_humidity_tenths_percent') == 301 %}automatic105_1_f30_1_percent{% else %}{{ none }}{% endif %}"
-        }
-        _ => "{{ none }}",
-    }
 }
 
 fn cloud_sensors(backend: DeviceBackend) -> impl Iterator<Item = Sensor> {
@@ -885,6 +848,10 @@ mod tests {
         let devices = [mqtt_ble(), mqtt_device(ProxyId::default(), "cloud-fixture")];
         let generated = configs(&devices).collect::<Vec<_>>();
         let components = &generated[0].1["components"];
+        assert_eq!(
+            components["select_automatic_thresholds"],
+            json!({"platform": "select"})
+        );
         assert!(
             components["sensor_freshness"]["value_template"]
                 .as_str()

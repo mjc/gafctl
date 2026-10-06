@@ -132,45 +132,6 @@ NUMBER_CONTROLS: Mapping[Backend, tuple[NumberControl, ...]] = {
     )
     for backend in BACKENDS
 }
-THRESHOLDS = {
-    "automatic105_f30_percent": (105.0, 30.0),
-    "automatic105_1_f30_1_percent": (105.1, 30.1),
-}
-_THRESHOLD_PRESETS: dict[tuple[float | None, float | None], str] = {
-    values: preset for preset, values in THRESHOLDS.items()
-}
-TIMER_PRESETS = {"timer_clear": 0, "timer_one_minute": 1}
-_TIMER_PRESETS: dict[int | None, str] = {
-    duration: preset for preset, duration in TIMER_PRESETS.items()
-}
-CONTROL_PRESETS = frozenset((*THRESHOLDS, *TIMER_PRESETS))
-
-
-def threshold_control_preset(readings: Readings) -> str | None:
-    settings = readings["settings"]
-    if settings["backend"] != "legacy_ble":
-        return None
-    current = (
-        tenths(settings["automatic_temperature_tenths_f"]),
-        tenths(settings["automatic_humidity_tenths_percent"]),
-    )
-    return _THRESHOLD_PRESETS.get(current)
-
-
-def preset_matches(readings: Readings, preset: str) -> bool:
-    settings = readings["settings"]
-    if settings["backend"] != "legacy_ble":
-        return False
-    if preset in THRESHOLDS:
-        return (
-            settings["mode"] == "automatic"
-            and threshold_control_preset(readings) == preset
-        )
-    return (
-        settings["mode"] == "timer"
-        and timer_control_preset(readings) == preset
-        and (preset != "timer_clear" or settings["controller_fan_on"] is False)
-    )
 
 
 def select_device(devices: list[Device], device_id: str) -> Device:
@@ -193,8 +154,6 @@ def entity_keys(device: Device | None) -> dict[str, set[str]]:
             "sensor": set(SENSORS[backend]),
             "binary_sensor": set(BINARY_FIELDS[backend]),
         }
-    if backend == "legacy_ble" and "legacy_preset" in commands:
-        entities["select"] = {"automatic_thresholds"}
     if backend == "legacy_ble" and "legacy_mode" in commands:
         entities.setdefault("select", set()).add("mode")
     if backend == "quick_connect" and "quick_connect_mode" in commands:
@@ -209,15 +168,6 @@ def entity_keys(device: Device | None) -> dict[str, set[str]]:
     if number_keys:
         entities["number"] = number_keys
     return entities
-
-
-def timer_control_preset(state: Readings) -> str | None:
-    settings = state["settings"]
-    if settings["backend"] != "legacy_ble":
-        return None
-    remaining = settings["timer_remaining_minutes"]
-    original = settings["timer_original_minutes"]
-    return _TIMER_PRESETS.get(original) if original == remaining else None
 
 
 def _is_finite_number(value: object) -> TypeGuard[int | float]:
