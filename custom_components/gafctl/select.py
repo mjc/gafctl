@@ -9,11 +9,9 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from .controls import (
     MODE_LABELS,
     THRESHOLDS,
-    TIMER_PRESETS,
     entity_keys,
     legacy_mode,
     threshold_control_preset,
-    timer_control_preset,
 )
 from .coordinator import GafctlConfigEntry, GafctlCoordinator
 from .entity import GafctlEntity, translate_api_errors
@@ -22,11 +20,9 @@ THRESHOLD_OPTIONS = {
     f"{temperature:.1f}°F / {humidity:.1f}%": preset
     for preset, (temperature, humidity) in THRESHOLDS.items()
 }
-TIMER_OPTIONS = {label: preset for preset, (label, _) in TIMER_PRESETS.items()}
 MODE_OPTIONS = {label: mode for mode, label in MODE_LABELS.items()}
 SELECTS = {
     "automatic_thresholds": ("Automatic thresholds", THRESHOLD_OPTIONS),
-    "timer": ("Fan timer", TIMER_OPTIONS),
     "mode": ("Mode", MODE_OPTIONS),
 }
 
@@ -88,8 +84,6 @@ class GafctlControlSelect(GafctlEntity, SelectEntity):
             )
             if self._key == "mode"
             else threshold_control_preset(state)
-            if self._key == "automatic_thresholds"
-            else timer_control_preset(state)
         )
         return next(
             (label for label, preset in self._presets.items() if preset == current),

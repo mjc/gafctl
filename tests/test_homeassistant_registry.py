@@ -1825,22 +1825,7 @@ class RegistryTests(unittest.IsolatedAsyncioTestCase):
                     ),
                     "automatic105_f30_percent",
                 )
-            elif key == "select_timer":
-                checked.add("timer")
-                self.assertEqual(
-                    render(
-                        {
-                            "mode": "automatic",
-                            "timer_remaining_minutes": 0,
-                            "timer_original_minutes": 0,
-                        }
-                    ),
-                    "timer_clear",
-                )
-                self.assertIsNone(
-                    render({"timer_remaining_minutes": 0, "timer_original_minutes": 1})
-                )
-        self.assertEqual(checked, {"binary_mode", "automatic_thresholds", "timer"})
+        self.assertEqual(checked, {"binary_mode", "automatic_thresholds"})
 
     async def test_poll_requires_current_proxy_identity_and_successful_inventory(self):
         from homeassistant.helpers.update_coordinator import UpdateFailed

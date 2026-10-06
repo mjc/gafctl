@@ -22,22 +22,21 @@ For an original **GAF Master Flow Wi-Fi Attic Vent** (ERV5SMT or EGV5SMT):
 | Timer duration | Duration set when the timer started, minutes |
 | Mode | Automatic, Timer, or Off |
 | Automatic thresholds | Select 105.0 °F / 30.0% or 105.1 °F / 30.1% |
-| Fan timer | Off (automatic disabled) or Run for 1 minute |
 | Target temperature | 90–120 °F in 1 °F steps |
 | Target humidity | 30–80% in 1% steps |
 | Run fan for | 0–360 minutes in 1-minute steps; zero stops the fan |
 
 Select **Automatic** to let the controller use its current temperature and
-humidity thresholds. Select **Timer** to run for the reported timer duration. If no duration is set,
-Timer returns to Automatic. Select **Off** to stop the fan and
+humidity thresholds. Select **Timer** to run for the reported timer duration.
+If no duration is set, Timer returns to Automatic. Select **Off** to stop the fan and
 disable automatic operation until you select Automatic again. An expired timer
 also leaves the fan off; it does not resume automatic operation.
 
 The Mode selector reports Off when the controller is in timer mode with its fan
 flag off. Controller mode remains a separate diagnostic of the raw device mode.
 The automatic threshold preset selector sets both thresholds and selects
-automatic mode. A selector shows unknown when the current settings do not
-match an available choice. An expired one-minute timer shows unknown. The
+automatic mode. The threshold preset selector shows unknown when the current settings do not
+match an available choice. The
 presets were tested on one controller.
 
 The adjustable numbers use ranges and whole-unit steps from the original

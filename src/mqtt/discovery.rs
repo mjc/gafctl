@@ -276,20 +276,17 @@ fn control_configs(device: &DeviceDescriptor) -> impl Iterator<Item = (String, V
             | CommandCapability::QuickConnectTimerDuration => None,
         })
         .collect::<Vec<_>>();
-    let selectors = [
-        ("automatic_thresholds", "Automatic thresholds", "automatic"),
-        ("timer", "Fan timer", "timer"),
-    ]
-    .into_iter()
-    .filter_map(move |(key, name, prefix)| {
-        let options = presets
-            .iter()
-            .copied()
-            .filter(|preset| preset.starts_with(prefix))
-            .collect::<Vec<_>>();
-        (!options.is_empty())
-            .then(|| select_config(device, key, name, &options, "legacy_preset", "preset"))
-    });
+    let selectors = [("automatic_thresholds", "Automatic thresholds", "automatic")]
+        .into_iter()
+        .filter_map(move |(key, name, prefix)| {
+            let options = presets
+                .iter()
+                .copied()
+                .filter(|preset| preset.starts_with(prefix))
+                .collect::<Vec<_>>();
+            (!options.is_empty())
+                .then(|| select_config(device, key, name, &options, "legacy_preset", "preset"))
+        });
     let legacy_mode = device
         .capabilities
         .commands
@@ -364,9 +361,6 @@ fn preset_readback_template(key: &str) -> &'static str {
     match key {
         "automatic_thresholds" => {
             "{% set settings = (value_json.state or {}).get('settings') or {} %}{% if settings.get('automatic_temperature_tenths_f') == 1050 and settings.get('automatic_humidity_tenths_percent') == 300 %}automatic105_f30_percent{% elif settings.get('automatic_temperature_tenths_f') == 1051 and settings.get('automatic_humidity_tenths_percent') == 301 %}automatic105_1_f30_1_percent{% else %}{{ none }}{% endif %}"
-        }
-        "timer" => {
-            "{% set settings = (value_json.state or {}).get('settings') or {} %}{% if settings.get('timer_remaining_minutes') == 0 and settings.get('timer_original_minutes') == 0 %}timer_clear{% elif settings.get('timer_remaining_minutes') == 1 and settings.get('timer_original_minutes') == 1 %}timer_one_minute{% else %}{{ none }}{% endif %}"
         }
         _ => "{{ none }}",
     }

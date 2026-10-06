@@ -139,12 +139,9 @@ THRESHOLDS = {
 _THRESHOLD_PRESETS: dict[tuple[float | None, float | None], str] = {
     values: preset for preset, values in THRESHOLDS.items()
 }
-TIMER_PRESETS = {
-    "timer_clear": ("Off (automatic disabled)", 0),
-    "timer_one_minute": ("Run for 1 minute", 1),
-}
+TIMER_PRESETS = {"timer_clear": 0, "timer_one_minute": 1}
 _TIMER_PRESETS: dict[int | None, str] = {
-    duration: preset for preset, (_, duration) in TIMER_PRESETS.items()
+    duration: preset for preset, duration in TIMER_PRESETS.items()
 }
 CONTROL_PRESETS = frozenset((*THRESHOLDS, *TIMER_PRESETS))
 
@@ -197,7 +194,7 @@ def entity_keys(device: Device | None) -> dict[str, set[str]]:
             "binary_sensor": set(BINARY_FIELDS[backend]),
         }
     if backend == "legacy_ble" and "legacy_preset" in commands:
-        entities["select"] = {"automatic_thresholds", "timer"}
+        entities["select"] = {"automatic_thresholds"}
     if backend == "legacy_ble" and "legacy_mode" in commands:
         entities.setdefault("select", set()).add("mode")
     if backend == "quick_connect" and "quick_connect_mode" in commands:
