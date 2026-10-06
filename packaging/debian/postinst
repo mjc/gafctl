@@ -7,8 +7,10 @@ if [ "$1" = configure ]; then
     fi
     chown root:gafctl /etc/gafctl
     chmod 750 /etc/gafctl
-    chown root:gafctl /etc/gafctl/gafctl.env
-    chmod 640 /etc/gafctl/gafctl.env
+    if [ -f /etc/gafctl/gafctl.env ]; then
+        chown root:gafctl /etc/gafctl/gafctl.env
+        chmod 640 /etc/gafctl/gafctl.env
+    fi
     if [ -d /run/systemd/system ]; then systemctl daemon-reload; fi
     if [ -S /run/dbus/system_bus_socket ]; then
         dbus-send --system --type=method_call --dest=org.freedesktop.DBus /org/freedesktop/DBus org.freedesktop.DBus.ReloadConfig || true

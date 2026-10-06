@@ -64,6 +64,16 @@ sed -i "s/^Version: .*/Version: ${version}+check/" /work/upgrade/DEBIAN/control
 dpkg-deb --build /work/upgrade /work/upgrade.deb
 dpkg -i /work/upgrade.deb
 grep -q 'preserved configuration' /etc/gafctl/gafctl.env
+cp -p /etc/gafctl/gafctl.env /work/gafctl.env
+rm /etc/gafctl/gafctl.env
+sed -i "s/^Version: .*/Version: ${version}+check.1/" /work/upgrade/DEBIAN/control
+dpkg-deb --build /work/upgrade /work/deleted-config-upgrade.deb
+for archive in /work/upgrade.deb /work/deleted-config-upgrade.deb; do
+    dpkg -i "$archive"
+    test "$(dpkg-query -W -f '${Status}' gafctl)" = 'install ok installed'
+    test ! -e /etc/gafctl/gafctl.env
+done
+cp -p /work/gafctl.env /etc/gafctl/gafctl.env
 test -f /var/lib/gafctl/install-check
 test "$(sha256sum /var/lib/gafctl/identities.json)" = "$identity"
 systemctl restart gafctl.service
@@ -73,4 +83,4 @@ if systemctl is-active --quiet gafctl.service; then exit 1; fi
 if systemctl is-enabled --quiet gafctl.service; then exit 1; fi
 test -f /var/lib/gafctl/install-check
 getent passwd gafctl >/dev/null
-printf '\npackage architecture, install, systemd, credentials, restart, reinstall, upgrade, purge: passed\n'
+printf '\npackage architecture, install, systemd, credentials, restart, reinstall, upgrade, deleted configuration, purge: passed\n'
