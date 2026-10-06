@@ -1,4 +1,4 @@
-ARG GAFCTL_REVISION=da52eb6fb996d96f793112abe0a9a458631932ce
+ARG GAFCTL_REVISION=be8c14ff08720dcf863e551751456fced976a3b0
 FROM docker.io/library/rust:1.98.1-slim-bookworm@sha256:ff521445a372125ed4f76e1453a1f8098f2d05332d1601d30db1c1f62757e730 AS build
 RUN apt-get update && apt-get install -y --no-install-recommends build-essential cmake pkg-config libdbus-1-dev curl && rm -rf /var/lib/apt/lists/*
 ARG GAFCTL_REVISION
