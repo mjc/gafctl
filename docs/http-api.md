@@ -161,6 +161,22 @@ Original-controller presets are `automatic105_f30_percent`,
 `automatic105_1_f30_1_percent`, `timer_clear`, and `timer_one_minute`. Their effects
 are listed in the [CLI reference](cli.md#controls).
 
+Original-controller mode selection preserves the current thresholds:
+
+```json
+{"kind":"legacy_mode","mode":"automatic"}
+{"kind":"legacy_mode","mode":"timer"}
+{"kind":"legacy_mode","mode":"off"}
+```
+
+Automatic reads and reapplies the current raw thresholds under the device
+transaction. Timer reads the original timer duration and starts that duration,
+or returns to Automatic with the current thresholds when it is zero. Missing or unsupported current settings prevent
+the write. Off writes a zero-minute timer, stopping the fan and disabling
+automatic operation. Timer expiry also leaves the fan off. The HA Mode selector
+reports Off for timer mode with the controller fan flag off; the raw controller
+mode remains available separately. This command requires `legacy_mode`.
+
 Original-controller adjustable commands:
 
 ```json
@@ -170,7 +186,7 @@ Original-controller adjustable commands:
 ```
 
 Temperature accepts 90–120 °F, humidity 30–80%, and timer 0–360 minutes,
-all in whole-unit steps. Zero clears the timer. These limits come from the
+all in whole-unit steps. Zero stops the fan and disables automatic operation. These limits come from the
 original manufacturer Android app, including its timer picker and setter
 encoding. The app's manual and humidity-disable sentinels are outside these
 input ranges.

@@ -28,6 +28,7 @@ from .controls import (
     NumberControl,
     command_kinds,
     entity_keys,
+    legacy_mode,
     preset_matches,
 )
 from .models import (
@@ -185,6 +186,13 @@ class GafctlCoordinator(DataUpdateCoordinator[DeviceState]):
     async def async_set_mode(
         self, mode: str, *, only_if_current: str | None = None
     ) -> None:
+        if self.entry.data["backend"] == "legacy_ble":
+            if only_if_current is not None:
+                raise ApiError(
+                    "conditional mode changes are unsupported for this device"
+                )
+            await self._async_set_legacy_mode(mode)
+            return
         if mode not in QUICKCONNECT_MODES or (
             only_if_current is not None
             and (only_if_current not in QUICKCONNECT_MODES or mode != "off")
@@ -219,6 +227,24 @@ class GafctlCoordinator(DataUpdateCoordinator[DeviceState]):
                 else current in QUICKCONNECT_MODES and current != only_if_current
             )
             if not matches:
+                raise ApiError("confirmed control has no matching current mode")
+
+    async def _async_set_legacy_mode(self, mode: str) -> None:
+        if mode not in ("automatic", "timer", "off"):
+            raise ApiError("unsupported device mode")
+        async with self.command_lock:
+            self._require_active()
+            await self.async_refresh()
+            self._require_control("legacy_mode", "legacy_ble")
+            await self._async_submit_control({"kind": "legacy_mode", "mode": mode})
+            current = self._require_control("legacy_mode", "legacy_ble")
+            expected = (
+                "automatic"
+                if mode == "timer"
+                and current["settings"]["timer_original_minutes"] == 0
+                else mode
+            )
+            if legacy_mode(current) != expected:
                 raise ApiError("confirmed control has no matching current mode")
 
     async def async_set_number(self, control: NumberControl, value: float) -> None:

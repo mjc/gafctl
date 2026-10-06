@@ -117,18 +117,22 @@ impl LegacyBleRuntime {
         state: &DeviceService,
         command: DeviceCommand,
     ) -> Result<gafctl_protocol::ControlCommand, ControlAdmissionError> {
-        let thresholds = if crate::legacy_control::needs_threshold_read(command) {
+        let settings = if crate::legacy_control::needs_state_read(command) {
             let poll_id = self.reconciler.write().await.begin_poll();
             let result = self.probe(None).await;
-            let thresholds = probe_thresholds(&result);
+            let settings = probe_control_settings(&result);
             self.reconcile_poll_result(poll_id, result).await;
             state.publish_state().await;
-            thresholds
+            settings
         } else {
             None
         };
-        crate::legacy_control::prepare_control(command, thresholds)
-            .ok_or(ControlAdmissionError::ReadbackUnavailable)
+        crate::legacy_control::prepare_control(
+            command,
+            settings.map(|(thresholds, _)| thresholds),
+            settings.map(|(_, timer)| timer),
+        )
+        .ok_or(ControlAdmissionError::ReadbackUnavailable)
     }
 
     async fn execute_control_locked(
@@ -355,16 +359,23 @@ fn project_legacy_snapshot(snapshot: &DeviceSnapshot) -> Option<DeviceState> {
     Some(crate::legacy_projection::project_snapshot(snapshot))
 }
 
-fn probe_thresholds(
+fn probe_control_settings(
     result: &Result<ProbeResult, ProbeError>,
-) -> Option<gafctl_protocol::AutomaticThresholds> {
+) -> Option<(
+    gafctl_protocol::AutomaticThresholds,
+    gafctl_protocol::Minutes,
+)> {
     let Ok(ProbeResult::Queried { result, .. }) = result else {
         return None;
     };
     if result.state_error.is_some() {
         return None;
     }
-    result.snapshot.as_ref()?.thresholds.decoded().ok().copied()
+    let snapshot = result.snapshot.as_ref()?;
+    Some((
+        *snapshot.thresholds.decoded().ok()?,
+        snapshot.timer.as_ref()?.decoded().ok()?.original,
+    ))
 }
 
 fn record_poll_result(

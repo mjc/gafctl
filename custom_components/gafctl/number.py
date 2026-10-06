@@ -40,6 +40,8 @@ class GafctlNumber(GafctlEntity, NumberEntity):
         self._attr_name, self._attr_native_unit_of_measurement = PRESENTATION[
             control.key
         ]
+        if control.backend == "legacy_ble" and control.key == "timer_duration":
+            self._attr_name = "Run fan for"
         self._attr_native_min_value = control.minimum
         self._attr_native_max_value = control.maximum
         self._attr_native_step = control.step

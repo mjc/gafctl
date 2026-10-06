@@ -11,6 +11,7 @@ from .controls import (
     THRESHOLDS,
     TIMER_PRESETS,
     entity_keys,
+    legacy_mode,
     threshold_control_preset,
     timer_control_preset,
 )
@@ -43,18 +44,29 @@ async def async_setup_entry(
 
 
 class GafctlControlSelect(GafctlEntity, SelectEntity):
-    """A preset selector that checks BLE acknowledgement and readback."""
+    """A mode or preset selector with confirmed state readback."""
 
     _attr_entity_category = EntityCategory.CONFIG
 
     def __init__(self, coordinator: GafctlCoordinator, key: str) -> None:
         super().__init__(coordinator, key)
         self._attr_name, self._presets = SELECTS[key]
+        if key == "mode":
+            self._attr_entity_category = None
+        if key == "mode" and self._entry.data["backend"] == "legacy_ble":
+            self._presets = {
+                MODE_LABELS[mode]: mode for mode in ("automatic", "timer", "off")
+            }
         self._attr_options = list(self._presets)
 
     @property
     def available(self) -> bool:
-        command_kind = "quick_connect_mode" if self._key == "mode" else "legacy_preset"
+        backend = self._entry.data["backend"]
+        command_kind = (
+            ("legacy_mode" if backend == "legacy_ble" else "quick_connect_mode")
+            if self._key == "mode"
+            else "legacy_preset"
+        )
         return bool(
             super().available
             and self.coordinator.control_readings(
@@ -69,7 +81,11 @@ class GafctlControlSelect(GafctlEntity, SelectEntity):
         if not state:
             return None
         current = (
-            state["settings"]["mode"]
+            (
+                legacy_mode(state)
+                if self._entry.data["backend"] == "legacy_ble"
+                else state["settings"]["mode"]
+            )
             if self._key == "mode"
             else threshold_control_preset(state)
             if self._key == "automatic_thresholds"

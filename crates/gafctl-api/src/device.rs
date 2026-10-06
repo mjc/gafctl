@@ -98,6 +98,9 @@ pub enum EntitySource {
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum DeviceCommand {
+    LegacyMode {
+        mode: LegacyControlMode,
+    },
     LegacyPreset {
         preset: ControlPreset,
     },
@@ -134,6 +137,7 @@ pub enum DeviceCommand {
 impl DeviceCommand {
     pub const fn required_capability(self) -> CommandCapability {
         match self {
+            DeviceCommand::LegacyMode { .. } => CommandCapability::LegacyMode,
             DeviceCommand::LegacyPreset { preset } => CommandCapability::LegacyPreset(preset),
             DeviceCommand::LegacyAutomaticTemperature { .. } => {
                 CommandCapability::LegacyAutomaticTemperature
@@ -160,6 +164,14 @@ impl DeviceCommand {
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
+pub enum LegacyControlMode {
+    Automatic,
+    Timer,
+    Off,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum QuickConnectMode {
     Off,
     Automatic,
@@ -181,6 +193,7 @@ pub enum QuickConnectModeStatus {
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(tag = "kind", content = "value", rename_all = "snake_case")]
 pub enum CommandCapability {
+    LegacyMode,
     LegacyPreset(ControlPreset),
     LegacyAutomaticTemperature,
     LegacyAutomaticHumidity,
@@ -193,7 +206,8 @@ pub enum CommandCapability {
 impl CommandCapability {
     pub const fn backend(self) -> DeviceBackend {
         match self {
-            Self::LegacyPreset(_)
+            Self::LegacyMode
+            | Self::LegacyPreset(_)
             | Self::LegacyAutomaticTemperature
             | Self::LegacyAutomaticHumidity
             | Self::LegacyTimer => DeviceBackend::LegacyBle,
@@ -223,6 +237,7 @@ impl DeviceCapabilities {
             .into_iter()
             .map(CommandCapability::LegacyPreset)
             .chain([
+                CommandCapability::LegacyMode,
                 CommandCapability::LegacyAutomaticTemperature,
                 CommandCapability::LegacyAutomaticHumidity,
                 CommandCapability::LegacyTimer,

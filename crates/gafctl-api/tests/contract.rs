@@ -2,6 +2,27 @@ use gafctl_api::{CommandId, ControlStatus, DeviceControlV2Request, DeviceStateV2
 use serde_json::json;
 
 #[test]
+fn legacy_mode_command_accepts_only_automatic_timer_and_off() {
+    for mode in ["automatic", "timer", "off"] {
+        let wire = json!({"kind": "legacy_mode", "mode": mode});
+        let command: gafctl_api::DeviceCommand = serde_json::from_value(wire.clone()).unwrap();
+        assert_eq!(serde_json::to_value(command).unwrap(), wire);
+        assert_eq!(
+            command.required_capability().backend(),
+            gafctl_api::DeviceBackend::LegacyBle
+        );
+    }
+    for mode in ["manual", "ota", "unknown"] {
+        assert!(
+            serde_json::from_value::<gafctl_api::DeviceCommand>(
+                json!({"kind": "legacy_mode", "mode": mode})
+            )
+            .is_err()
+        );
+    }
+}
+
+#[test]
 fn adjustable_commands_accept_only_whole_values_in_their_backend_ranges() {
     for (kind, field, minimum, maximum) in [
         (

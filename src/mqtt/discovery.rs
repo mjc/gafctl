@@ -268,6 +268,7 @@ fn control_configs(device: &DeviceDescriptor) -> impl Iterator<Item = (String, V
         .filter_map(|capability| match capability {
             CommandCapability::LegacyPreset(preset) => Some(<&'static str>::from(preset)),
             CommandCapability::LegacyAutomaticTemperature
+            | CommandCapability::LegacyMode
             | CommandCapability::LegacyAutomaticHumidity
             | CommandCapability::LegacyTimer
             | CommandCapability::QuickConnectMode
@@ -289,6 +290,11 @@ fn control_configs(device: &DeviceDescriptor) -> impl Iterator<Item = (String, V
         (!options.is_empty())
             .then(|| select_config(device, key, name, &options, "legacy_preset", "preset"))
     });
+    let legacy_mode = device
+        .capabilities
+        .commands
+        .contains(&CommandCapability::LegacyMode)
+        .then(|| legacy_mode_config(device));
     let mode = device
         .capabilities
         .commands
@@ -309,7 +315,25 @@ fn control_configs(device: &DeviceDescriptor) -> impl Iterator<Item = (String, V
         config["entity_category"] = json!("diagnostic");
         component("sensor", "control_result", config)
     });
-    selectors.chain(mode).chain(result)
+    selectors.chain(legacy_mode).chain(mode).chain(result)
+}
+
+fn legacy_mode_config(device: &DeviceDescriptor) -> (String, Value) {
+    let (key, mut config) = select_config(
+        device,
+        "mode",
+        "Mode",
+        &["Automatic", "Timer", "Off"],
+        "legacy_mode",
+        "mode",
+    );
+    config["command_template"] = json!(command_template(
+        "{\"kind\":\"legacy_mode\",\"mode\":{{ value | lower | to_json }}}"
+    ));
+    config["value_template"] = json!(
+        "{% set settings = (value_json.state or {}).get('settings') or {} %}{% if settings.get('mode') == 'automatic' %}Automatic{% elif settings.get('mode') == 'timer' and settings.get('controller_fan_on') is sameas true %}Timer{% elif settings.get('mode') == 'timer' and settings.get('controller_fan_on') is sameas false %}Off{% else %}{{ none }}{% endif %}"
+    );
+    (key, config)
 }
 
 fn select_config(
@@ -323,7 +347,9 @@ fn select_config(
     let mut config = base(device, key, name, "state.settings.mode");
     set_command_topic(&mut config, device, "control/set");
     config["options"] = json!(options);
-    config["entity_category"] = json!("config");
+    if key != "mode" {
+        config["entity_category"] = json!("config");
+    }
     config["command_template"] = json!(command_template(&format!(
         "{{\"kind\":\"{kind}\",\"{field}\":{{{{ value | to_json }}}}}}"
     )));
@@ -528,7 +554,7 @@ fn number_controls(backend: DeviceBackend) -> impl Iterator<Item = NumberControl
     };
     let timer = NumberControl {
         key: "timer_duration",
-        name: "Set timer",
+        name: "Run fan for",
         kind: "legacy_timer",
         field: "minutes",
         reading: "state.settings.timer_original_minutes",
@@ -554,6 +580,7 @@ fn number_controls(backend: DeviceBackend) -> impl Iterator<Item = NumberControl
                 ..humidity
             },
             NumberControl {
+                name: "Set timer",
                 kind: "quick_connect_timer_duration",
                 reading: "state.settings.timer_duration_minutes",
                 capability: CommandCapability::QuickConnectTimerDuration,

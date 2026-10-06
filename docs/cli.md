@@ -76,8 +76,8 @@ CLI preset names map to API values:
 | --- | --- | --- |
 | `automatic-105-f-30-percent` | `automatic105_f30_percent` | Automatic, 105.0 °F and 30.0% |
 | `automatic-105-1-f-30-1-percent` | `automatic105_1_f30_1_percent` | Automatic, 105.1 °F and 30.1% |
-| `timer-clear` | `timer_clear` | Clear the timer |
-| `timer-one-minute` | `timer_one_minute` | One-minute timer |
+| `timer-clear` | `timer_clear` | Stop the fan and disable automatic operation |
+| `timer-one-minute` | `timer_one_minute` | Run for one minute, then stay off |
 
 QuickConnect controls require advertised capabilities and enabled cloud writes:
 

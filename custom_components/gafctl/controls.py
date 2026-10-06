@@ -139,7 +139,10 @@ THRESHOLDS = {
 _THRESHOLD_PRESETS: dict[tuple[float | None, float | None], str] = {
     values: preset for preset, values in THRESHOLDS.items()
 }
-TIMER_PRESETS = {"timer_clear": ("Clear timer", 0), "timer_one_minute": ("1 minute", 1)}
+TIMER_PRESETS = {
+    "timer_clear": ("Off (automatic disabled)", 0),
+    "timer_one_minute": ("Run for 1 minute", 1),
+}
 _TIMER_PRESETS: dict[int | None, str] = {
     duration: preset for preset, (_, duration) in TIMER_PRESETS.items()
 }
@@ -195,6 +198,8 @@ def entity_keys(device: Device | None) -> dict[str, set[str]]:
         }
     if backend == "legacy_ble" and "legacy_preset" in commands:
         entities["select"] = {"automatic_thresholds", "timer"}
+    if backend == "legacy_ble" and "legacy_mode" in commands:
+        entities.setdefault("select", set()).add("mode")
     if backend == "quick_connect" and "quick_connect_mode" in commands:
         entities["select"] = {"mode"}
         entities["switch"] = {f"{mode}_mode" for mode in MODE_LABELS if mode != "off"}
@@ -237,6 +242,18 @@ def mode_is(reported: object, expected: str) -> bool | None:
         if isinstance(reported, str) and reported in QUICKCONNECT_MODES
         else None
     )
+
+
+def legacy_mode(readings: Readings) -> str | None:
+    settings = readings["settings"]
+    if settings["backend"] != "legacy_ble":
+        return None
+    if settings["mode"] == "automatic":
+        return "automatic"
+    if settings["mode"] != "timer":
+        return None
+    fan = settings["controller_fan_on"]
+    return "timer" if fan is True else "off" if fan is False else None
 
 
 def tenths(value: int | None) -> float | None:

@@ -1,4 +1,4 @@
-use gafctl_api::DeviceCommand;
+use gafctl_api::{DeviceCommand, LegacyControlMode};
 use gafctl_protocol::{
     AutomaticThresholds, ControlCommand, HumidityTenthsPercent, Minutes, TemperatureTenthsF,
 };
@@ -6,8 +6,21 @@ use gafctl_protocol::{
 pub(crate) fn prepare_control(
     command: DeviceCommand,
     thresholds: Option<AutomaticThresholds>,
+    timer: Option<Minutes>,
 ) -> Option<ControlCommand> {
     match command {
+        DeviceCommand::LegacyMode { mode } => match mode {
+            LegacyControlMode::Automatic => automatic_command(thresholds?),
+            LegacyControlMode::Timer => {
+                let minutes = timer?.value();
+                if minutes == 0 {
+                    automatic_command(thresholds?)
+                } else {
+                    (minutes <= 360).then_some(ControlCommand::SetTimer(Minutes::new(minutes)))
+                }
+            }
+            LegacyControlMode::Off => Some(ControlCommand::SetTimer(Minutes::new(0))),
+        },
         DeviceCommand::LegacyPreset { preset } => Some(preset.command()),
         DeviceCommand::LegacyTimer { minutes } => {
             Some(ControlCommand::SetTimer(Minutes::new(minutes.value())))
@@ -42,11 +55,24 @@ pub(crate) fn prepare_control(
     }
 }
 
-pub(crate) const fn needs_threshold_read(command: DeviceCommand) -> bool {
+fn automatic_command(current: AutomaticThresholds) -> Option<ControlCommand> {
+    let humidity = current.humidity.value();
+    ((900..=1200).contains(&current.temperature.value())
+        && ((300..=800).contains(&humidity) || humidity == 1000))
+        .then_some(ControlCommand::SetAutomaticThresholds(current))
+}
+
+pub(crate) const fn needs_state_read(command: DeviceCommand) -> bool {
     match command {
-        DeviceCommand::LegacyAutomaticTemperature { .. }
+        DeviceCommand::LegacyMode {
+            mode: LegacyControlMode::Automatic | LegacyControlMode::Timer,
+        }
+        | DeviceCommand::LegacyAutomaticTemperature { .. }
         | DeviceCommand::LegacyAutomaticHumidity { .. } => true,
-        DeviceCommand::LegacyPreset { .. }
+        DeviceCommand::LegacyMode {
+            mode: LegacyControlMode::Off,
+        }
+        | DeviceCommand::LegacyPreset { .. }
         | DeviceCommand::LegacyTimer { .. }
         | DeviceCommand::QuickConnectMode { .. }
         | DeviceCommand::QuickConnectConditionalOff { .. }
@@ -70,6 +96,56 @@ mod tests {
     }
 
     #[test]
+    fn mode_changes_preserve_thresholds_and_use_bounded_timer_duration() {
+        let automatic = DeviceCommand::LegacyMode {
+            mode: LegacyControlMode::Automatic,
+        };
+        let timer = DeviceCommand::LegacyMode {
+            mode: LegacyControlMode::Timer,
+        };
+        let off = DeviceCommand::LegacyMode {
+            mode: LegacyControlMode::Off,
+        };
+        assert!(needs_state_read(automatic));
+        assert!(needs_state_read(timer));
+        assert!(!needs_state_read(off));
+        for current in [thresholds(1051, 301), thresholds(1050, 1000)] {
+            assert_eq!(
+                prepare_control(automatic, Some(current), None),
+                Some(ControlCommand::SetAutomaticThresholds(current))
+            );
+        }
+        for current in [
+            None,
+            Some(thresholds(0, 301)),
+            Some(thresholds(1050, 0)),
+            Some(thresholds(1201, 300)),
+            Some(thresholds(1050, 801)),
+        ] {
+            assert_eq!(prepare_control(automatic, current, None), None);
+        }
+        for minutes in [1, 60, 360] {
+            assert_eq!(
+                prepare_control(timer, None, Some(Minutes::new(minutes))),
+                Some(ControlCommand::SetTimer(Minutes::new(minutes)))
+            );
+        }
+        assert_eq!(prepare_control(timer, None, None), None);
+        assert_eq!(
+            prepare_control(timer, Some(thresholds(1051, 301)), Some(Minutes::new(0))),
+            Some(ControlCommand::SetAutomaticThresholds(thresholds(
+                1051, 301
+            )))
+        );
+        assert_eq!(prepare_control(timer, None, Some(Minutes::new(0))), None);
+        assert_eq!(prepare_control(timer, None, Some(Minutes::new(600))), None);
+        assert_eq!(
+            prepare_control(off, None, None),
+            Some(ControlCommand::SetTimer(Minutes::new(0)))
+        );
+    }
+
+    #[test]
     fn threshold_changes_preserve_other_raw_tenths_and_reject_unknown_values() {
         let temperature = DeviceCommand::LegacyAutomaticTemperature {
             temperature_f: 110.try_into().unwrap(),
@@ -78,30 +154,30 @@ mod tests {
             humidity_percent: 40.try_into().unwrap(),
         };
         assert_eq!(
-            prepare_control(temperature, Some(thresholds(1051, 301))),
+            prepare_control(temperature, Some(thresholds(1051, 301)), None),
             Some(ControlCommand::SetAutomaticThresholds(thresholds(
                 1100, 301
             )))
         );
         assert_eq!(
-            prepare_control(humidity, Some(thresholds(1051, 301))),
+            prepare_control(humidity, Some(thresholds(1051, 301)), None),
             Some(ControlCommand::SetAutomaticThresholds(thresholds(
                 1051, 400
             )))
         );
         assert_eq!(
-            prepare_control(temperature, Some(thresholds(1051, 1000))),
+            prepare_control(temperature, Some(thresholds(1051, 1000)), None),
             Some(ControlCommand::SetAutomaticThresholds(thresholds(
                 1100, 1000
             )))
         );
-        assert!(prepare_control(temperature, None).is_none());
-        assert!(prepare_control(humidity, None).is_none());
+        assert!(prepare_control(temperature, None, None).is_none());
+        assert!(prepare_control(humidity, None, None).is_none());
         for invalid in [0, 299, 801, 999, 1001, u16::MAX] {
-            assert!(prepare_control(temperature, Some(thresholds(1051, invalid))).is_none());
+            assert!(prepare_control(temperature, Some(thresholds(1051, invalid)), None).is_none());
         }
         for invalid in [0, 899, 1201, u16::MAX] {
-            assert!(prepare_control(humidity, Some(thresholds(invalid, 301))).is_none());
+            assert!(prepare_control(humidity, Some(thresholds(invalid, 301)), None).is_none());
         }
     }
 
@@ -111,7 +187,7 @@ mod tests {
             let command = DeviceCommand::LegacyTimer {
                 minutes: minutes.try_into().unwrap(),
             };
-            let prepared = prepare_control(command, None).unwrap();
+            let prepared = prepare_control(command, None, None).unwrap();
             assert_eq!(
                 prepared,
                 ControlCommand::SetTimer(gafctl_protocol::Minutes::new(minutes))

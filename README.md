@@ -120,7 +120,10 @@ Home Assistant exposes measurements, diagnostics, selectors, adjustable target
 numbers and timer duration for the original controller. Numbers use
 90–120 °F, 30–80%, and 0–360 timer minutes in whole-unit steps. The service reads
 and preserves the unchanged target before writing. Fixed threshold presets and
-one-minute/clear timer presets are also available. The fan flag reports the
+one-minute/off presets are also available. The Mode selector offers Automatic,
+Timer, and Off. Automatic uses the current thresholds; Off stops the fan until
+you select Automatic or start another timer. Timer uses the reported duration,
+or returns to Automatic when no duration is set. The fan flag reports the
 controller's on/off state; airflow is unmeasured.
 
 To change the API address, open the entry's menu and choose **Reconfigure**.

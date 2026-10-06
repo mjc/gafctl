@@ -65,6 +65,7 @@ from custom_components.gafctl import GafctlCoordinator
 from custom_components.gafctl import binary_sensor as gafctl_binary
 from custom_components.gafctl import button as gafctl_button
 from custom_components.gafctl import number as gafctl_number
+from custom_components.gafctl import select as gafctl_select
 from custom_components.gafctl import sensor as gafctl_sensor
 from custom_components.gafctl import switch as gafctl_switch
 from custom_components.gafctl.config_flow import GafctlConfigFlow
@@ -920,6 +921,7 @@ class RegistryTests(unittest.IsolatedAsyncioTestCase):
         backend = "quick_connect" if operation == "mode" else "legacy_ble"
         capability = {
             "mode": "quick_connect_mode",
+            "legacy_mode": "legacy_mode",
             "number": "legacy_automatic_temperature",
             "preset": "legacy_preset",
         }[operation]
@@ -931,6 +933,7 @@ class RegistryTests(unittest.IsolatedAsyncioTestCase):
             if operation == "mode"
             else legacy_settings(
                 mode="timer",
+                controller_fan_on=False,
                 automatic_temperature_tenths_f=1100,
                 timer_original_minutes=1,
                 timer_remaining_minutes=1,
@@ -941,6 +944,7 @@ class RegistryTests(unittest.IsolatedAsyncioTestCase):
         coordinator = coordinator_for(self.hass, client, selected, entry)
         submit = {
             "mode": partial(coordinator.async_set_mode, "manual"),
+            "legacy_mode": partial(coordinator.async_set_mode, "off"),
             "number": partial(
                 coordinator.async_set_number, NUMBER_CONTROLS["legacy_ble"][0], 110
             ),
@@ -951,7 +955,7 @@ class RegistryTests(unittest.IsolatedAsyncioTestCase):
     async def test_all_controls_preserve_unknown_request_when_refresh_fails(
         self,
     ) -> None:
-        for operation in ("mode", "number", "preset"):
+        for operation in ("mode", "legacy_mode", "number", "preset"):
             with self.subTest(operation=operation):
                 coordinator, client, _, old, _, submit = await self.control_case(
                     operation
@@ -968,7 +972,7 @@ class RegistryTests(unittest.IsolatedAsyncioTestCase):
                 self.assertFalse(coordinator.command_lock.locked())
 
     async def test_all_controls_recheck_identity_ownership_and_capabilities(self):
-        for operation in ("mode", "number", "preset"):
+        for operation in ("mode", "legacy_mode", "number", "preset"):
             for phase in ("before", "after"):
                 changes = (
                     ("owner", "capability")
@@ -1010,7 +1014,7 @@ class RegistryTests(unittest.IsolatedAsyncioTestCase):
                         self.assertFalse(coordinator.command_lock.locked())
 
     async def test_all_controls_propagate_cancellation_without_replaying(self) -> None:
-        for operation in ("mode", "number", "preset"):
+        for operation in ("mode", "legacy_mode", "number", "preset"):
             for phase in ("submit", "readback"):
                 with self.subTest(operation=operation, phase=phase):
                     coordinator, client, _, old, _, submit = await self.control_case(
@@ -1380,6 +1384,53 @@ class RegistryTests(unittest.IsolatedAsyncioTestCase):
                 "configured", {"kind": "legacy_preset", "preset": "timer_clear"}
             )
 
+    async def test_legacy_mode_selector_submits_and_confirms_all_three_modes(self):
+        for option, mode, fan, duration in (
+            ("Automatic", "automatic", False, 0),
+            ("Timer", "timer", True, 60),
+            ("Timer", "automatic", False, 0),
+            ("Off", "timer", False, 0),
+        ):
+            with self.subTest(option=option):
+                entry = await self.entry()
+                selected = device(commands=["legacy_mode"])
+                old = state_data(state=reported_state())
+                updated = old | {
+                    "state": reported_state(
+                        settings=legacy_settings(
+                            mode=mode,
+                            controller_fan_on=fan,
+                            automatic_temperature_tenths_f=1051,
+                            automatic_humidity_tenths_percent=301,
+                            timer_original_minutes=duration,
+                        )
+                    )
+                }
+                client = fake_client(devices=[selected], states=[old, updated])
+                coordinator = coordinator_for(self.hass, client, selected, entry)
+                coordinator.async_set_updated_data(old)
+                selectors = await self.platform_entities(gafctl_select, coordinator)
+                self.assertEqual(len(selectors), 1)
+                selector = selectors[0]
+                self.assertEqual(selector.options, ["Automatic", "Timer", "Off"])
+                self.assertIsNone(selector.entity_category)
+                self.assertTrue(selector.available)
+                await selector.async_select_option(option)
+                client.set_control.assert_awaited_once_with(
+                    "configured", {"kind": "legacy_mode", "mode": option.lower()}
+                )
+                self.assertEqual(
+                    selector.current_option,
+                    "Automatic" if option == "Timer" and duration == 0 else option,
+                )
+                client.fetch_state.side_effect = None
+                client.fetch_state.return_value = old | {
+                    "state": reported_state(settings=legacy_settings(mode="ota"))
+                }
+                with self.assertRaises(ApiError):
+                    await coordinator.async_set_mode("timer")
+                self.assertIsNone(selector.current_option)
+
     async def test_future_timestamp_does_not_extend_expiry_on_cached_response(self):
         entry = await self.entry()
         coordinator = coordinator_for(self.hass, AsyncMock(), device(), entry)
@@ -1723,7 +1774,31 @@ class RegistryTests(unittest.IsolatedAsyncioTestCase):
                     {"kind": "quick_connect_conditional_off", "only_if_current": mode},
                 )
                 self.assertIsNone(render("invalid")["command"])
-        self.assertEqual(checked, {"number", "switch"})
+            elif domain == "select" and config.get("options") == [
+                "Automatic",
+                "Timer",
+                "Off",
+            ]:
+                checked.add("legacy_mode")
+                for option in config["options"]:
+                    self.assertEqual(
+                        render(option)["command"],
+                        {"kind": "legacy_mode", "mode": option.lower()},
+                    )
+                for mode, fan, expected in (
+                    ("automatic", False, "Automatic"),
+                    ("timer", True, "Timer"),
+                    ("timer", False, "Off"),
+                    ("timer", None, None),
+                    ("ota", True, None),
+                ):
+                    self.assertEqual(
+                        self.render_settings(
+                            config, {"mode": mode, "controller_fan_on": fan}
+                        ),
+                        expected,
+                    )
+        self.assertEqual(checked, {"number", "switch", "legacy_mode"})
 
     async def test_generated_mqtt_binary_modes_and_presets_preserve_unknown(
         self,
