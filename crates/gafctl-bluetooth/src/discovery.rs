@@ -131,26 +131,30 @@ pub(super) async fn discover_candidates(
     scan_pending: &mut bool,
 ) -> Result<DiscoveryReport<Candidate>> {
     #[cfg(target_os = "linux")]
-    let existing_devices =
-        complete_before(operation_timeout, "list cached BLE peripherals", async {
+    // Configured IDs are selected by exact ID after the scan, not by freshness.
+    let scan_events = if requested_device_id.is_none() {
+        let existing_devices =
+            complete_before(operation_timeout, "list cached BLE peripherals", async {
+                adapter
+                    .peripherals()
+                    .await
+                    .context("list cached BLE peripherals")
+            })
+            .await?
+            .into_iter()
+            .map(|peripheral| peripheral.id())
+            .collect::<HashSet<_>>();
+        let events = complete_before(operation_timeout, "subscribe to BLE scan events", async {
             adapter
-                .peripherals()
+                .events()
                 .await
-                .context("list cached BLE peripherals")
+                .context("subscribe to BLE scan events")
         })
-        .await?
-        .into_iter()
-        .map(|peripheral| peripheral.id())
-        .collect::<HashSet<_>>();
-
-    #[cfg(target_os = "linux")]
-    let events = complete_before(operation_timeout, "subscribe to BLE scan events", async {
-        adapter
-            .events()
-            .await
-            .context("subscribe to BLE scan events")
-    })
-    .await?;
+        .await?;
+        Some((existing_devices, events))
+    } else {
+        None
+    };
 
     *scan_pending = true;
     let scan_start = complete_before(operation_timeout, "start BLE scan", async {
@@ -166,23 +170,28 @@ pub(super) async fn discover_candidates(
         return fail_with_cleanup(error, cleanup);
     }
     #[cfg(target_os = "linux")]
-    let fresh_devices = events
-        .take_until(sleep(scan_duration))
-        .filter_map(|event| future::ready(fresh_advertisement_id(event, &existing_devices)))
-        .collect::<HashSet<_>>()
-        .await;
+    let fresh_devices = if let Some((existing_devices, events)) = scan_events {
+        Some(
+            events
+                .take_until(sleep(scan_duration))
+                .filter_map(|event| future::ready(fresh_advertisement_id(event, &existing_devices)))
+                .collect::<HashSet<_>>()
+                .await,
+        )
+    } else {
+        sleep(scan_duration).await;
+        None
+    };
     #[cfg(not(target_os = "linux"))]
     sleep(scan_duration).await;
+    #[cfg(not(target_os = "linux"))]
+    let fresh_devices = None;
     stop_ble_scan(adapter, operation_timeout).await?;
     *scan_pending = false;
 
-    #[cfg(target_os = "linux")]
-    let fresh_devices = Some(&fresh_devices);
-    #[cfg(not(target_os = "linux"))]
-    let fresh_devices = None;
     collect_advertised_candidates(
         adapter,
-        fresh_devices,
+        fresh_devices.as_ref(),
         requested_device_id,
         operation_timeout,
     )
@@ -530,6 +539,16 @@ mod tests {
                 "id={id} observed={observed:?} selected={selected:?}"
             );
         }
+        assert!(should_inspect_peripheral(
+            &configured,
+            None,
+            Some(&configured_id)
+        ));
+        assert!(!should_inspect_peripheral(
+            &unrelated,
+            None,
+            Some(&configured_id)
+        ));
     }
 
     #[test]
