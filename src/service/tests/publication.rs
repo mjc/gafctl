@@ -91,10 +91,15 @@ async fn publication_timer_expires_state_while_backend_refresh_is_blocked_and_re
     fixture.entered.notified().await;
     let (updates, mut observed) = watch::channel(Arc::new(state.state_snapshot().await.unwrap()));
     state.attach_state_publication(updates, false);
+    let initial = { Arc::clone(&observed.borrow()) };
+    assert!(state.published_snapshot_is_current(&initial).await);
+    state.publish_state().await;
+    assert!(Arc::ptr_eq(&initial, &observed.borrow()));
     let (mut polling_tasks, stop_polls) = crate::server::start_polling(&state);
     stop_polls[2].abort();
     tokio::time::sleep(Duration::from_millis(20)).await;
     super::super::test_support::age_state_for_test(&state, &id, Duration::from_secs(91)).await;
+    assert!(!state.published_snapshot_is_current(&initial).await);
     let polling_state = state.clone();
     let polling_id = id.clone();
     let blocked_poll = tokio::spawn(async move { polling_state.refresh_device(&polling_id).await });

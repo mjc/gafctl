@@ -59,6 +59,20 @@ impl LegacyBleRuntime {
         response.last_error = poll_error.or(response.last_error.take());
     }
 
+    #[cfg(feature = "mqtt")]
+    pub(super) async fn state_response_matches(
+        &self,
+        response: &gafctl_api::DeviceStateV2Response,
+        now_unix_ms: Option<u64>,
+    ) -> bool {
+        let reconciler = self.reconciler.read().await;
+        let poll_error = reconciler.last_error();
+        let inventory_unavailable = poll_error.is_some() && reconciler.latest_snapshot().is_none();
+        self.device
+            .matches_response_at(response, now_unix_ms, poll_error, inventory_unavailable)
+            .await
+    }
+
     pub(super) fn new(peripheral_id: String, device: Arc<DeviceRuntime>) -> Self {
         Self {
             reconciler: Arc::new(RwLock::new(StateReconciler::default())),

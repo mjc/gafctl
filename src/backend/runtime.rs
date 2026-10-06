@@ -1,5 +1,6 @@
-use gafctl_api::DeviceState;
-use gafctl_api::{DeviceInventoryStatus, unix_millis};
+#[cfg(feature = "mqtt")]
+use gafctl_api::DeviceStateV2Response;
+use gafctl_api::{DeviceInventoryStatus, DeviceState, unix_millis};
 use std::{
     sync::{
         Arc,
@@ -48,19 +49,58 @@ enum RuntimeObservation {
 }
 
 impl RuntimeObservation {
-    fn snapshot_at(&self, now_unix_ms: Option<u64>) -> DeviceRuntimeSnapshot {
+    fn projection_at(
+        &self,
+        now_unix_ms: Option<u64>,
+    ) -> (
+        Option<&DeviceState>,
+        DeviceInventoryStatus,
+        Option<&'static str>,
+    ) {
         match self {
-            Self::Unknown => DeviceRuntimeSnapshot::default(),
+            Self::Unknown => (None, DeviceInventoryStatus::Unknown, None),
             Self::Available(state) => {
                 let fresh = now_unix_ms.is_some_and(|now| state_is_fresh(state, now));
-                DeviceRuntimeSnapshot {
-                    state: fresh.then(|| state.clone()),
-                    inventory_status: DeviceInventoryStatus::Present,
-                    last_error: (!fresh).then(|| "device state expired".to_owned()),
-                }
+                (
+                    fresh.then_some(state),
+                    DeviceInventoryStatus::Present,
+                    (!fresh).then_some("device state expired"),
+                )
             }
-            Self::Unavailable(reason) => reason.snapshot(),
+            Self::Unavailable(reason) => {
+                let (inventory_status, message) = reason.status_message();
+                (None, inventory_status, Some(message))
+            }
         }
+    }
+
+    fn snapshot_at(&self, now_unix_ms: Option<u64>) -> DeviceRuntimeSnapshot {
+        let (state, inventory_status, last_error) = self.projection_at(now_unix_ms);
+        DeviceRuntimeSnapshot {
+            state: state.cloned(),
+            inventory_status,
+            last_error: last_error.map(str::to_owned),
+        }
+    }
+
+    #[cfg(feature = "mqtt")]
+    fn matches_response_at(
+        &self,
+        response: &DeviceStateV2Response,
+        now_unix_ms: Option<u64>,
+        error_override: Option<&str>,
+        inventory_unavailable: bool,
+    ) -> bool {
+        let (state, inventory_status, last_error) = self.projection_at(now_unix_ms);
+        let inventory_status = if inventory_unavailable {
+            DeviceInventoryStatus::Unavailable
+        } else {
+            inventory_status
+        };
+        response.available == state.is_some()
+            && response.state.as_ref() == state
+            && response.inventory_status == inventory_status
+            && response.last_error.as_deref() == error_override.or(last_error)
     }
 }
 
@@ -73,8 +113,8 @@ enum RuntimeUnavailableReason {
 }
 
 impl RuntimeUnavailableReason {
-    fn snapshot(self) -> DeviceRuntimeSnapshot {
-        let (inventory_status, message) = match self {
+    fn status_message(self) -> (DeviceInventoryStatus, &'static str) {
+        match self {
             Self::Detail => (
                 DeviceInventoryStatus::Present,
                 "QuickConnect device detail unavailable",
@@ -91,11 +131,6 @@ impl RuntimeUnavailableReason {
                 DeviceInventoryStatus::Present,
                 "QuickConnect control readback unavailable",
             ),
-        };
-        DeviceRuntimeSnapshot {
-            state: None,
-            inventory_status,
-            last_error: Some(message.to_owned()),
         }
     }
 }
@@ -147,6 +182,22 @@ impl DeviceRuntime {
 
     async fn snapshot_at_option(&self, now_unix_ms: Option<u64>) -> DeviceRuntimeSnapshot {
         self.observation.read().await.snapshot_at(now_unix_ms)
+    }
+
+    #[cfg(feature = "mqtt")]
+    pub(crate) async fn matches_response_at(
+        &self,
+        response: &gafctl_api::DeviceStateV2Response,
+        now_unix_ms: Option<u64>,
+        error_override: Option<&str>,
+        inventory_unavailable: bool,
+    ) -> bool {
+        self.observation.read().await.matches_response_at(
+            response,
+            now_unix_ms,
+            error_override,
+            inventory_unavailable,
+        )
     }
 
     #[cfg(all(test, feature = "mqtt"))]

@@ -110,6 +110,25 @@ impl DeviceRegistry {
         )
     }
 
+    #[cfg(feature = "mqtt")]
+    pub(crate) fn discovery_identities_match(
+        &self,
+        identities: &[(DeviceId, DeviceBackend)],
+    ) -> bool {
+        let Some(((ble_id, ble_backend), quickconnect)) = identities.split_first() else {
+            return false;
+        };
+        ble_id.as_str() == "configured"
+            && *ble_backend == DeviceBackend::LegacyBle
+            && quickconnect.len() == self.identities.bindings.len()
+            && quickconnect
+                .iter()
+                .zip(&self.identities.bindings)
+                .all(|((id, backend), binding)| {
+                    id == &binding.local_id && *backend == DeviceBackend::QuickConnect
+                })
+    }
+
     pub fn mqtt_ownership_required(&self, ble_enabled: bool, account_id: Option<&str>) -> bool {
         self.identities.sources.iter().any(|(id, source)| {
             *source == EntitySource::Mqtt

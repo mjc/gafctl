@@ -1,7 +1,10 @@
 use std::sync::Arc;
+use std::time::SystemTime;
 
 use futures_util::{StreamExt, TryStreamExt, stream};
-use gafctl_api::{DeviceBackend, DeviceDescriptor, DeviceId, DeviceStateV2Response, ProxyId};
+use gafctl_api::{
+    DeviceBackend, DeviceDescriptor, DeviceId, DeviceStateV2Response, ProxyId, unix_millis,
+};
 use tokio::sync::{Mutex, watch};
 
 use super::{DeviceService, ServiceError};
@@ -44,6 +47,13 @@ impl DeviceService {
             return;
         };
         let _collection = publication.collection.lock().await;
+        let current = {
+            let current = publication.updates.borrow();
+            Arc::clone(&current)
+        };
+        if self.published_snapshot_is_current(&current).await {
+            return;
+        }
         match self.state_snapshot().await {
             Ok(snapshot) => {
                 self.publish_current_snapshot(&publication.updates, snapshot)
@@ -67,6 +77,43 @@ impl DeviceService {
         }
         updates.send_replace(Arc::new(snapshot));
         true
+    }
+
+    async fn published_snapshot_is_current(&self, snapshot: &StateSnapshot) -> bool {
+        let now_unix_ms = unix_millis(SystemTime::now());
+        let registry = self.registry.read().await;
+        if registry.proxy_id() != snapshot.proxy_id
+            || !registry.descriptors().eq(snapshot.descriptors.iter())
+            || !registry.discovery_identities_match(&snapshot.discovery_identities)
+        {
+            return false;
+        }
+        let mut publications = snapshot.publications.iter();
+        for descriptor in registry.descriptors() {
+            let Some(response) = publications.next() else {
+                return false;
+            };
+            if descriptor.id != response.id || descriptor.backend != response.backend {
+                return false;
+            }
+            let Some(runtime) = registry.runtime(&descriptor.id) else {
+                return false;
+            };
+            let current = if descriptor.backend == DeviceBackend::LegacyBle
+                && descriptor.id.as_str() == "configured"
+                && let Some(ble) = &self.ble_device
+            {
+                ble.state_response_matches(response, now_unix_ms).await
+            } else {
+                runtime
+                    .matches_response_at(response, now_unix_ms, None, false)
+                    .await
+            };
+            if !current {
+                return false;
+            }
+        }
+        publications.next().is_none()
     }
 
     pub(crate) async fn state_snapshot(&self) -> Result<StateSnapshot, ServiceError> {
