@@ -70,6 +70,11 @@ Each retry closes the preceding failed connection. Terminal setup cleanup
 belongs to the backend. Failed polls also back off with jitter, up to sixty
 seconds between attempts, and return to three-second polling after success.
 
+Tracked connection attempts are explicitly disconnected on every platform,
+including when the native connection has not completed. CoreBluetooth reports
+an in-progress connection as not connected; that flag does not cancel the
+connection attempt. Failed or timed-out cleanup remains pending for retry.
+
 Shutdown closes admission, interrupts the active exchange, drops the retained
 session, and disconnects the tracked peripheral. Cleanup remains bounded and
 is retried within the shared shutdown deadline if it fails. It does not disable

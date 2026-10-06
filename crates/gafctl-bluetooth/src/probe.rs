@@ -19,8 +19,6 @@ use tokio::sync::{Mutex, OnceCell};
 use tokio::time::{Instant, timeout_at};
 use tokio_util::sync::CancellationToken;
 
-#[cfg(not(target_os = "linux"))]
-use crate::lifecycle::recover_disconnect;
 use crate::{
     ProbeError, ProbeMode, ProbeOptions, ProbeResult, SHUTDOWN_CLEANUP_TIMEOUT,
     discovery::{
@@ -87,7 +85,6 @@ struct BleBackend {
     adapter: Option<Adapter>,
     pending_disconnect: Option<Peripheral>,
     scan_pending: bool,
-    force_disconnect_pending: bool,
     #[cfg(any(target_os = "linux", test))]
     startup_disconnect_pending: bool,
 }
@@ -100,7 +97,6 @@ impl Default for BleBackend {
             adapter: None,
             pending_disconnect: None,
             scan_pending: false,
-            force_disconnect_pending: false,
             #[cfg(any(target_os = "linux", test))]
             startup_disconnect_pending: true,
         }
@@ -130,7 +126,7 @@ impl ProbeClient {
             let mut backend = backend.lock_owned().await;
             if shutdown.token.is_cancelled() {
                 backend
-                    .cleanup_pending_until(shutdown.cleanup_deadline()?, false)
+                    .cleanup_pending_until(shutdown.cleanup_deadline()?)
                     .await
             } else {
                 backend
@@ -168,26 +164,15 @@ impl ProbeClient {
 }
 
 impl BleBackend {
-    async fn cleanup_pending_until(
-        &mut self,
-        deadline: Instant,
-        force_disconnect: bool,
-    ) -> AnyhowResult<()> {
+    async fn cleanup_pending_until(&mut self, deadline: Instant) -> AnyhowResult<()> {
         self.active_session = None;
         let adapter = self.adapter.clone();
-        drain_shutdown_resources(
+        drain_until_deadline(
             &mut self.pending_disconnect,
             &mut self.scan_pending,
-            &mut self.force_disconnect_pending,
             deadline,
-            force_disconnect,
-            |peripheral, force| async move {
-                disconnect_pending_resource(
-                    &peripheral,
-                    platform_timeout(Duration::from_secs(3)),
-                    force,
-                )
-                .await
+            |peripheral| async move {
+                disconnect_peripheral(&peripheral, platform_timeout(Duration::from_secs(3))).await
             },
             || async move {
                 let adapter = adapter.context("pending BLE scan cleanup has no adapter")?;
@@ -290,13 +275,10 @@ impl BleBackend {
 
     async fn cleanup_pending(&mut self, operation_timeout: Duration) -> AnyhowResult<()> {
         let adapter = self.adapter.clone();
-        let force_disconnect = self.force_disconnect_pending;
         drain_pending_cleanup(
             &mut self.pending_disconnect,
             &mut self.scan_pending,
-            |peripheral| async move {
-                disconnect_pending_resource(&peripheral, operation_timeout, force_disconnect).await
-            },
+            |peripheral| async move { disconnect_peripheral(&peripheral, operation_timeout).await },
             || async move {
                 let adapter = adapter.context("pending BLE scan cleanup has no adapter")?;
                 stop_ble_scan(&adapter, operation_timeout).await
@@ -435,11 +417,7 @@ trait CancellableBackend {
     }
 
     async fn run_operation(&mut self, options: ProbeOptions) -> AnyhowResult<Self::Output>;
-    async fn cleanup_until(
-        &mut self,
-        deadline: Instant,
-        force_disconnect: bool,
-    ) -> AnyhowResult<()>;
+    async fn cleanup_until(&mut self, deadline: Instant) -> AnyhowResult<()>;
 }
 
 impl CancellableBackend for BleBackend {
@@ -457,12 +435,8 @@ impl CancellableBackend for BleBackend {
         self.probe(options).await
     }
 
-    async fn cleanup_until(
-        &mut self,
-        deadline: Instant,
-        force_disconnect: bool,
-    ) -> AnyhowResult<()> {
-        self.cleanup_pending_until(deadline, force_disconnect).await
+    async fn cleanup_until(&mut self, deadline: Instant) -> AnyhowResult<()> {
+        self.cleanup_pending_until(deadline).await
     }
 }
 
@@ -481,14 +455,14 @@ async fn run_cancellable_operation<B: CancellableBackend>(
         }
         Ok(Err(error)) => {
             let cleanup = backend
-                .cleanup_until(Instant::now() + cleanup_timeout, false)
+                .cleanup_until(Instant::now() + cleanup_timeout)
                 .await;
             crate::lifecycle::fail_with_cleanup(error, cleanup)
         }
         Ok(Ok(result)) => Ok(result),
         Err(()) => {
             backend
-                .cleanup_until(shutdown.cleanup_deadline()?, true)
+                .cleanup_until(shutdown.cleanup_deadline()?)
                 .await
                 .context("BLE shutdown cleanup after cancelled operation")?;
             anyhow::bail!("BLE operation cancelled during shutdown");
@@ -525,58 +499,6 @@ where
         },
     )
     .await
-}
-
-async fn drain_shutdown_resources<T, D, DFut, S, SFut>(
-    pending_disconnect: &mut Option<T>,
-    scan_pending: &mut bool,
-    force_disconnect_pending: &mut bool,
-    deadline: Instant,
-    force_this_attempt: bool,
-    disconnect: D,
-    stop_scan: S,
-) -> AnyhowResult<()>
-where
-    T: Clone,
-    D: FnOnce(T, bool) -> DFut,
-    DFut: Future<Output = AnyhowResult<()>>,
-    S: FnOnce() -> SFut,
-    SFut: Future<Output = AnyhowResult<()>>,
-{
-    if force_this_attempt && pending_disconnect.is_some() {
-        *force_disconnect_pending = true;
-    }
-    let force_disconnect = *force_disconnect_pending;
-    let result = drain_until_deadline(
-        pending_disconnect,
-        scan_pending,
-        deadline,
-        |peripheral| disconnect(peripheral, force_disconnect),
-        stop_scan,
-    )
-    .await;
-    if pending_disconnect.is_none() {
-        *force_disconnect_pending = false;
-    }
-    result
-}
-
-async fn disconnect_pending_resource(
-    peripheral: &Peripheral,
-    operation_timeout: Duration,
-    force_disconnect: bool,
-) -> AnyhowResult<()> {
-    #[cfg(target_os = "linux")]
-    {
-        let _ = force_disconnect;
-        disconnect_peripheral(peripheral, operation_timeout).await
-    }
-    #[cfg(not(target_os = "linux"))]
-    if force_disconnect {
-        disconnect_peripheral(peripheral, operation_timeout).await
-    } else {
-        recover_disconnect(peripheral, operation_timeout).await
-    }
 }
 
 #[cfg(any(target_os = "linux", test))]
@@ -806,7 +728,6 @@ mod tests {
         struct PendingBackend {
             pending_disconnect: Option<(&'static str, bool)>,
             scan_pending: bool,
-            force_disconnect_pending: bool,
             disconnected: bool,
             scan_stopped: bool,
             disconnect_attempts: Vec<bool>,
@@ -826,24 +747,20 @@ mod tests {
             async fn cleanup_until(
                 &mut self,
                 deadline: tokio::time::Instant,
-                force_disconnect: bool,
             ) -> anyhow::Result<()> {
                 let fail_disconnect = std::mem::replace(&mut self.fail_first_disconnect, false);
                 let disconnect_attempts = &mut self.disconnect_attempts;
                 let disconnected = &mut self.disconnected;
                 let scan_stopped = &mut self.scan_stopped;
-                super::drain_shutdown_resources(
+                super::drain_until_deadline(
                     &mut self.pending_disconnect,
                     &mut self.scan_pending,
-                    &mut self.force_disconnect_pending,
                     deadline,
-                    force_disconnect,
-                    |(id, connected), force_disconnect| {
-                        disconnect_attempts.push(force_disconnect);
+                    |(id, connected)| {
+                        disconnect_attempts.push(connected);
                         *disconnected = true;
                         async move {
                             assert_eq!(id, "selected peripheral");
-                            assert!(force_disconnect);
                             assert!(!connected, "disconnect runs before Connected is true");
                             if fail_disconnect {
                                 Err(anyhow::anyhow!("simulated disconnect timeout"))
@@ -865,7 +782,6 @@ mod tests {
         let mut backend = PendingBackend {
             pending_disconnect: Some(("selected peripheral", false)),
             scan_pending: true,
-            force_disconnect_pending: false,
             disconnected: false,
             scan_stopped: false,
             disconnect_attempts: Vec::new(),
@@ -894,19 +810,16 @@ mod tests {
             Some(("selected peripheral", false))
         );
         assert!(!backend.scan_pending);
-        assert!(backend.force_disconnect_pending);
-        assert_eq!(backend.disconnect_attempts, [true]);
+        assert_eq!(backend.disconnect_attempts, [false]);
 
         super::CancellableBackend::cleanup_until(
             &mut backend,
             shutdown.cleanup_deadline().unwrap(),
-            false,
         )
         .await
-        .expect("waiter retries with the cancellation force flag");
+        .expect("waiter retries the same tracked pending connection");
         assert!(backend.pending_disconnect.is_none());
-        assert!(!backend.force_disconnect_pending);
-        assert_eq!(backend.disconnect_attempts, [true, true]);
+        assert_eq!(backend.disconnect_attempts, [false, false]);
     }
 
     #[tokio::test]
@@ -926,7 +839,6 @@ mod tests {
             async fn cleanup_until(
                 &mut self,
                 _deadline: tokio::time::Instant,
-                _force: bool,
             ) -> anyhow::Result<()> {
                 self.cleaned = true;
                 Ok(())

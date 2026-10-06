@@ -124,20 +124,6 @@ pub(super) async fn disconnect_peripheral(
     .await
 }
 
-#[cfg(not(target_os = "linux"))]
-pub(super) async fn recover_disconnect(
-    peripheral: &Peripheral,
-    operation_timeout: Duration,
-) -> Result<()> {
-    complete_before(operation_timeout, "recover BLE disconnect", async {
-        if connected_or_absent(peripheral).await? {
-            disconnect_peripheral(peripheral, operation_timeout).await?;
-        }
-        Ok(())
-    })
-    .await
-}
-
 async fn connected_or_absent(peripheral: &Peripheral) -> Result<bool> {
     peripheral
         .is_connected()
