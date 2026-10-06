@@ -109,7 +109,7 @@ For automatic startup and logs, follow the [service setup guide](docs/deployment
    The resulting path should include `custom_components/gafctl/manifest.json`.
 2. Restart Home Assistant.
 3. Open **Settings → Devices & services → Add integration** and search for
-   **Gafctl GAF Vent**.
+   **GAF Attic Vent (via gafctl)**.
 4. Enter `http://GAFCTL_HOST:8787`, replacing the host with your service's address.
    Use the base address without `/api/v2`. Replace any prefilled address.
 5. Select the fans to add. Each selected fan gets its own integration entry.

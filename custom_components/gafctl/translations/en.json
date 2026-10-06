@@ -2,8 +2,8 @@
   "config": {
     "step": {
       "user": {
-        "title": "Connect to Gafctl",
-        "description": "Enter the local address of the Gafctl API.",
+        "title": "Connect to gafctl",
+        "description": "Enter the local address of the gafctl API.",
         "data": {
           "api_url": "API address"
         }
@@ -17,7 +17,7 @@
       },
       "reconfigure": {
         "title": "Change API address",
-        "description": "Enter the new address of the same Gafctl proxy.",
+        "description": "Enter the new address of the same gafctl proxy.",
         "data": {
           "api_url": "API address"
         }
@@ -25,7 +25,7 @@
     },
     "error": {
       "invalid_url": "Enter a valid HTTP or HTTPS address.",
-      "cannot_connect": "Cannot reach the Gafctl API or its response was invalid.",
+      "cannot_connect": "Cannot reach the gafctl API or its response was invalid.",
       "no_device": "The API did not report an unconfigured device owned by HTTP.",
       "device_unavailable": "A selected device changed or is no longer available.",
       "wrong_device": "This address does not report the configured proxy and device."

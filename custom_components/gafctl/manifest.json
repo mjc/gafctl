@@ -1,6 +1,6 @@
 {
   "domain": "gafctl",
-  "name": "Gafctl GAF Vent",
+  "name": "GAF Attic Vent (via gafctl)",
   "codeowners": [
     "@mjc"
   ],

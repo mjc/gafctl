@@ -220,8 +220,8 @@ service name, in the integration.
 
 1. In HACS, open **⋮ → Custom repositories**.
 2. Add `https://github.com/mjc/gafctl` with type **Integration**.
-3. Find **Gafctl GAF Vent**, download it, and restart Home Assistant.
-4. Open **Settings → Devices & services → Add integration → Gafctl GAF Vent**.
+3. Find **GAF Attic Vent (via gafctl)**, download it, and restart Home Assistant.
+4. Open **Settings → Devices & services → Add integration → GAF Attic Vent (via gafctl)**.
 5. Enter `http://GAFCTL_HOST:8787` and select the fans to add.
 
 HACS updates the Python integration separately from the server. Keep their
@@ -340,7 +340,7 @@ services.home-assistant.customComponents = [
 ];
 ```
 
-Rebuild the host, then add **Gafctl GAF Vent** in **Settings → Devices & services**.
+Rebuild the host, then add **GAF Attic Vent (via gafctl)** in **Settings → Devices & services**.
 This package installs the integration; configure the server separately.
 
 There is no nix-darwin service module. On macOS, run the CLI or server natively

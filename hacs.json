@@ -1,5 +1,5 @@
 {
-  "name": "Gafctl GAF Vent",
+  "name": "GAF Attic Vent (via gafctl)",
   "render_readme": true,
   "homeassistant": "2026.9.4"
 }

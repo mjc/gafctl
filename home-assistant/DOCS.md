@@ -39,7 +39,7 @@ sources. MQTT discovery must be enabled for this request to succeed. To use the
 HTTP integration, assign both sources to `http`. Ownership persists across app
 restarts.
 
-For HTTP, install the separate **Gafctl GAF Vent** integration through the HACS
+For HTTP, install the separate **GAF Attic Vent (via gafctl)** integration through the HACS
 custom repository `https://github.com/mjc/gafctl`, or copy the repository's
 `custom_components/gafctl` directory into your Home Assistant configuration.
 The integration requires Home Assistant 2026.9.4 or newer. Restart Home Assistant
