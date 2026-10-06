@@ -43,8 +43,8 @@ impl ControlAdmissionError {
 }
 
 impl LegacyBleRuntime {
-    pub(super) async fn wait_until_idle(&self) {
-        self.ble_client.wait_until_idle().await;
+    pub(super) async fn wait_until_idle(&self) -> Result<(), gafctl_bluetooth::ProbeError> {
+        self.ble_client.wait_until_idle().await
     }
 
     pub(super) async fn decorate_state_response(

@@ -46,8 +46,16 @@ impl ProbeClient {
     }
 
     /// Wait for the current operation and its cleanup, including a detached query.
-    pub async fn wait_until_idle(&self) {
-        drop(self.backend.lock().await);
+    pub async fn wait_until_idle(&self) -> Result<(), ProbeError> {
+        let backend = Arc::clone(&self.backend);
+        finish_without_cancelling(async move {
+            let mut backend = backend.lock_owned().await;
+            backend
+                .cleanup_pending(platform_timeout(Duration::from_secs(3)))
+                .await
+        })
+        .await
+        .map_err(ProbeError::classify)
     }
 
     /// Discover GAF BLE peripherals and, when selected, query or control one.
@@ -60,23 +68,26 @@ impl ProbeClient {
 }
 
 impl BleBackend {
+    async fn cleanup_pending(&mut self, operation_timeout: Duration) -> AnyhowResult<()> {
+        let adapter = self.adapter.clone();
+        drain_pending_cleanup(
+            &mut self.pending_disconnect,
+            &mut self.scan_pending,
+            |peripheral| async move { recover_disconnect(&peripheral, operation_timeout).await },
+            || async move {
+                let adapter = adapter.context("pending BLE scan cleanup has no adapter")?;
+                stop_ble_scan(&adapter, operation_timeout).await
+            },
+        )
+        .await
+    }
+
     async fn probe(&mut self, options: ProbeOptions) -> AnyhowResult<ProbeResult> {
-        let BleBackend {
-            manager,
-            adapter,
-            pending_disconnect,
-            scan_pending,
+        self.cleanup_pending(platform_timeout(options.response_timeout))
+            .await?;
+        let Self {
+            manager, adapter, ..
         } = self;
-        if let Some(peripheral) = pending_disconnect.as_ref() {
-            recover_disconnect(peripheral, platform_timeout(options.response_timeout)).await?;
-            *pending_disconnect = None;
-        }
-        if *scan_pending {
-            if let Some(adapter) = adapter.as_ref() {
-                stop_ble_scan(adapter, platform_timeout(options.response_timeout)).await?;
-            }
-            *scan_pending = false;
-        }
         let manager = manager
             .get_or_try_init(|| async {
                 complete_before(
@@ -108,7 +119,13 @@ impl BleBackend {
             adapter.as_ref().expect("adapter initialized above")
         };
 
-        probe_with_adapter(selected_adapter, options, pending_disconnect, scan_pending).await
+        probe_with_adapter(
+            selected_adapter,
+            options,
+            &mut self.pending_disconnect,
+            &mut self.scan_pending,
+        )
+        .await
     }
 }
 
@@ -118,6 +135,51 @@ async fn finish_without_cancelling<T: Send + 'static>(
     tokio::spawn(operation)
         .await
         .context("BLE operation task failed")?
+}
+
+async fn drain_pending_cleanup<T, D, DFut, S, SFut>(
+    pending_disconnect: &mut Option<T>,
+    scan_pending: &mut bool,
+    disconnect: D,
+    stop_scan: S,
+) -> AnyhowResult<()>
+where
+    T: Clone,
+    D: FnOnce(T) -> DFut,
+    DFut: Future<Output = AnyhowResult<()>>,
+    S: FnOnce() -> SFut,
+    SFut: Future<Output = AnyhowResult<()>>,
+{
+    let disconnect = if let Some(peripheral) = pending_disconnect.as_ref() {
+        match disconnect(peripheral.clone()).await {
+            Ok(()) => {
+                *pending_disconnect = None;
+                Ok(())
+            }
+            Err(error) => Err(error),
+        }
+    } else {
+        Ok(())
+    };
+    let scan = if *scan_pending {
+        match stop_scan().await {
+            Ok(()) => {
+                *scan_pending = false;
+                Ok(())
+            }
+            Err(error) => Err(error),
+        }
+    } else {
+        Ok(())
+    };
+    match (disconnect, scan) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(disconnect), Ok(())) => Err(disconnect).context("retry pending BLE disconnect"),
+        (Ok(()), Err(scan)) => Err(scan).context("retry pending BLE scan stop"),
+        (Err(disconnect), Err(scan)) => Err(anyhow::anyhow!(
+            "disconnect cleanup failed ({disconnect:#}); scan cleanup failed ({scan:#})"
+        )),
+    }
 }
 
 impl Default for ProbeClient {
@@ -236,7 +298,141 @@ mod tests {
         tokio::time::timeout(std::time::Duration::from_secs(1), idle)
             .await
             .unwrap()
-            .unwrap();
+            .unwrap()
+            .expect("idle cleanup succeeds");
         assert!(client.backend.try_lock().is_ok());
+    }
+
+    #[tokio::test]
+    async fn wait_until_idle_reports_pending_scan_without_adapter_and_preserves_it() {
+        let client = super::ProbeClient::new();
+        client.backend.lock().await.scan_pending = true;
+
+        let error = client
+            .wait_until_idle()
+            .await
+            .expect_err("pending scan cleanup without an adapter must fail");
+
+        assert!(format!("{error:#}").contains("pending BLE scan cleanup has no adapter"));
+        let backend = client.backend.lock().await;
+        assert!(backend.scan_pending);
+        assert!(backend.adapter.is_none());
+    }
+
+    #[tokio::test]
+    async fn pending_cleanup_retries_only_pending_resources_and_retains_failures() {
+        use std::{cell::Cell, future};
+
+        let disconnect_attempts = Cell::new(0);
+        let mut pending_disconnect = Some("peripheral");
+        let scan_attempts = Cell::new(0);
+        let mut scan_pending = true;
+        let error = super::drain_pending_cleanup(
+            &mut pending_disconnect,
+            &mut scan_pending,
+            |peripheral| {
+                disconnect_attempts.set(disconnect_attempts.get() + 1);
+                async move {
+                    assert_eq!(peripheral, "peripheral");
+                    Err(anyhow::anyhow!("disconnect failed"))
+                }
+            },
+            || {
+                scan_attempts.set(scan_attempts.get() + 1);
+                future::ready(Err(anyhow::anyhow!("stop scan failed")))
+            },
+        )
+        .await
+        .expect_err("both failed cleanup operations must be reported");
+        assert!(format!("{error:#}").contains("disconnect failed"));
+        assert!(format!("{error:#}").contains("stop scan failed"));
+        assert_eq!(disconnect_attempts.get(), 1);
+        assert_eq!(pending_disconnect, Some("peripheral"));
+        assert!(scan_pending);
+        assert_eq!(scan_attempts.get(), 1);
+
+        super::drain_pending_cleanup(
+            &mut pending_disconnect,
+            &mut scan_pending,
+            |_| async { Ok(()) },
+            || {
+                scan_attempts.set(scan_attempts.get() + 1);
+                future::ready(Ok(()))
+            },
+        )
+        .await
+        .expect("pending cleanup retries succeed");
+        assert_eq!(pending_disconnect, None);
+        assert!(!scan_pending);
+        assert_eq!(scan_attempts.get(), 2);
+
+        let disconnect_attempts_when_empty = disconnect_attempts.get();
+        let scan_attempts_when_empty = scan_attempts.get();
+        super::drain_pending_cleanup(
+            &mut pending_disconnect,
+            &mut scan_pending,
+            |_| async {
+                disconnect_attempts.set(disconnect_attempts.get() + 1);
+                Ok(())
+            },
+            || {
+                scan_attempts.set(scan_attempts.get() + 1);
+                future::ready(Ok(()))
+            },
+        )
+        .await
+        .expect("empty state needs no cleanup");
+        assert_eq!(disconnect_attempts.get(), disconnect_attempts_when_empty);
+        assert_eq!(scan_attempts.get(), scan_attempts_when_empty);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn shutdown_timeout_keeps_pending_cleanup_serialized_and_retryable() {
+        use std::sync::Arc;
+        use tokio::sync::{Mutex, oneshot};
+
+        #[derive(Default)]
+        struct Pending {
+            disconnect: Option<u8>,
+            scan: bool,
+        }
+
+        let pending = Arc::new(Mutex::new(Pending {
+            disconnect: Some(1),
+            scan: true,
+        }));
+        let guard = Arc::clone(&pending).lock_owned().await;
+        let (started, did_start) = oneshot::channel();
+        let (finish, can_finish) = oneshot::channel();
+        let drain = super::finish_without_cancelling(async move {
+            let mut guard = guard;
+            let Pending { disconnect, scan } = &mut *guard;
+            super::drain_pending_cleanup(
+                disconnect,
+                scan,
+                |_| async {
+                    started.send(()).unwrap();
+                    can_finish.await.unwrap();
+                    Err(anyhow::anyhow!("disconnect still failed"))
+                },
+                || async { Err(anyhow::anyhow!("scan stop failed")) },
+            )
+            .await
+        });
+        let shutdown = tokio::spawn(async move {
+            tokio::time::timeout(std::time::Duration::from_secs(5), drain).await
+        });
+
+        did_start.await.unwrap();
+        tokio::time::advance(std::time::Duration::from_secs(5)).await;
+        assert!(shutdown.await.unwrap().is_err());
+        assert!(pending.try_lock().is_err());
+
+        finish.send(()).unwrap();
+        let pending = tokio::time::timeout(std::time::Duration::from_secs(1), pending.lock())
+            .await
+            .expect("detached cleanup eventually releases backend");
+        assert_eq!(pending.disconnect, Some(1));
+        assert!(pending.scan);
     }
 }

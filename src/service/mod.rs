@@ -97,12 +97,14 @@ impl DeviceService {
     }
 
     pub(crate) async fn finish_backend_cleanup(&self, deadline: tokio::time::Instant) {
-        if let Some(ble) = &self.ble_device
-            && tokio::time::timeout_at(deadline, ble.wait_until_idle())
-                .await
-                .is_err()
-        {
-            tracing::warn!("BLE shutdown cleanup deadline exceeded");
+        if let Some(ble) = &self.ble_device {
+            match tokio::time::timeout_at(deadline, ble.wait_until_idle()).await {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => {
+                    tracing::warn!(error = %format_args!("{error:#}"), "BLE shutdown cleanup failed");
+                }
+                Err(_) => tracing::warn!("BLE shutdown cleanup deadline exceeded"),
+            }
         }
     }
 }
