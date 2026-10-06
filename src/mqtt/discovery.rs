@@ -344,9 +344,6 @@ fn select_config(
     let mut config = base(device, key, name, "state.settings.mode");
     set_command_topic(&mut config, device, "control/set");
     config["options"] = json!(options);
-    if key != "mode" {
-        config["entity_category"] = json!("config");
-    }
     config["command_template"] = json!(command_template(&format!(
         "{{\"kind\":\"{kind}\",\"{field}\":{{{{ value | to_json }}}}}}"
     )));

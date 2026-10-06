@@ -1393,7 +1393,7 @@ class RegistryTests(unittest.IsolatedAsyncioTestCase):
         ):
             with self.subTest(option=option):
                 entry = await self.entry()
-                selected = device(commands=["legacy_mode"])
+                selected = device(commands=["legacy_mode", "legacy_preset"])
                 old = state_data(state=reported_state())
                 updated = old | {
                     "state": reported_state(
@@ -1410,8 +1410,11 @@ class RegistryTests(unittest.IsolatedAsyncioTestCase):
                 coordinator = coordinator_for(self.hass, client, selected, entry)
                 coordinator.async_set_updated_data(old)
                 selectors = await self.platform_entities(gafctl_select, coordinator)
-                self.assertEqual(len(selectors), 1)
-                selector = selectors[0]
+                self.assertEqual(len(selectors), 2)
+                self.assertTrue(all(item.entity_category is None for item in selectors))
+                selector = next(
+                    item for item in selectors if item.unique_id.endswith("_mode")
+                )
                 self.assertEqual(selector.options, ["Automatic", "Timer", "Off"])
                 self.assertIsNone(selector.entity_category)
                 self.assertTrue(selector.available)
@@ -1726,6 +1729,8 @@ class RegistryTests(unittest.IsolatedAsyncioTestCase):
                     config["unique_id"],
                     f"{identifier}_{key.removeprefix(f'{domain}_')}",
                 )
+                if domain == "select":
+                    self.assertNotIn("entity_category", config)
                 configs.append((key, domain, config))
         self.assertTrue(configs, "generated discovery fixture has no active components")
         return configs

@@ -1,7 +1,6 @@
-"""Selectors for GAF threshold and timer presets and QuickConnect modes."""
+"""Selectors for GAF modes and automatic threshold presets."""
 
 from homeassistant.components.select import SelectEntity
-from homeassistant.const import EntityCategory
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
@@ -42,13 +41,9 @@ async def async_setup_entry(
 class GafctlControlSelect(GafctlEntity, SelectEntity):
     """A mode or preset selector with confirmed state readback."""
 
-    _attr_entity_category = EntityCategory.CONFIG
-
     def __init__(self, coordinator: GafctlCoordinator, key: str) -> None:
         super().__init__(coordinator, key)
         self._attr_name, self._presets = SELECTS[key]
-        if key == "mode":
-            self._attr_entity_category = None
         if key == "mode" and self._entry.data["backend"] == "legacy_ble":
             self._presets = {
                 MODE_LABELS[mode]: mode for mode in ("automatic", "timer", "off")
