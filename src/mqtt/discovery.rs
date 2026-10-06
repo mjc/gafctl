@@ -249,7 +249,7 @@ fn ble_sensors(backend: DeviceBackend) -> impl Iterator<Item = Sensor> {
         },
         Sensor {
             key: "timer_original",
-            name: "Timer original duration",
+            name: "Timer duration",
             field: "state.settings.timer_original_minutes",
             unit: Some("min"),
             class: Some("duration"),
@@ -528,7 +528,7 @@ fn number_controls(backend: DeviceBackend) -> impl Iterator<Item = NumberControl
     };
     let timer = NumberControl {
         key: "timer_duration",
-        name: "Timer duration",
+        name: "Set timer",
         kind: "legacy_timer",
         field: "minutes",
         reading: "state.settings.timer_original_minutes",

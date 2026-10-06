@@ -18,6 +18,7 @@ from .client import ApiClient
 from .const import (
     CLOUD_UPDATE_INTERVAL,
     CONF_DEVICE_ID,
+    MAX_CLOCK_SKEW,
     READING_MAX_AGE,
     UPDATE_INTERVAL,
 )
@@ -56,6 +57,7 @@ class GafctlCoordinator(DataUpdateCoordinator[DeviceState]):
         self.command_lock = asyncio.Lock()
         self._reload_task: asyncio.Task[None] | None = None
         self._expiry_cancel: Callable[[], None] | None = None
+        self._reading_expiry: tuple[float, float] | None = None
         self._unloaded = False
         self._entities_loaded = False
         super().__init__(
@@ -111,9 +113,14 @@ class GafctlCoordinator(DataUpdateCoordinator[DeviceState]):
             if value is not None
         ]
         now = time()
-        if fetched is None or any(value > now for value in timestamps):
+        if fetched is None or any(value > now + MAX_CLOCK_SKEW for value in timestamps):
             return self._expired_readings(data)
-        remaining = min(timestamps) + READING_MAX_AGE - now
+        observed = min(timestamps)
+        deadline = min(now, observed) + READING_MAX_AGE
+        if self._reading_expiry is not None and self._reading_expiry[0] == observed:
+            deadline = min(deadline, self._reading_expiry[1])
+        self._reading_expiry = (observed, deadline)
+        remaining = deadline - now
         if remaining <= 0:
             return self._expired_readings(data)
 

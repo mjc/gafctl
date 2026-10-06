@@ -54,7 +54,7 @@ SENSORS: dict[Backend, dict[str, SensorReading]] = {
             "Timer remaining", ("settings", "timer_remaining_minutes"), "min"
         ),
         "timer_original": SensorReading(
-            "Original timer setting", ("settings", "timer_original_minutes"), "min"
+            "Timer duration", ("settings", "timer_original_minutes"), "min"
         ),
     },
     "quick_connect": _COMMON_SENSORS

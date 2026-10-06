@@ -19,8 +19,8 @@ A direct CLI operation closes its connection before returning.
 | Services | Service `00FF`, characteristic `FF01` | Same UUIDs; require read, write, and notify properties |
 | Responses | Enable local notifications, write CCCD `2902`, then read FF01 | Register native notifications, subscribe, then read FF01; the OS handles CCCD |
 | Initialization | Identity → sensors → thresholds → mode | `idg` → `sdg` → `atg` → `dmg`, awaiting each reply |
-| Timer initialization | Read timer for timer mode with fan on | Request `ttg` for `dmrtn`; timer observations otherwise absent |
-| Normal polling | Request sensors every three seconds | Read sensors, thresholds, mode, and conditional timer three seconds after the preceding successful poll completes |
+| Timer initialization | Read timer for timer mode with fan on | Request `ttg` on every poll, including when the fan is off |
+| Normal polling | Request sensors every three seconds | Read sensors, thresholds, mode, and timer three seconds after the preceding successful poll completes |
 | Ordinary controls | `ams` / `tms`, ASCII and LF, firmware version 2 or later | Same encoding and firmware gate; no sent control is automatically replayed |
 | Teardown | Disconnect, close GATT, clear the handle | Drop the stream/session and disconnect the tracked native peripheral |
 
@@ -36,11 +36,12 @@ saved automatic thresholds: connecting for readings must not change settings.
 ## Settings and controls
 
 Identity is connection-scoped metadata. Each published poll reads sensors,
-automatic thresholds, mode, and timer when timer mode is running. The Android
+automatic thresholds, mode, and timer. The Android
 app's recurring request reads sensors only; its mode and timer display can be
 stale. Gafctl reads the changing fields together so Home Assistant receives
 current settings and fan status. These reads share the retained connection.
-Timer values are null when no timer reply was requested.
+Timer reads also run when the fan is off, preserving the controller's reported
+remaining time and starting duration.
 
 The reading timestamp starts when the sensor reply arrives. Later replies and
 unsolicited frames do not renew that timestamp. HTTP and MQTT freshness use

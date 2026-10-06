@@ -1338,13 +1338,80 @@ class RegistryTests(unittest.IsolatedAsyncioTestCase):
             schedule.call_args.args[2](None)
             self.assertIs(coordinator.data, newer)
 
+    async def test_confirmed_clear_timer_accepts_small_clock_skew(self):
+        coordinator, client, _, old, _, _ = await self.control_case("preset")
+        new = old | {
+            "state": readings(
+                settings=legacy_settings(
+                    mode="timer",
+                    controller_fan_on=False,
+                    timer_remaining_minutes=0,
+                    timer_original_minutes=0,
+                ),
+                provenance={
+                    "backend": "legacy_ble",
+                    "fetched_at_unix_ms": 100005,
+                    "observed_at_unix_ms": 100005,
+                },
+            )
+        }
+        with (
+            patch("custom_components.gafctl.coordinator.time", return_value=100),
+            patch("custom_components.gafctl.coordinator.async_call_later") as schedule,
+        ):
+            client.fetch_state.side_effect = [
+                old
+                | {
+                    "state": old["state"]
+                    | {
+                        "provenance": {
+                            "backend": "legacy_ble",
+                            "fetched_at_unix_ms": 99000,
+                            "observed_at_unix_ms": 99000,
+                        }
+                    }
+                },
+                new,
+            ]
+            await coordinator.async_set_preset("timer_clear")
+            self.assertIsNotNone(coordinator.current_readings)
+            self.assertEqual(schedule.call_args.args[1], 90)
+            client.set_control.assert_awaited_once_with(
+                "configured", {"kind": "legacy_preset", "preset": "timer_clear"}
+            )
+
+    async def test_future_timestamp_does_not_extend_expiry_on_cached_response(self):
+        entry = await self.entry()
+        coordinator = coordinator_for(self.hass, AsyncMock(), device(), entry)
+        response = state_data(
+            state=reported_state(
+                provenance={
+                    "backend": "legacy_ble",
+                    "fetched_at_unix_ms": 100005,
+                    "observed_at_unix_ms": 100005,
+                }
+            )
+        )
+        with (
+            patch("custom_components.gafctl.coordinator.time") as now,
+            patch("custom_components.gafctl.coordinator.async_call_later") as schedule,
+        ):
+            for instant, remaining in ((100, 90), (103, 87)):
+                now.return_value = instant
+                coordinator.async_set_updated_data(response)
+                self.assertEqual(schedule.call_args.args[1], remaining)
+            now.return_value = 190
+            coordinator.async_set_updated_data(response)
+            self.assertIsNone(coordinator.current_readings)
+            self.assertEqual(schedule.call_count, 2)
+
     async def test_expired_reading_is_unavailable_on_receipt(self):
         entry = await self.entry()
         coordinator = coordinator_for(self.hass, AsyncMock(), device(), entry)
         with patch(
             "custom_components.gafctl.coordinator.time", return_value=100, create=True
         ):
-            for observed in (0, 101000, None):
+            for observed in (0, 102000, None):
                 coordinator.async_set_updated_data(
                     state_data(
                         state=reported_state(
@@ -1761,7 +1828,7 @@ class RegistryTests(unittest.IsolatedAsyncioTestCase):
                     None,
                 ),
                 "timer_original": (
-                    "Original timer setting",
+                    "Timer duration",
                     ("settings", "timer_original_minutes"),
                     UnitOfTime.MINUTES,
                     None,

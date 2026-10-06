@@ -100,7 +100,7 @@ where
             .exchange(command.into(), deadline)
             .await
             .context("wait for ordinary control acknowledgement")?;
-        let (snapshot, state_error) = match self.read_state(identity, true).await {
+        let (snapshot, state_error) = match self.read_state(identity).await {
             Ok(snapshot) => {
                 let error = snapshot.decoding_error().map(|error| error.to_string());
                 (Some(snapshot), error)
@@ -123,7 +123,7 @@ where
     }
 
     async fn query_state(&mut self, identity: Frame<'static>) -> Result<DeviceSnapshot> {
-        let snapshot = self.read_state(identity, false).await?;
+        let snapshot = self.read_state(identity).await?;
         self.snapshot = snapshot
             .decoding_error()
             .is_none()
@@ -131,11 +131,7 @@ where
         Ok(snapshot)
     }
 
-    async fn read_state(
-        &mut self,
-        identity: Frame<'static>,
-        read_timer: bool,
-    ) -> Result<DeviceSnapshot> {
+    async fn read_state(&mut self, identity: Frame<'static>) -> Result<DeviceSnapshot> {
         let sensors = self.exchange(ReadCommand::Sensors.into(), None).await?;
         let observed_at = SystemTime::now();
         let freshness_started_at = Instant::now();
@@ -143,11 +139,7 @@ where
             .exchange(ReadCommand::AutoThresholds.into(), None)
             .await?;
         let mode = self.exchange(ReadCommand::Mode.into(), None).await?;
-        let timer = if read_timer || mode.payload().starts_with(b"tn") {
-            Some(self.exchange(ReadCommand::Timer.into(), None).await?)
-        } else {
-            None
-        };
+        let timer = self.exchange(ReadCommand::Timer.into(), None).await?;
         let snapshot = DeviceSnapshot::from_frames_at(
             identity,
             mode,
@@ -336,9 +328,11 @@ mod tests {
             b"#sdr03ca00aa\n",
             b"#atr041a012c\n",
             b"#dmraf\n",
+            b"#ttr00000000\n",
             b"#sdr03cb00ab\n",
             b"#atr041b012d\n",
             b"#dmran\n",
+            b"#ttr00000000\n",
         ]);
         session.query(None, None).await.unwrap();
         let second = session.query(None, None).await.unwrap().snapshot.unwrap();
@@ -358,9 +352,11 @@ mod tests {
                 b"#sdg\n".to_vec(),
                 b"#atg\n".to_vec(),
                 b"#dmg\n".to_vec(),
+                b"#ttg\n".to_vec(),
                 b"#sdg\n".to_vec(),
                 b"#atg\n".to_vec(),
                 b"#dmg\n".to_vec(),
+                b"#ttg\n".to_vec(),
             ]
         );
     }
@@ -372,6 +368,7 @@ mod tests {
             b"#sdr03ca00aa\n",
             b"#atr041a012c\n",
             b"#dmraf\n",
+            b"#ttr00000000\n",
             b"#sdr03cb00ab\n",
             b"#atr041a012c\n",
             b"#dmrtn\n",
@@ -379,6 +376,7 @@ mod tests {
             b"#sdr03cc00ac\n",
             b"#atr041a012c\n",
             b"#dmrtf\n",
+            b"#ttr00000000\n",
         ]);
         session.query(None, None).await.unwrap();
         tokio::time::sleep(Duration::from_secs(3)).await;
@@ -394,7 +392,10 @@ mod tests {
             stopped.mode.decoded().unwrap().fan,
             gafctl_protocol::FanState::Off
         );
-        assert!(stopped.timer.is_none());
+        assert_eq!(
+            stopped.timer.unwrap().decoded().unwrap().remaining.value(),
+            0
+        );
         assert_eq!(
             transport.writes.lock().unwrap().as_slice(),
             &[
@@ -402,6 +403,7 @@ mod tests {
                 b"#sdg\n".to_vec(),
                 b"#atg\n".to_vec(),
                 b"#dmg\n".to_vec(),
+                b"#ttg\n".to_vec(),
                 b"#sdg\n".to_vec(),
                 b"#atg\n".to_vec(),
                 b"#dmg\n".to_vec(),
@@ -409,6 +411,7 @@ mod tests {
                 b"#sdg\n".to_vec(),
                 b"#atg\n".to_vec(),
                 b"#dmg\n".to_vec(),
+                b"#ttg\n".to_vec(),
             ]
         );
     }
@@ -429,6 +432,7 @@ mod tests {
             b"#sdr03ca00aa\n",
             b"#atr041a012c\n",
             b"#dmraf\n",
+            b"#ttr00000000\n",
         ]);
         let mut session = RequestSession::new(
             DelayedSettings(transport),
@@ -452,6 +456,7 @@ mod tests {
             b"#sdr03ca00aa\n",
             b"#atr041a012c\n",
             b"#dmraf\n",
+            b"#ttr00000000\n",
         ]);
         session.query(None, None).await.unwrap();
         transport
@@ -479,6 +484,7 @@ mod tests {
             b"#sdr03ca00aa\n",
             b"#atr041a012c\n",
             b"#dmraf\n",
+            b"#ttr00000000\n",
             b"#tmr0\n#atrbad\n",
         ]);
         session.query(None, None).await.unwrap();
@@ -501,9 +507,11 @@ mod tests {
             b"#sdr03ca00aa\n",
             b"#atr041a012c\n",
             b"#dmraf\n",
+            b"#ttr00000000\n",
             b"#sdr03cb00ab\n",
             b"#atr041a012c\n",
             b"#dmraf\n",
+            b"#ttr00000000\n",
         ]);
         session.query(None, None).await.unwrap();
         transport
@@ -519,7 +527,7 @@ mod tests {
             result.snapshot.unwrap().mode.decoded().unwrap().fan,
             gafctl_protocol::FanState::Off
         );
-        assert_eq!(transport.writes.lock().unwrap().len(), 7);
+        assert_eq!(transport.writes.lock().unwrap().len(), 9);
     }
 
     #[tokio::test(start_paused = true)]
@@ -529,6 +537,7 @@ mod tests {
             b"#sdr03ca00aa\n",
             b"#atr041a012c\n",
             b"#dmraf\n",
+            b"#ttr00000000\n",
         ]);
         session.query(None, None).await.unwrap();
         let sender = transport.sender.lock().unwrap().as_ref().unwrap().clone();
@@ -548,11 +557,30 @@ mod tests {
             crate::ProbeError::classify(error).kind(),
             crate::ProbeErrorKind::StaleControl
         );
-        assert_eq!(transport.writes.lock().unwrap().len(), 4);
+        assert_eq!(transport.writes.lock().unwrap().len(), 5);
     }
 
     #[tokio::test]
-    async fn initialization_reads_timer_only_when_timer_mode_is_running() {
+    async fn timer_readings_are_requested_when_the_fan_is_off() {
+        for mode in [b"#dmraf\n".as_slice(), b"#dmrtf\n"] {
+            let (mut session, transport) = session(&[
+                b"#idr030000x\n",
+                b"#sdr03ca00aa\n",
+                b"#atr041a012c\n",
+                mode,
+                b"#ttr00000002\n",
+            ]);
+            let result = session.query(None, None).await.unwrap();
+            let snapshot = result.snapshot.unwrap();
+            let timer = snapshot.timer.unwrap();
+            assert_eq!(timer.decoded().unwrap().remaining.value(), 0);
+            assert_eq!(timer.decoded().unwrap().original.value(), 2);
+            assert_eq!(transport.writes.lock().unwrap().last().unwrap(), b"#ttg\n");
+        }
+    }
+
+    #[tokio::test]
+    async fn initialization_reads_running_timer() {
         let (mut session, transport) = session(&[
             b"#idr030000x\n",
             b"#sdr03ca00aa\n",
@@ -572,6 +600,7 @@ mod tests {
             b"#sdr03ca00aa\n",
             b"#atrgarbage\n",
             b"#dmraf\n",
+            b"#ttr00000000\n",
         ]);
         let result = session.query(None, None).await.unwrap();
         assert!(result.state_error.is_some());
@@ -589,6 +618,7 @@ mod tests {
             b"#sdr03ca00aa\n",
             b"#atr041a012c\n",
             b"#dmraf\n",
+            b"#ttr00000000\n",
         ]);
         session.query(None, None).await.unwrap();
         assert!(
@@ -597,7 +627,7 @@ mod tests {
                 .await
                 .is_err()
         );
-        assert_eq!(transport.writes.lock().unwrap().len(), 4);
+        assert_eq!(transport.writes.lock().unwrap().len(), 5);
     }
 
     #[tokio::test(start_paused = true)]
@@ -645,6 +675,7 @@ mod tests {
             b"#sdr03ca00aa\n",
             b"#atr041a012c\n",
             b"#dmraf\n",
+            b"#ttr00000000\n",
             b"#tmr0\n",
         ]);
         let result = session
@@ -676,6 +707,7 @@ mod tests {
                 b"#sdg\n".to_vec(),
                 b"#atg\n".to_vec(),
                 b"#dmg\n".to_vec(),
+                b"#ttg\n".to_vec(),
                 b"#tms0001\n".to_vec(),
                 b"#sdg\n".to_vec()
             ]

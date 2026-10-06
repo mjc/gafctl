@@ -19,12 +19,12 @@ For an original **GAF Master Flow Wi-Fi Attic Vent** (ERV5SMT or EGV5SMT):
 | Automatic temperature threshold | Current threshold, °F |
 | Automatic humidity threshold | Current threshold, % |
 | Timer remaining | Remaining timer minutes |
-| Original timer setting | Original timer field reported by the controller, minutes |
+| Timer duration | Duration set when the timer started, minutes |
 | Automatic thresholds | Select 105.0 °F / 30.0% or 105.1 °F / 30.1% |
 | Fan timer | Select Clear timer or 1 minute |
 | Target temperature | 90–120 °F in 1 °F steps |
 | Target humidity | 30–80% in 1% steps |
-| Timer duration | 0–360 minutes in 1-minute steps; zero clears |
+| Set timer | 0–360 minutes in 1-minute steps; zero clears |
 
 The automatic selector sets both thresholds and automatic mode. Clearing the
 timer leaves the controller in timer mode; use an automatic preset to return to
@@ -35,7 +35,7 @@ presets were tested on one controller.
 The adjustable numbers use ranges and whole-unit steps from the original
 manufacturer app. Temperature and humidity commands change only the selected
 value; the service reads and preserves the other raw threshold under the same
-transaction before writing. Both select automatic mode. Timer duration starts
+transaction before writing. Both select automatic mode. Set timer starts
 timer mode and reports the requested minutes. Remaining time is a separate
 sensor. Fractional threshold readback is displayed without rounding; new
 settings use whole units. The full ranges have not been tested on hardware.
@@ -52,7 +52,7 @@ unsupported. Enable experimental cloud writes to add these controls:
 | Mode | Off, Automatic, Timer, Manual |
 | Target temperature | 90–120 °F in 1 °F steps |
 | Target humidity | 30–80% in 1% steps |
-| Timer duration | 30–360 minutes in 30-minute steps |
+| Set timer | 30–360 minutes in 30-minute steps |
 | Automatic, timer, manual switches | Select one active mode |
 | All off | Select off mode |
 
@@ -72,10 +72,13 @@ The service polls the original Bluetooth controller every three seconds and
 QuickConnect devices every 30 seconds. Failed Bluetooth polls back off with
 jitter up to sixty seconds. The HTTP integration reads cached state every three seconds for Bluetooth and
 every thirty seconds for QuickConnect. Each Bluetooth poll refreshes sensors,
-thresholds, mode, and conditional timer state on the retained connection. Failed
+thresholds, mode, and timer state on the retained connection. Failed
 Bluetooth reads immediately invalidate current state. Both the service and HTTP
 adapter expire readings after ninety seconds from the earliest observation/fetch
-time; receiving an old cached response does not extend its life.
+time; receiving an old cached response does not extend its life. The HTTP
+adapter allows up to one second of clock difference between hosts, with a
+maximum of ninety seconds until local expiry. Larger future timestamps are
+rejected.
 
 `/health` checks whether the service responds. To check the fan, use
 `/api/v2/devices/{id}/state` and inspect `available`, `last_error`, and the

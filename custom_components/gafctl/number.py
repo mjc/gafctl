@@ -12,7 +12,7 @@ from .entity import GafctlEntity, translate_api_errors
 PRESENTATION = {
     "automatic_temperature": ("Target temperature", UnitOfTemperature.FAHRENHEIT),
     "automatic_humidity": ("Target humidity", PERCENTAGE),
-    "timer_duration": ("Timer duration", UnitOfTime.MINUTES),
+    "timer_duration": ("Set timer", UnitOfTime.MINUTES),
 }
 
 
