@@ -208,6 +208,19 @@ cargo tree --duplicates
 
 ## Distribution
 
+`cargo-about` generates `THIRD-PARTY-NOTICES.txt` for all server/CLI features and
+supported targets. `LICENSE-RUST-STDLIB.html` preserves the pinned Rust standard
+library's upstream notices. Both files ship with every binary distribution.
+After changing dependencies or the Rust toolchain, regenerate them:
+
+```sh
+devenv tasks run licenses:update
+```
+
+`check:licenses` rejects missing source license text and stale notices. Add a
+checksummed clarification in `about.toml` when an upstream composite license
+needs explicit treatment; preserve its full copyright text.
+
 The root Dockerfile builds both binaries with the checked-in toolchain and
 lockfile. Its `artifacts` target exports native Linux `.deb` packages and binary
 archives; `runtime` runs the server. The Home Assistant app builds the same Rust

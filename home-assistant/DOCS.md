@@ -5,7 +5,7 @@ Original ERV5SMT/EGV5SMT controllers use Bluetooth. Enter their peripheral ID in
 within range. Close the manufacturer's app before starting this service.
 
 For a scan on Home Assistant OS, use its debug SSH shell and locate the running
-container with `docker ps --format '{{.Names}}'`. Its name starts with `addon_`
+container with `docker ps --format '{{.Names}}'`. Its name starts with `app_`
 and ends with `_gafctl`. Then run:
 
 ```sh

@@ -19,6 +19,7 @@ in {
       cargo-nextest
       cargo-llvm-cov
       cargo-deny
+      cargo-about
       cargo-machete
       bacon
       (python3.withPackages (ps: [ps.aiohttp]))
@@ -51,6 +52,8 @@ in {
   tasks."check:python-lint".exec = "ruff check custom_components tests/*.py";
   tasks."check:ha".exec = "python3 -m unittest discover -s tests -p test_gafctl_client.py";
   tasks."check:release".exec = "python3 packaging/test-publish-images.py && python3 packaging/test_package.py";
+  tasks."check:licenses".exec = "packaging/licenses.sh --check";
+  tasks."licenses:update".exec = "packaging/licenses.sh --update";
   tasks."check:ha-registry" = lib.mkIf linux {
     exec = ''
       set -eu
@@ -84,6 +87,7 @@ in {
       "check:doc"
       "check:ha"
       "check:release"
+      "check:licenses"
       "check:python-format"
       "check:python-lint"
       "check:python-types"

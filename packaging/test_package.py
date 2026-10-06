@@ -22,6 +22,8 @@ class PackageTests(unittest.TestCase):
         for name in ("Cargo.toml", "LICENSE-QUICKCONNECT-REFERENCE.txt"):
             shutil.copyfile(ROOT / name, self.root / name)
         (self.root / "LICENSE").write_text("Test project license\n")
+        (self.root / "THIRD-PARTY-NOTICES.txt").write_text("Test dependency notices\n")
+        (self.root / "LICENSE-RUST-STDLIB.html").write_text("Test Rust notices\n")
         for name in (
             "custom_components/gafctl",
             "home-assistant",
@@ -105,6 +107,14 @@ class PackageTests(unittest.TestCase):
                     (licenses / "LICENSE-QUICKCONNECT-REFERENCE.txt").read_bytes(),
                     (ROOT / "LICENSE-QUICKCONNECT-REFERENCE.txt").read_bytes(),
                 )
+                self.assertEqual(
+                    (licenses / "THIRD-PARTY-NOTICES.txt").read_text(),
+                    "Test dependency notices\n",
+                )
+                self.assertEqual(
+                    (licenses / "LICENSE-RUST-STDLIB.html").read_text(),
+                    "Test Rust notices\n",
+                )
                 with tarfile.open(
                     self.root / f"dist/gafctl_0.1.0_linux_{arch}.tar.gz"
                 ) as archive:
@@ -115,6 +125,8 @@ class PackageTests(unittest.TestCase):
                             "gafctl-server",
                             "LICENSE",
                             "LICENSE-QUICKCONNECT-REFERENCE.txt",
+                            "THIRD-PARTY-NOTICES.txt",
+                            "LICENSE-RUST-STDLIB.html",
                         },
                     )
 

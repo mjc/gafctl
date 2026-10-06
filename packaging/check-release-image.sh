@@ -17,7 +17,7 @@ trap cleanup EXIT HUP INT TERM
 for executable in gafctl gafctl-server; do
     test "$(docker exec "$container" "$executable" --version)" = "$executable $version"
 done
-for name in LICENSE LICENSE-QUICKCONNECT-REFERENCE.txt; do
+for name in LICENSE LICENSE-QUICKCONNECT-REFERENCE.txt THIRD-PARTY-NOTICES.txt LICENSE-RUST-STDLIB.html; do
     docker exec "$container" cat "/usr/share/licenses/gafctl/$name" | cmp "$name" -
 done
 docker exec "$container" curl --fail --silent --retry 15 --retry-connrefused --retry-delay 1 http://127.0.0.1:8787/health

@@ -41,7 +41,7 @@ sudo systemctl enable --now bluetooth
 Follow the [source build](#source-build), then build and install the package:
 
 ```sh
-sudo apt install dpkg-dev
+sudo apt install dpkg-dev jq
 ./packaging/package.sh
 sudo apt install ./dist/gafctl_0.1.0_*.deb
 ```

@@ -1,0 +1,3 @@
+THIRD-PARTY-NOTICES.txt -whitespace linguist-generated=true
+LICENSE-RUST-STDLIB.html -whitespace linguist-generated=true
+packaging/license-reference/*LICENSE* -whitespace

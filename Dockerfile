@@ -9,7 +9,7 @@ RUN cargo build --release --locked --bins
 FROM build AS packages
 ARG PACKAGE_ARCH=""
 COPY packaging ./packaging
-COPY LICENSE LICENSE-QUICKCONNECT-REFERENCE.txt ./
+COPY LICENSE LICENSE-QUICKCONNECT-REFERENCE.txt THIRD-PARTY-NOTICES.txt LICENSE-RUST-STDLIB.html ./
 COPY custom_components/gafctl/manifest.json ./custom_components/gafctl/manifest.json
 COPY home-assistant/config.yaml ./home-assistant/config.yaml
 RUN packaging/package.sh "${PACKAGE_ARCH}"
@@ -23,7 +23,7 @@ LABEL org.opencontainers.image.revision="${GAFCTL_REVISION}"
 LABEL org.opencontainers.image.licenses="MIT"
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates libdbus-1-3 jq curl tini && rm -rf /var/lib/apt/lists/*
 COPY --from=build /src/target/release/gafctl /src/target/release/gafctl-server /usr/local/bin/
-COPY LICENSE LICENSE-QUICKCONNECT-REFERENCE.txt /usr/share/licenses/gafctl/
+COPY LICENSE LICENSE-QUICKCONNECT-REFERENCE.txt THIRD-PARTY-NOTICES.txt LICENSE-RUST-STDLIB.html /usr/share/licenses/gafctl/
 COPY home-assistant/run.sh /usr/local/bin/gafctl-entrypoint
 ENV GAFCTL_IDENTITY_STORE=/data/identities.json
 VOLUME /data

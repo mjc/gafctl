@@ -116,6 +116,15 @@ impl ControlOutcome {
                 }
                 ControlCommand::SetAutomaticThresholds(_) => ModeReadback::Differs(mode),
                 ControlCommand::SetTimer(requested)
+                    if requested.value() > 0
+                        && (mode == OperatingMode::Timer || mode == OperatingMode::Automatic)
+                        && snapshot.timer.decoded().is_ok_and(|timer| {
+                            timer.original == requested && timer.remaining.value() == 0
+                        }) =>
+                {
+                    ModeReadback::UnverifiedTimerExpiry(mode)
+                }
+                ControlCommand::SetTimer(requested)
                     if mode == OperatingMode::Timer
                         && (requested.value() > 0 || device_mode.fan == FanState::Off) =>
                 {
@@ -126,15 +135,6 @@ impl ControlOutcome {
                         mode,
                         actual: device_mode.fan,
                     }
-                }
-                ControlCommand::SetTimer(requested)
-                    if mode == OperatingMode::Automatic
-                        && requested.value() > 0
-                        && snapshot.timer.decoded().is_ok_and(|timer| {
-                            timer.original == requested && timer.remaining.value() == 0
-                        }) =>
-                {
-                    ModeReadback::UnverifiedTimerExpiry(mode)
                 }
                 ControlCommand::SetTimer(_) => ModeReadback::Differs(mode),
             }

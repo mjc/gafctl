@@ -1,0 +1,141 @@
+accepted = [
+    "MIT",
+    "Apache-2.0",
+    "ISC",
+    "BSD-3-Clause",
+    "Unicode-3.0",
+    "CDLA-Permissive-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "Zlib",
+    "CC0-1.0",
+    "Unlicense",
+    "MIT-0",
+    "BSD-2-Clause",
+]
+targets = [
+    "x86_64-unknown-linux-gnu",
+    "aarch64-unknown-linux-gnu",
+    "aarch64-apple-darwin",
+]
+ignore-dev-dependencies = true
+
+[private]
+ignore = true
+
+# Clarifications preserve exact published license files. See
+# packaging/license-reference/README.md for cached files absent from crates.
+# The generation script materializes @GAFCTL_LICENSE_REFERENCE@ as an absolute
+# path and checks cached source package versions before invoking cargo-about.
+
+# aws-lc-rs 1.18.1: exact source file checksum(s).
+[aws-lc-rs.clarify]
+license = "ISC AND (Apache-2.0 OR ISC)"
+files = [
+    { path = "LICENSE", license = "Apache-2.0 OR ISC", checksum = "b50b376e7d24a0598488b730c3034ffcd0b58dd36c0913a24b9903a3cfd04bf7" },
+]
+
+# aws-lc-sys 0.45.0: exact source file checksum(s).
+[aws-lc-sys.clarify]
+license = "ISC AND (Apache-2.0 OR ISC) AND Apache-2.0 AND MIT AND BSD-3-Clause AND (Apache-2.0 OR ISC OR MIT) AND (Apache-2.0 OR ISC OR MIT-0)"
+files = [
+    { path = "LICENSE", license = "Apache-2.0 OR ISC OR MIT OR BSD-3-Clause OR MIT-0", checksum = "728536b4160e051f86d7c9c388f704866b3d512cd7df97ac3516c65279523c4e" },
+    { path = "aws-lc/third_party/fiat/LICENSE", license = "MIT", checksum = "43e358d7b6eb109d0f51f7b3a090fd82607965767c25fadee39e922475de2061" },
+]
+
+# block2 0.6.2: exact source file checksum(s).
+[block2.clarify]
+license = "MIT"
+files = [
+    { path = "@GAFCTL_LICENSE_REFERENCE@/block2-0.6.2-LICENSE.md", license = "MIT", checksum = "7f976f7e9cb2d87df7230606feb932c3f21ac0e664045a775b600046ff850c54" },
+]
+
+# bluez-async 0.8.2: exact source file checksum(s).
+[bluez-async.clarify]
+license = "MIT OR Apache-2.0"
+files = [
+    { path = "@GAFCTL_LICENSE_REFERENCE@/bluez-async-0.8.2-LICENSE-MIT", license = "MIT", checksum = "eef0c0b2cf6e14147a8362cfa2408a79220cc1ea22bab1a2e188b9cd1d2e0f0d" },
+]
+
+# bluez-generated 0.4.0: exact source file checksum(s).
+[bluez-generated.clarify]
+license = "MIT OR Apache-2.0"
+files = [
+    { path = "@GAFCTL_LICENSE_REFERENCE@/bluez-generated-0.4.0-LICENSE-MIT", license = "MIT", checksum = "eef0c0b2cf6e14147a8362cfa2408a79220cc1ea22bab1a2e188b9cd1d2e0f0d" },
+]
+
+# btleplug 0.13.3: exact source file checksum(s).
+[btleplug.clarify]
+license = "BSD-3-Clause"
+files = [
+    { path = "LICENSE.md", license = "BSD-3-Clause", checksum = "95f1ea7e261c12c46fe8f67d2ddb7a92ebb1a5fd10d127e4ab3003f0701d9f56" },
+]
+
+# dunce 1.0.5: exact source file checksum(s).
+[dunce.clarify]
+license = "CC0-1.0"
+files = [
+    { path = "LICENSE", license = "CC0-1.0", checksum = "a2010f343487d3f7618affe54f789f5487602331c0a8d03f49e9a7c547cf0499" },
+]
+
+# mqttbytes-core-next 0.34.0: exact source file checksum(s).
+[mqttbytes-core-next.clarify]
+license = "Apache-2.0"
+files = [
+    { path = "@GAFCTL_LICENSE_REFERENCE@/rumqtt-next-0.34.0-LICENSE", license = "Apache-2.0", checksum = "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30" },
+]
+
+# objc2 0.6.4: exact source file checksum(s).
+[objc2.clarify]
+license = "MIT"
+files = [
+    { path = "@GAFCTL_LICENSE_REFERENCE@/objc2-0.6.4-LICENSE.md", license = "MIT", checksum = "7f976f7e9cb2d87df7230606feb932c3f21ac0e664045a775b600046ff850c54" },
+]
+
+# objc2-core-bluetooth 0.3.2: exact source file checksum(s).
+[objc2-core-bluetooth.clarify]
+license = "Zlib OR Apache-2.0 OR MIT"
+files = [
+    { path = "@GAFCTL_LICENSE_REFERENCE@/objc2-frameworks-0.3.2-LICENSE.md", license = "MIT", checksum = "7f976f7e9cb2d87df7230606feb932c3f21ac0e664045a775b600046ff850c54" },
+]
+
+# objc2-encode 4.1.0: exact source file checksum(s).
+[objc2-encode.clarify]
+license = "MIT"
+files = [
+    { path = "@GAFCTL_LICENSE_REFERENCE@/objc2-encode-4.1.0-LICENSE.md", license = "MIT", checksum = "7f976f7e9cb2d87df7230606feb932c3f21ac0e664045a775b600046ff850c54" },
+]
+
+# objc2-foundation 0.3.2: exact source file checksum(s).
+[objc2-foundation.clarify]
+license = "MIT"
+files = [
+    { path = "@GAFCTL_LICENSE_REFERENCE@/objc2-frameworks-0.3.2-LICENSE.md", license = "MIT", checksum = "7f976f7e9cb2d87df7230606feb932c3f21ac0e664045a775b600046ff850c54" },
+]
+
+# rumqttc-core-next 0.34.0: exact source file checksum(s).
+[rumqttc-core-next.clarify]
+license = "Apache-2.0"
+files = [
+    { path = "@GAFCTL_LICENSE_REFERENCE@/rumqtt-next-0.34.0-LICENSE", license = "Apache-2.0", checksum = "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30" },
+]
+
+# rumqttc-next 0.34.0: exact source file checksum(s).
+[rumqttc-next.clarify]
+license = "Apache-2.0"
+files = [
+    { path = "@GAFCTL_LICENSE_REFERENCE@/rumqtt-next-0.34.0-LICENSE", license = "Apache-2.0", checksum = "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30" },
+]
+
+# rumqttc-v5-next 0.34.0: exact source file checksum(s).
+[rumqttc-v5-next.clarify]
+license = "Apache-2.0"
+files = [
+    { path = "@GAFCTL_LICENSE_REFERENCE@/rumqtt-next-0.34.0-LICENSE", license = "Apache-2.0", checksum = "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30" },
+]
+
+# sync_wrapper 1.0.2: exact source file checksum(s).
+[sync_wrapper.clarify]
+license = "Apache-2.0"
+files = [
+    { path = "LICENSE", license = "Apache-2.0", checksum = "0d542e0c8804e39aa7f37eb00da5a762149dc682d7829451287e11b938e94594" },
+]

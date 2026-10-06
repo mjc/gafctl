@@ -14,6 +14,7 @@ from functools import partial
 from pathlib import Path
 from types import MappingProxyType
 from unittest.mock import AsyncMock, MagicMock, patch
+from uuid import uuid4
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from ha_fixtures import (
@@ -56,6 +57,7 @@ from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers.entity_platform import EntityPlatform
 from homeassistant.helpers.template import Template
+from homeassistant.setup import async_setup_component
 
 from custom_components import gafctl as gafctl_integration
 from custom_components.gafctl import GafctlCoordinator
@@ -107,6 +109,136 @@ def read_discovery_fixture(path: str) -> list[tuple[str, dict[str, object]]]:
 
 
 class RegistryTests(unittest.IsolatedAsyncioTestCase):
+    async def native_service_case(self, operation):
+        component = self.hass.config.path("custom_components/gafctl")
+        if not await asyncio.to_thread(Path(component).exists):
+            await asyncio.to_thread(shutil.copytree, COMPONENT_DIR, component)
+            loader.async_setup(self.hass)
+        entry = await self.entry(proxy_id=str(uuid4()))
+        backend = "quick_connect" if operation == "mode" else "legacy_ble"
+        selected = device(
+            entry.data["proxy_id"],
+            backend=backend,
+            commands=["quick_connect_mode"]
+            if operation == "mode"
+            else ["legacy_preset", "legacy_automatic_temperature"],
+        )
+        self.hass.config_entries.async_update_entry(
+            entry, data=entry.data | {"backend": backend}
+        )
+        state = state_data(backend=backend, state=reported_state(backend))
+        client = fake_client(devices=[selected], state=state, refresh=state)
+        with api_client(client, "custom_components.gafctl"):
+            self.assertTrue(await async_setup_component(self.hass, "gafctl", {}))
+            if entry.state is not ConfigEntryState.LOADED:
+                self.assertTrue(
+                    await self.hass.config_entries.async_setup(entry.entry_id)
+                )
+            await self.hass.async_block_till_done()
+        domain, service, key, fields = {
+            "preset": (
+                "select",
+                "select_option",
+                "automatic_thresholds",
+                {"option": "105.0°F / 30.0%"},
+            ),
+            "mode": ("select", "select_option", "mode", {"option": "Automatic"}),
+            "number": ("number", "set_value", "automatic_temperature", {"value": 105}),
+            "refresh": ("button", "press", "refresh", {}),
+        }[operation]
+        entity_id = self.entities.async_get_entity_id(
+            domain, "gafctl", f"{entry.unique_id}_{key}"
+        )
+        self.assertIsNotNone(entity_id)
+        call = partial(
+            self.hass.services.async_call,
+            domain,
+            service,
+            {"entity_id": entity_id} | fields,
+            blocking=True,
+        )
+        return entry, client, entry.runtime_data, call
+
+    async def invalidate_entry(self, entry, client, replace):
+        if replace:
+            coordinator_for(
+                self.hass, client, client.fetch_devices.return_value[0], entry
+            )
+        else:
+            self.assertTrue(await self.hass.config_entries.async_unload(entry.entry_id))
+
+    async def test_queued_native_services_reject_unloaded_or_replaced_coordinator(self):
+        for operation in ("preset", "mode", "number", "refresh"):
+            for replace in (False, True):
+                with self.subTest(operation=operation, replace=replace):
+                    entry, client, coordinator, call = await self.native_service_case(
+                        operation
+                    )
+                    lock = coordinator.command_lock
+                    await lock.acquire()
+                    queued = asyncio.Event()
+                    acquire = lock.acquire
+
+                    async def signal_acquire(queued=queued, acquire=acquire):
+                        queued.set()
+                        return await acquire()
+
+                    with patch.object(lock, "acquire", side_effect=signal_acquire):
+                        task = asyncio.create_task(call())
+                        try:
+                            await asyncio.wait_for(queued.wait(), 2)
+                            client.fetch_devices.reset_mock()
+                            client.fetch_state.reset_mock()
+                            await self.invalidate_entry(entry, client, replace)
+                        finally:
+                            lock.release()
+                        with self.assertRaisesRegex(
+                            HomeAssistantError, "no longer active"
+                        ):
+                            await asyncio.wait_for(task, 2)
+                    client.fetch_devices.assert_not_awaited()
+                    client.fetch_state.assert_not_awaited()
+                    client.set_control.assert_not_awaited()
+                    client.refresh.assert_not_awaited()
+                    if replace:
+                        await self.hass.config_entries.async_unload(entry.entry_id)
+
+    async def test_native_services_recheck_lifecycle_after_preparatory_read(self):
+        for operation in ("preset", "mode", "number", "refresh"):
+            for replace in (False, True):
+                with self.subTest(operation=operation, replace=replace):
+                    entry, client, coordinator, call = await self.native_service_case(
+                        operation
+                    )
+                    entered, release = asyncio.Event(), asyncio.Event()
+                    read = (
+                        client.fetch_devices
+                        if operation == "refresh"
+                        else client.fetch_state
+                    )
+
+                    async def delayed_read(
+                        *_, entered=entered, release=release, read=read
+                    ):
+                        entered.set()
+                        await release.wait()
+                        return read.return_value
+
+                    read.side_effect = delayed_read
+                    task = asyncio.create_task(call())
+                    try:
+                        await asyncio.wait_for(entered.wait(), 2)
+                        await self.invalidate_entry(entry, client, replace)
+                    finally:
+                        release.set()
+                    with self.assertRaisesRegex(HomeAssistantError, "no longer active"):
+                        await asyncio.wait_for(task, 2)
+                    client.set_control.assert_not_awaited()
+                    client.refresh.assert_not_awaited()
+                    self.assertFalse(coordinator.command_lock.locked())
+                    if replace:
+                        await self.hass.config_entries.async_unload(entry.entry_id)
+
     async def test_empty_entry_keeps_polling_and_restores_http_entities(self) -> None:
         for selected in (device(owner="mqtt"), device(commands=[], read_state=False)):
             with self.subTest(selected=selected):

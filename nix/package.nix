@@ -24,6 +24,8 @@ let
       ../.clippy.toml
       ../LICENSE
       ../LICENSE-QUICKCONNECT-REFERENCE.txt
+      ../THIRD-PARTY-NOTICES.txt
+      ../LICENSE-RUST-STDLIB.html
       ../src
       ../crates
       ../tests
@@ -48,6 +50,8 @@ rustPlatform.buildRustPackage {
   postInstall = ''
     install -Dm644 LICENSE "$out/share/licenses/gafctl/LICENSE"
     install -Dm644 LICENSE-QUICKCONNECT-REFERENCE.txt "$out/share/licenses/gafctl/LICENSE-QUICKCONNECT-REFERENCE.txt"
+    install -Dm644 THIRD-PARTY-NOTICES.txt "$out/share/licenses/gafctl/THIRD-PARTY-NOTICES.txt"
+    install -Dm644 LICENSE-RUST-STDLIB.html "$out/share/licenses/gafctl/LICENSE-RUST-STDLIB.html"
   '';
   meta = {
     description = "GAF attic fan control and Home Assistant integration";

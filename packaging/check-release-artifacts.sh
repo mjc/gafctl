@@ -17,7 +17,7 @@ cleanup() {
 trap cleanup EXIT HUP INT TERM
 mkdir -p "$work/bin"
 tar -xzf "dist/gafctl_${version}_linux_${arch}.tar.gz" -C "$work/bin"
-for name in LICENSE LICENSE-QUICKCONNECT-REFERENCE.txt; do
+for name in LICENSE LICENSE-QUICKCONNECT-REFERENCE.txt THIRD-PARTY-NOTICES.txt LICENSE-RUST-STDLIB.html; do
     cmp "$name" "$work/bin/$name"
 done
 for executable in gafctl gafctl-server; do
@@ -29,7 +29,7 @@ test "$(dpkg-deb -f "$package" Architecture)" = "$arch"
 test "$(dpkg-deb -f "$package" Version)" = "$version"
 sudo apt-get update
 sudo apt-get install -y --no-install-recommends "$package"
-for name in LICENSE LICENSE-QUICKCONNECT-REFERENCE.txt; do
+for name in LICENSE LICENSE-QUICKCONNECT-REFERENCE.txt THIRD-PARTY-NOTICES.txt LICENSE-RUST-STDLIB.html; do
     cmp "$name" "/usr/share/doc/gafctl/$name"
 done
 for executable in gafctl gafctl-server; do

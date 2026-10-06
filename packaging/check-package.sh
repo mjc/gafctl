@@ -20,6 +20,9 @@ apt-get update -qq
 DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "$package"
 test "$(dpkg-query -W -f '${Architecture}' gafctl)" = "$arch"
 check_binaries gafctl gafctl-server
+for name in LICENSE LICENSE-QUICKCONNECT-REFERENCE.txt THIRD-PARTY-NOTICES.txt LICENSE-RUST-STDLIB.html; do
+    cmp "/work/archive/$name" "/usr/share/doc/gafctl/$name"
+done
 test "$(stat -c '%a:%U:%G' /etc/gafctl/gafctl.env)" = 640:root:gafctl
 getent passwd gafctl >/dev/null
 test -f /etc/dbus-1/system.d/gafctl.conf

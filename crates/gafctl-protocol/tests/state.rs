@@ -542,6 +542,38 @@ fn threshold_confirmation_requires_automatic_decodable_mode() {
 }
 
 #[test]
+fn positive_timer_with_zero_remaining_stays_unconfirmed() {
+    let outcomes = [b"#dmrtf\n", b"#dmrtn\n", b"#dmraf\n"].map(|mode| {
+        let snapshot = snapshot_with_mode(mode, b"#atr041a012c\n", b"#ttr00000001\n");
+        let outcome = ControlOutcome::from_response(
+            ControlCommand::SetTimer(Minutes::new(1)),
+            frame(b"#tmr0\n"),
+            Some(&snapshot),
+        )
+        .unwrap();
+        (outcome.mode_readback(), outcome.is_confirmed())
+    });
+
+    assert_eq!(
+        outcomes,
+        [
+            (
+                ModeReadback::UnverifiedTimerExpiry(OperatingMode::Timer),
+                false
+            ),
+            (
+                ModeReadback::UnverifiedTimerExpiry(OperatingMode::Timer),
+                false
+            ),
+            (
+                ModeReadback::UnverifiedTimerExpiry(OperatingMode::Automatic),
+                false,
+            ),
+        ]
+    );
+}
+
+#[test]
 fn timer_confirmation_requires_verified_mode_expiry_and_fan_flag() {
     for (minutes, mode, timer, expected, confirmed) in [
         (

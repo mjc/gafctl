@@ -79,7 +79,7 @@ jobs:
           revision=$(sed -n 's/^ARG GAFCTL_REVISION=//p' home-assistant/Dockerfile)
           test -n "$revision"
           git cat-file -e "$revision^{commit}"
-          git diff --exit-code "$revision" HEAD -- Cargo.toml Cargo.lock rust-toolchain.toml .clippy.toml LICENSE LICENSE-QUICKCONNECT-REFERENCE.txt src crates
+          git diff --exit-code "$revision" HEAD -- Cargo.toml Cargo.lock rust-toolchain.toml .clippy.toml LICENSE LICENSE-QUICKCONNECT-REFERENCE.txt THIRD-PARTY-NOTICES.txt LICENSE-RUST-STDLIB.html src crates
           echo "revision=$revision" >> "$GITHUB_OUTPUT"
           echo "version=$(packaging/version.sh)" >> "$GITHUB_OUTPUT"
           if [[ "${{ matrix.arch }}" == arm64 ]]; then arch=aarch64; else arch=amd64; fi

@@ -87,13 +87,16 @@ class GafctlCoordinator(DataUpdateCoordinator[DeviceState]):
             await self.client.refresh(self.device_id, current["backend"])
             await self._async_http_state_device()
             await self.async_refresh()
+            self._require_active()
             if self.current_readings is None:
                 raise ApiError(
                     "device was refreshed, but current HTTP readings are unavailable"
                 )
 
     async def _async_http_state_device(self) -> Device:
+        self._require_active()
         current = await self._async_resolve_device()
+        self._require_active()
         if (
             current is None
             or not current["capabilities"]["read_state"]
@@ -101,6 +104,10 @@ class GafctlCoordinator(DataUpdateCoordinator[DeviceState]):
         ):
             raise ApiError("this device does not own HTTP readings")
         return current
+
+    def _require_active(self) -> None:
+        if self._unloaded or getattr(self.entry, "runtime_data", None) is not self:
+            raise ApiError("this device's integration entry is no longer active")
 
     def _reload_changed_entities(self) -> None:
         if (
@@ -139,6 +146,7 @@ class GafctlCoordinator(DataUpdateCoordinator[DeviceState]):
         ):
             raise ApiError("unsupported device mode")
         async with self.command_lock:
+            self._require_active()
             await self.async_refresh()
             current = self._require_control("quick_connect_mode", "quick_connect")[
                 "settings"
@@ -171,6 +179,7 @@ class GafctlCoordinator(DataUpdateCoordinator[DeviceState]):
     async def async_set_number(self, control: NumberControl, value: float) -> None:
         validated = control.validate(value)
         async with self.command_lock:
+            self._require_active()
             await self.async_refresh()
             state = self._require_control(control.capability, control.backend)
             if not control.current_supported(state):
@@ -184,6 +193,7 @@ class GafctlCoordinator(DataUpdateCoordinator[DeviceState]):
         if preset not in CONTROL_PRESETS:
             raise ApiError("unsupported control preset")
         async with self.command_lock:
+            self._require_active()
             await self.async_refresh()
             self._require_control("legacy_preset", "legacy_ble")
             await self._async_submit_control(
@@ -194,12 +204,14 @@ class GafctlCoordinator(DataUpdateCoordinator[DeviceState]):
                 raise ApiError("confirmed control has no matching current preset")
 
     async def _async_submit_control(self, command: JsonObject) -> None:
+        self._require_active()
         control_error = None
         try:
             await self.client.set_control(self.device_id, command)
         except ApiError as error:
             control_error = error
         try:
+            self._require_active()
             await self.async_refresh()
             if self.current_readings is None:
                 raise ApiError("current state refresh failed")
@@ -213,6 +225,7 @@ class GafctlCoordinator(DataUpdateCoordinator[DeviceState]):
             raise control_error
 
     def _require_control(self, capability: str, backend: Backend) -> Readings:
+        self._require_active()
         state = self.control_readings(capability, backend)
         if state is None:
             raise ApiError("the selected device has no current control")

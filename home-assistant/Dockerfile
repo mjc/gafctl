@@ -13,7 +13,7 @@ ARG GAFCTL_REVISION
 LABEL io.hass.version="${BUILD_VERSION}" io.hass.type="app" io.hass.arch="${BUILD_ARCH}" org.opencontainers.image.revision="${GAFCTL_REVISION}" org.opencontainers.image.licenses="MIT"
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates libdbus-1-3 jq curl && rm -rf /var/lib/apt/lists/*
 COPY --from=build /src/target/release/gafctl /src/target/release/gafctl-server /usr/local/bin/
-COPY --from=build /src/LICENSE /src/LICENSE-QUICKCONNECT-REFERENCE.txt /usr/share/licenses/gafctl/
+COPY --from=build /src/LICENSE /src/LICENSE-QUICKCONNECT-REFERENCE.txt /src/THIRD-PARTY-NOTICES.txt /src/LICENSE-RUST-STDLIB.html /usr/share/licenses/gafctl/
 COPY run.sh /usr/local/bin/gafctl-entrypoint
 ENV GAFCTL_IDENTITY_STORE=/data/identities.json
 EXPOSE 8787

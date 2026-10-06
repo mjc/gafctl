@@ -20,7 +20,7 @@ for executable in gafctl gafctl-server; do
 done
 root="target/packages/gafctl_${version}_${arch}"
 mkdir -p "$root/usr/share/doc/gafctl" "$root/DEBIAN" "$root/usr/bin" "$root/usr/lib/systemd/system" "$root/etc/gafctl" "$root/etc/dbus-1/system.d" dist
-install -m 644 LICENSE LICENSE-QUICKCONNECT-REFERENCE.txt "$root/usr/share/doc/gafctl/"
+install -m 644 LICENSE LICENSE-QUICKCONNECT-REFERENCE.txt THIRD-PARTY-NOTICES.txt LICENSE-RUST-STDLIB.html "$root/usr/share/doc/gafctl/"
 install -m 755 target/release/gafctl target/release/gafctl-server "$root/usr/bin/"
 install -m 644 packaging/systemd/gafctl.service "$root/usr/lib/systemd/system/"
 install -m 640 packaging/gafctl.env "$root/etc/gafctl/"
@@ -41,4 +41,4 @@ Description: GAF Master Flow attic fan proxy and controller
  HTTP and MQTT service with a CLI and Home Assistant integration.
 EOF
 dpkg-deb --root-owner-group --build "$root" "dist/gafctl_${version}_${arch}.deb"
-tar -czf "dist/gafctl_${version}_linux_${arch}.tar.gz" -C target/release gafctl gafctl-server -C ../.. LICENSE LICENSE-QUICKCONNECT-REFERENCE.txt
+tar -czf "dist/gafctl_${version}_linux_${arch}.tar.gz" -C target/release gafctl gafctl-server -C ../.. LICENSE LICENSE-QUICKCONNECT-REFERENCE.txt THIRD-PARTY-NOTICES.txt LICENSE-RUST-STDLIB.html
