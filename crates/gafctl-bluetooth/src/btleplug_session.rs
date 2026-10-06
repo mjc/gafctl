@@ -3,7 +3,7 @@ use std::{future, time::Duration};
 use anyhow::{Context, Result, bail};
 use btleplug::api::{CharPropFlags, Characteristic, Peripheral as _, ValueNotification, WriteType};
 use btleplug::platform::Peripheral;
-use futures_util::StreamExt;
+use futures_util::{Stream, StreamExt};
 use gafctl_protocol::ControlCommand;
 
 use super::request_session::{GattTransport, RequestSession};
@@ -78,7 +78,7 @@ impl<'a> ConnectedPeripheral<'a> {
 async fn request_session<'a, 'device>(
     connected: &'a ConnectedPeripheral<'device>,
     response_timeout: Duration,
-) -> Result<RequestSession<BtleplugTransport<'a>>> {
+) -> Result<RequestSession<BtleplugTransport<'a>, impl Stream<Item = Vec<u8>> + Send + Unpin>> {
     let (characteristic, write_type) = writable_characteristic(connected, response_timeout).await?;
     let notifications =
         complete_before(response_timeout, "subscribe to BLE notifications", async {
@@ -98,14 +98,12 @@ async fn request_session<'a, 'device>(
     })
     .await?;
 
-    let notifications = notifications
-        .filter_map(|notification: ValueNotification| {
-            future::ready(
-                notification_matches(notification.service_uuid, notification.uuid)
-                    .then_some(notification.value),
-            )
-        })
-        .boxed();
+    let notifications = notifications.filter_map(|notification: ValueNotification| {
+        future::ready(
+            notification_matches(notification.service_uuid, notification.uuid)
+                .then_some(notification.value),
+        )
+    });
     Ok(RequestSession::new(
         BtleplugTransport {
             peripheral: connected.peripheral,

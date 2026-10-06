@@ -1,4 +1,4 @@
-use std::{future, pin::Pin, time::Duration};
+use std::{future, time::Duration};
 
 use anyhow::{Context, Result};
 use bytes::Bytes;
@@ -16,19 +16,19 @@ pub(super) trait GattTransport {
     async fn write(&mut self, bytes: &[u8]) -> Result<()>;
 }
 
-pub(super) struct RequestSession<T> {
+pub(super) struct RequestSession<T, S> {
     transport: T,
-    notifications: Pin<Box<dyn Stream<Item = Vec<u8>> + Send>>,
+    notifications: S,
     decoder: FrameDecoder,
     response_timeout: Duration,
 }
 
-impl<T: GattTransport> RequestSession<T> {
-    pub(super) fn new(
-        transport: T,
-        notifications: Pin<Box<dyn Stream<Item = Vec<u8>> + Send>>,
-        response_timeout: Duration,
-    ) -> Self {
+impl<T, S> RequestSession<T, S>
+where
+    T: GattTransport,
+    S: Stream<Item = Vec<u8>> + Send + Unpin,
+{
+    pub(super) fn new(transport: T, notifications: S, response_timeout: Duration) -> Self {
         Self {
             transport,
             notifications,
@@ -170,11 +170,14 @@ mod tests {
 
     fn session(
         responses: &'static [&'static [u8]],
-    ) -> (RequestSession<RecordingTransport>, RecordingTransport) {
+    ) -> (
+        RequestSession<RecordingTransport, impl Stream<Item = Vec<u8>> + Unpin>,
+        RecordingTransport,
+    ) {
         let transport = RecordingTransport::default();
         let session = RequestSession::new(
             transport.clone(),
-            Box::pin(stream::iter(responses.iter().map(|bytes| bytes.to_vec()))),
+            stream::iter(responses.iter().map(|bytes| bytes.to_vec())),
             Duration::from_secs(1),
         );
         (session, transport)
