@@ -82,6 +82,57 @@ async fn mqtt_snapshot_collection_serializes_sibling_publications() {
     );
 }
 
+#[cfg(feature = "mqtt")]
+#[tokio::test]
+async fn publication_timer_expires_state_while_backend_refresh_is_blocked_and_recovers() {
+    let (mut state, id, fixture, _server, _directory) = refresh_fixture().await;
+    fixture.release.notify_one();
+    state.refresh_device(&id).await.unwrap();
+    fixture.entered.notified().await;
+    let (updates, mut observed) = watch::channel(Arc::new(state.state_snapshot().await.unwrap()));
+    state.attach_state_publication(updates, false);
+    let (mut polling_tasks, stop_polls) = crate::server::start_polling(&state);
+    stop_polls[2].abort();
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    super::super::test_support::age_state_for_test(&state, &id, Duration::from_secs(91)).await;
+    let polling_state = state.clone();
+    let polling_id = id.clone();
+    let blocked_poll = tokio::spawn(async move { polling_state.refresh_device(&polling_id).await });
+    fixture.entered.notified().await;
+    tokio::time::timeout(Duration::from_secs(2), observed.changed())
+        .await
+        .unwrap()
+        .unwrap();
+    {
+        let expired = observed.borrow();
+        let publication = expired
+            .publications
+            .iter()
+            .find(|item| item.id == id)
+            .unwrap();
+        assert!(
+            !publication.available,
+            "expired MQTT state remained available"
+        );
+        assert!(publication.state.is_none());
+    }
+    assert_eq!(
+        super::super::test_support::state_response_for_device(state.clone(), &id).await["available"],
+        false
+    );
+
+    fixture.release.notify_one();
+    let recovered = blocked_poll.await.unwrap().unwrap();
+    assert!(
+        recovered.device.available,
+        "backend refresh did not recover: {recovered:?}"
+    );
+    observed.changed().await.unwrap();
+    assert!(observed.borrow().publications[0].available);
+    polling_tasks.abort_all();
+    polling_tasks.shutdown().await;
+}
+
 #[tokio::test]
 #[cfg(feature = "mqtt")]
 async fn stale_mqtt_snapshot_cannot_restore_previous_entity_owner() {
@@ -158,11 +209,11 @@ async fn cloud_only_state_is_scheduled_and_periodically_published() {
     assert!(disconnected.state_polling_enabled());
     let mut state = DeviceService::with_registry(DeviceRegistry::new());
     assert!(!state.state_polling_enabled());
-    let (updates, mut current) = watch::channel(Arc::new(state.state_snapshot().await.unwrap()));
+    let (updates, current) = watch::channel(Arc::new(state.state_snapshot().await.unwrap()));
     state.attach_state_publication(updates, false);
     assert!(state.state_polling_enabled());
     state.poll_and_publish_state().await;
-    assert!(current.changed().await.is_ok());
+    assert!(!current.has_changed().unwrap());
     assert!(current.borrow().publications.is_empty());
 }
 

@@ -87,6 +87,11 @@ impl DeviceService {
         }
     }
 
+    #[cfg(feature = "mqtt")]
+    pub(crate) fn state_publication_enabled(&self) -> bool {
+        self.publication.is_some()
+    }
+
     pub(crate) fn quickconnect_polling_enabled(&self) -> bool {
         self.quickconnect.is_some()
     }

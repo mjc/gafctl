@@ -351,7 +351,7 @@ async fn wait_for_device_reply(
 #[cfg(test)]
 mod tests {
     use super::super::{
-        start,
+        start_for_test,
         test_support::{
             config, mqtt_device, observed_client, receive_topic, request, snapshot,
             start_native_broker,
@@ -652,7 +652,8 @@ mod tests {
                 .subscribe(&result_topic, QoS::AtLeastOnce)
                 .await
                 .unwrap();
-            let mut bridge = start(config(broker.port, discovery), snapshot(device.clone()));
+            let mut bridge =
+                start_for_test(config(broker.port, discovery), snapshot(device.clone()));
             receive_topic(&mut received, &topics.process_availability()).await;
             for (request_id, stale, retain, expected) in [
                 ("retained", false, true, "retained_request"),
@@ -726,7 +727,7 @@ mod tests {
             )
             .await
             .unwrap();
-        let mut bridge = start(config(broker.port, false), snapshot(device.clone()));
+        let mut bridge = start_for_test(config(broker.port, false), snapshot(device.clone()));
         receive_topic(&mut received, &topics.process_availability()).await;
         observer
             .publish(

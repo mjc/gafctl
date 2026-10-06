@@ -7,19 +7,26 @@ use rumqttc_next::{AsyncClient, PublishOptions};
 use tokio::sync::watch;
 
 use super::{discovery, topics::Topics};
+use crate::service::DeviceService;
 use gafctl_api::{DeviceBackend, DeviceId};
 
 struct StateSubscriptions {
     state: watch::Receiver<Arc<StateSnapshot>>,
     connected: watch::Receiver<bool>,
+    service: Option<DeviceService>,
 }
 
 fn state_payloads(
     state: watch::Receiver<Arc<StateSnapshot>>,
     connected: watch::Receiver<bool>,
+    service: Option<DeviceService>,
 ) -> impl Stream<Item = Arc<StateSnapshot>> {
     stream::unfold(
-        StateSubscriptions { state, connected },
+        StateSubscriptions {
+            state,
+            connected,
+            service,
+        },
         receive_state_update,
     )
     .filter_map(future::ready)
@@ -29,11 +36,13 @@ async fn receive_state_update(
     mut subscriptions: StateSubscriptions,
 ) -> Option<(Option<Arc<StateSnapshot>>, StateSubscriptions)> {
     tokio::select! {
-        changed = subscriptions.state.changed() => changed,
-        changed = subscriptions.connected.changed() => changed,
+        changed = subscriptions.state.changed() => changed.ok()?,
+        changed = subscriptions.connected.changed() => changed.ok()?,
     }
-    .ok()?;
     let active = *subscriptions.connected.borrow_and_update();
+    if active && let Some(service) = &subscriptions.service {
+        service.publish_state().await;
+    }
     let payload = active.then(|| Arc::clone(&*subscriptions.state.borrow_and_update()));
     Some((payload, subscriptions))
 }
@@ -44,8 +53,9 @@ pub(super) async fn publish_state_updates(
     state: watch::Receiver<Arc<StateSnapshot>>,
     connected: watch::Receiver<bool>,
     discovery_enabled: bool,
+    service: Option<DeviceService>,
 ) {
-    state_payloads(state, connected)
+    state_payloads(state, connected, service)
         .fold(HashSet::new(), |previous_topics, snapshot| {
             let client = &client;
             async move {
@@ -304,7 +314,7 @@ async fn publish_discovery_message(
 #[cfg(test)]
 mod tests {
     use super::super::{
-        start,
+        start_for_test,
         test_support::{
             config, mqtt_device, observed_client, receive_topic, request, snapshot,
             start_native_broker,
@@ -316,6 +326,80 @@ mod tests {
     use serde_json::Value;
     use std::time::Duration;
     use tokio::time::{sleep, timeout};
+
+    #[tokio::test]
+    async fn server_mqtt_start_rechecks_retained_state_after_broker_reconnect() {
+        let (mut service, id, fixture, _server, _directory) =
+            crate::service::test_support::refresh_fixture().await;
+        fixture.release.notify_one();
+        service.refresh_device(&id).await.unwrap();
+        fixture.entered.notified().await;
+        let snapshot = service.state_snapshot().await.unwrap();
+        let device = snapshot.descriptors[0].clone();
+        let topics = Topics(snapshot.proxy_id);
+        let mut broker = start_native_broker().await;
+        let mut mqtt = crate::server::mqtt::start(&mut service, config(broker.port, true))
+            .await
+            .unwrap();
+        let (observer, mut received) = observed_client("startup-reconnect-observer", broker.port);
+        observer
+            .subscribe(topics.process_availability(), QoS::AtLeastOnce)
+            .await
+            .unwrap();
+        assert_eq!(
+            receive_topic(&mut received, &topics.process_availability())
+                .await
+                .payload
+                .as_ref(),
+            b"online"
+        );
+        observer
+            .subscribe(topics.device(&device.id, "state"), QoS::AtLeastOnce)
+            .await
+            .unwrap();
+        let initial = receive_topic(&mut received, &topics.device(&device.id, "state")).await;
+        assert!(
+            serde_json::from_slice::<DeviceStateV2Response>(&initial.payload)
+                .unwrap()
+                .available
+        );
+        crate::service::test_support::age_state_for_test(&service, &id, Duration::from_secs(91))
+            .await;
+
+        broker.restart().await;
+        let (reconnected, mut replayed) = observed_client("startup-reconnect-reader", broker.port);
+        reconnected
+            .subscribe(topics.process_availability(), QoS::AtLeastOnce)
+            .await
+            .unwrap();
+        assert_eq!(
+            receive_topic(&mut replayed, &topics.process_availability())
+                .await
+                .payload
+                .as_ref(),
+            b"online"
+        );
+        reconnected
+            .subscribe(topics.device(&device.id, "state"), QoS::AtLeastOnce)
+            .await
+            .unwrap();
+        let retained = receive_topic(&mut replayed, &topics.device(&device.id, "state")).await;
+        let retained: DeviceStateV2Response = serde_json::from_slice(&retained.payload).unwrap();
+        assert!(!retained.available);
+        reconnected
+            .subscribe(topics.device(&device.id, "availability"), QoS::AtLeastOnce)
+            .await
+            .unwrap();
+        assert_eq!(
+            receive_topic(&mut replayed, &topics.device(&device.id, "availability"))
+                .await
+                .payload
+                .as_ref(),
+            b"offline"
+        );
+        mqtt.drain(tokio::time::Instant::now() + Duration::from_secs(5))
+            .await;
+    }
 
     #[test]
     fn state_publications_preserve_the_canonical_response_and_availability() {
@@ -805,7 +889,7 @@ mod tests {
             .subscribe(topics.process_availability(), QoS::AtLeastOnce)
             .await
             .unwrap();
-        let bridge = start(config(broker.port, true), snapshot(device.clone()));
+        let bridge = start_for_test(config(broker.port, true), snapshot(device.clone()));
         let online = receive_topic(&mut received, &topics.process_availability()).await;
         assert_eq!(online.payload.as_ref(), b"online");
         let discovery_topic = topics.discovery(&device.id);
@@ -871,13 +955,13 @@ mod tests {
             .subscribe(topics.process_availability(), QoS::AtLeastOnce)
             .await
             .unwrap();
-        let mut first_bridge = start(config(broker.port, true), snapshot(first.clone()));
+        let mut first_bridge = start_for_test(config(broker.port, true), snapshot(first.clone()));
         receive_topic(&mut received, &topics.process_availability()).await;
         observer
             .subscribe(other.process_availability(), QoS::AtLeastOnce)
             .await
             .unwrap();
-        let mut second_bridge = start(config(broker.port, true), snapshot(second.clone()));
+        let mut second_bridge = start_for_test(config(broker.port, true), snapshot(second.clone()));
         receive_topic(&mut received, &other.process_availability()).await;
         observer
             .publish(
@@ -942,7 +1026,7 @@ mod tests {
             .subscribe(topics.process_availability(), QoS::AtLeastOnce)
             .await
             .unwrap();
-        let bridge = start(config(broker.port, true), snapshot(device.clone()));
+        let bridge = start_for_test(config(broker.port, true), snapshot(device.clone()));
         receive_topic(&mut received, &topics.process_availability()).await;
         let discovery_topic = topics.discovery(&device.id);
         let state_topic = topics.device(&device.id, "state");

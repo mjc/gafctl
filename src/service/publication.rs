@@ -6,7 +6,7 @@ use tokio::sync::{Mutex, watch};
 
 use super::{DeviceService, ServiceError};
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 pub(crate) struct StateSnapshot {
     pub(crate) proxy_id: ProxyId,
     pub(crate) descriptors: Vec<DeviceDescriptor>,
@@ -39,7 +39,7 @@ impl DeviceService {
         }));
     }
 
-    pub(super) async fn publish_state(&self) {
+    pub(crate) async fn publish_state(&self) {
         let Some(publication) = &self.publication else {
             return;
         };
@@ -61,6 +61,9 @@ impl DeviceService {
         let registry = self.registry.read().await;
         if !registry.descriptors().eq(snapshot.descriptors.iter()) {
             return false;
+        }
+        if **updates.borrow() == snapshot {
+            return true;
         }
         updates.send_replace(Arc::new(snapshot));
         true

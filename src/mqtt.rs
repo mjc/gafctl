@@ -16,6 +16,7 @@ use tokio::{
 };
 use tokio_util::task::AbortOnDropHandle;
 
+use crate::service::DeviceService;
 use crate::service::publication::StateSnapshot;
 pub(crate) use adapter::run_device_requests;
 pub(crate) use requests::{
@@ -66,6 +67,7 @@ impl MqttTasks {
 
 pub(crate) struct MqttBridge {
     pub(crate) tasks: MqttTasks,
+    #[cfg(test)]
     pub(crate) state_updates: watch::Sender<Arc<StateSnapshot>>,
     pub(crate) device_requests: mpsc::Receiver<MqttDeviceWork>,
     pub(crate) request_intake: MqttRequestIntake,
@@ -79,10 +81,31 @@ pub(crate) struct MqttConfig {
     pub(crate) discovery_enabled: bool,
 }
 
-pub(crate) fn start(config: MqttConfig, initial_state: StateSnapshot) -> MqttBridge {
+pub(crate) fn start(
+    config: MqttConfig,
+    initial_state: StateSnapshot,
+    service: &mut DeviceService,
+) -> MqttBridge {
+    start_inner(config, initial_state, Some(service))
+}
+
+#[cfg(test)]
+pub(crate) fn start_for_test(config: MqttConfig, initial_state: StateSnapshot) -> MqttBridge {
+    start_inner(config, initial_state, None)
+}
+
+fn start_inner(
+    config: MqttConfig,
+    initial_state: StateSnapshot,
+    service: Option<&mut DeviceService>,
+) -> MqttBridge {
     let discovery_enabled = config.discovery_enabled;
     let topics = Topics(initial_state.proxy_id);
     let (state_tx, state_rx) = watch::channel(Arc::new(initial_state));
+    let service = service.map(|service| {
+        service.attach_state_publication(state_tx.clone(), discovery_enabled);
+        service.clone()
+    });
     let (connected_tx, connected_rx) = watch::channel(false);
     let (control_tx, control_rx) = mpsc::channel(CONTROL_QUEUE_CAPACITY);
     let intake = MqttRequestIntake::new(control_tx);
@@ -108,6 +131,7 @@ pub(crate) fn start(config: MqttConfig, initial_state: StateSnapshot) -> MqttBri
         state_rx,
         connected_rx,
         discovery_enabled,
+        service,
     ));
     MqttBridge {
         tasks: MqttTasks {
@@ -115,6 +139,7 @@ pub(crate) fn start(config: MqttConfig, initial_state: StateSnapshot) -> MqttBri
             event_loop: AbortOnDropHandle::new(event_loop),
             publishers,
         },
+        #[cfg(test)]
         state_updates: state_tx,
         device_requests: control_rx,
         request_intake: intake,
@@ -138,7 +163,7 @@ mod tests {
         let (observer, mut received) =
             observed_client("shutdown-availability-observer", broker.port);
         observer.subscribe(&topic, QoS::AtLeastOnce).await.unwrap();
-        let bridge = start(config(broker.port, false), snapshot(device));
+        let bridge = start_for_test(config(broker.port, false), snapshot(device));
         let online = receive_topic(&mut received, &topic).await;
         assert_eq!(online.payload.as_ref(), b"online");
         bridge.request_intake.close();

@@ -32,10 +32,8 @@ impl MqttRuntime {
 }
 
 pub(crate) async fn start(service: &mut DeviceService, config: MqttConfig) -> Result<MqttRuntime> {
-    let allow_mqtt_ownership = config.discovery_enabled;
     let initial_state = service.state_snapshot().await?;
-    let bridge = crate::mqtt::start(config, initial_state);
-    service.attach_state_publication(bridge.state_updates, allow_mqtt_ownership);
+    let bridge = crate::mqtt::start(config, initial_state, service);
     let requests = tokio::spawn(run_device_requests(service.clone(), bridge.device_requests));
     Ok(MqttRuntime {
         intake: bridge.request_intake,

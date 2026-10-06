@@ -11,6 +11,8 @@ use axum::{
 };
 use futures_util::{StreamExt, stream};
 use gafctl_api::DeviceId;
+#[cfg(feature = "mqtt")]
+use gafctl_api::unix_millis;
 use gafctl_protocol::DeviceSnapshot;
 use http_body_util::BodyExt;
 use std::time::{Duration, Instant, SystemTime};
@@ -252,10 +254,17 @@ pub(super) fn snapshot_at(started_at: Instant, observed_at: SystemTime) -> Devic
 }
 
 pub(super) async fn state_response(state: DeviceService) -> serde_json::Value {
+    state_response_for_device(state, &DeviceId::configured_ble()).await
+}
+
+pub(crate) async fn state_response_for_device(
+    state: DeviceService,
+    id: &DeviceId,
+) -> serde_json::Value {
     let response = router(state)
         .oneshot(
             Request::builder()
-                .uri("/api/v2/devices/configured/state")
+                .uri(format!("/api/v2/devices/{}/state", id.as_str()))
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -263,4 +272,13 @@ pub(super) async fn state_response(state: DeviceService) -> serde_json::Value {
         .unwrap();
     let bytes = response.into_body().collect().await.unwrap().to_bytes();
     serde_json::from_slice(&bytes).unwrap()
+}
+
+#[cfg(feature = "mqtt")]
+pub(crate) async fn age_state_for_test(state: &DeviceService, id: &DeviceId, age: Duration) {
+    let runtime = state.registry.read().await.runtime(id).unwrap();
+    let mut observation = runtime.state().await.unwrap();
+    observation.provenance.fetched_at_unix_ms = unix_millis(SystemTime::now())
+        .map(|now| now.saturating_sub(age.as_millis().try_into().unwrap_or(u64::MAX)));
+    runtime.set_state(observation).await;
 }

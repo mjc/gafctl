@@ -275,6 +275,8 @@ class GafctlCoordinator(DataUpdateCoordinator[DeviceState]):
 def async_cleanup_registry(
     hass: HomeAssistant, entry: GafctlConfigEntry, device: Device | None
 ) -> None:
+    if device is None:
+        return
     expected = {
         (platform, f"{entry.unique_id}_{key}")
         for platform, keys in entity_keys(device).items()
@@ -286,7 +288,9 @@ def async_cleanup_registry(
             entities.async_remove(entity.entity_id)
     devices = dr.async_get(hass)
     for registered in dr.async_entries_for_config_entry(devices, entry.entry_id):
-        if not er.async_entries_for_device(entities, registered.id):
+        if not er.async_entries_for_device(
+            entities, registered.id, include_disabled_entities=True
+        ):
             devices.async_remove_device(registered.id)
 
 

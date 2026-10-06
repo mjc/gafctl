@@ -56,6 +56,7 @@ from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers.entity_platform import EntityPlatform
+from homeassistant.helpers.entity_registry import RegistryEntryDisabler
 from homeassistant.helpers.template import Template
 from homeassistant.setup import async_setup_component
 
@@ -68,7 +69,7 @@ from custom_components.gafctl import sensor as gafctl_sensor
 from custom_components.gafctl import switch as gafctl_switch
 from custom_components.gafctl.button import GafctlButton
 from custom_components.gafctl.config_flow import GafctlConfigFlow
-from custom_components.gafctl.controls import NUMBER_CONTROLS
+from custom_components.gafctl.controls import NUMBER_CONTROLS, entity_keys
 from custom_components.gafctl.models import ApiError, ControlOutcomeUnknown
 
 COMPONENT_DIR = Path(__file__).resolve().parents[1] / "custom_components/gafctl"
@@ -447,13 +448,20 @@ class RegistryTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(self.entities.async_get(sensor.entity_id))
         self.assertIsNone(self.entities.async_get(obsolete.entity_id))
 
-    async def test_setup_failure_cleans_absent_device_but_preserves_registry_on_network_error(
+    async def test_setup_failure_preserves_registry_until_matching_device_is_resolved(
         self,
     ) -> None:
         entry = await self.entry()
-        for failure in ("network", "absent", "backend", "owner"):
+        for failure in ("network", "absent", "backend", "proxy", "owner"):
             entry._async_set_state(self.hass, ConfigEntryState.SETUP_IN_PROGRESS, None)
             registered, _ = self.registered_sensor(entry)
+            registered_device_id = registered.device_id
+            registered = self.entities.async_update_entity(
+                registered.entity_id,
+                new_entity_id="sensor.custom_vent_temperature",
+                name="Custom vent temperature",
+                disabled_by=RegistryEntryDisabler.USER,
+            )
             client = AsyncMock()
             if failure == "network":
                 client.fetch_devices.side_effect = ApiError("inventory unavailable")
@@ -461,6 +469,7 @@ class RegistryTests(unittest.IsolatedAsyncioTestCase):
                 client.fetch_devices.return_value = {
                     "absent": [],
                     "backend": [device(backend="quick_connect")],
+                    "proxy": [device(proxy_id="another-proxy")],
                     "owner": [device(owner="mqtt")],
                 }[failure]
             client.fetch_state.return_value = state_data(available=False)
@@ -481,12 +490,46 @@ class RegistryTests(unittest.IsolatedAsyncioTestCase):
                     forward.assert_not_awaited()
             entry._async_set_state(self.hass, ConfigEntryState.NOT_LOADED, None)
             client.fetch_devices.assert_awaited_once()
-            self.assertEqual(
-                self.entities.async_get(registered.entity_id) is not None,
-                failure == "network",
-            )
+            restored = self.entities.async_get(registered.entity_id)
+            if failure == "owner":
+                self.assertIsNone(restored)
+            else:
+                self.assertIsNotNone(
+                    restored, f"registry lost during {failure} recovery"
+                )
+                self.assertEqual(restored.name, "Custom vent temperature")
+                self.assertEqual(restored.disabled_by, RegistryEntryDisabler.USER)
+                self.assertEqual(
+                    self.devices.async_get(registered_device_id).id,
+                    registered_device_id,
+                )
             if failure != "owner":
                 client.fetch_state.assert_not_awaited()
+                entry._async_set_state(
+                    self.hass, ConfigEntryState.SETUP_IN_PROGRESS, None
+                )
+                client.fetch_devices.side_effect = None
+                client.fetch_devices.return_value = [device()]
+                with (
+                    api_client(client, "custom_components.gafctl"),
+                    patch.object(
+                        ConfigEntries, "async_forward_entry_setups", AsyncMock()
+                    ),
+                ):
+                    self.assertTrue(
+                        await gafctl_integration.async_setup_entry(self.hass, entry)
+                    )
+                restored = self.entities.async_get(registered.entity_id)
+                self.assertIsNotNone(
+                    restored,
+                    f"registry lost after {failure}: {registered}; entries="
+                    f"{er.async_entries_for_config_entry(self.entities, entry.entry_id)}; "
+                    f"identity={entry.unique_id}; expected={entity_keys(device())}",
+                )
+                self.assertEqual(restored.name, "Custom vent temperature")
+                self.assertEqual(restored.disabled_by, RegistryEntryDisabler.USER)
+                self.assertEqual(restored.device_id, registered_device_id)
+                entry._async_set_state(self.hass, ConfigEntryState.NOT_LOADED, None)
 
     async def test_coordinator_rejects_invalid_input_without_inventory_or_submission(
         self,

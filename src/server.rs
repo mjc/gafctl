@@ -16,6 +16,8 @@ pub(crate) mod config;
 pub(crate) mod mqtt;
 
 const DEFAULT_POLL_INTERVAL: Duration = Duration::from_secs(30);
+#[cfg(feature = "mqtt")]
+const STATE_PUBLICATION_INTERVAL: Duration = Duration::from_secs(1);
 const SHUTDOWN_CLEANUP_TIMEOUT: Duration = Duration::from_secs(5);
 
 pub(crate) async fn serve(config: config::ServerConfig) -> Result<()> {
@@ -75,12 +77,16 @@ pub(crate) async fn serve(config: config::ServerConfig) -> Result<()> {
     .await
 }
 
-fn start_polling(state: &DeviceService) -> (JoinSet<()>, Vec<tokio::task::AbortHandle>) {
+pub(crate) fn start_polling(state: &DeviceService) -> (JoinSet<()>, Vec<tokio::task::AbortHandle>) {
     let mut polls = JoinSet::new();
     let stop_polls = [
         state
             .state_polling_enabled()
             .then(|| polls.spawn(poll_device(state.clone(), DEFAULT_POLL_INTERVAL))),
+        #[cfg(feature = "mqtt")]
+        state
+            .state_publication_enabled()
+            .then(|| polls.spawn(publish_state_periodically(state.clone()))),
         state.quickconnect_polling_enabled().then(|| {
             polls.spawn(poll_quickconnect_device(
                 state.clone(),
@@ -92,6 +98,13 @@ fn start_polling(state: &DeviceService) -> (JoinSet<()>, Vec<tokio::task::AbortH
     .flatten()
     .collect();
     (polls, stop_polls)
+}
+
+#[cfg(feature = "mqtt")]
+pub(crate) async fn publish_state_periodically(state: DeviceService) {
+    poll_ticks(STATE_PUBLICATION_INTERVAL)
+        .for_each(|_| state.publish_state())
+        .await;
 }
 
 async fn serve_http(
