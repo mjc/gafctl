@@ -1,13 +1,19 @@
+#[cfg(any(target_os = "linux", test))]
+use std::ops::AsyncFnOnce;
 use std::{future::Future, sync::Arc, time::Duration};
 
 use anyhow::Context;
 use anyhow::Result as AnyhowResult;
+#[cfg(target_os = "linux")]
+use btleplug::api::Central as _;
 use btleplug::{
     api::Manager as _,
     platform::{Adapter, Manager, Peripheral},
 };
 use gafctl_protocol::ControlCommand;
 use tokio::sync::{Mutex, OnceCell};
+#[cfg(any(target_os = "linux", test))]
+use tokio::time::{Instant, timeout_at};
 
 use crate::{
     ProbeError, ProbeMode, ProbeOptions, ProbeResult,
@@ -99,25 +105,34 @@ impl BleBackend {
             })
             .await?;
 
-        // BlueZ can replace its adapter object after it disappears. Enumerating
-        // through the retained manager refreshes that handle without opening a
-        // new D-Bus session. CoreBluetooth adapters are cached because creating
-        // them starts a worker thread.
-        let selected_adapter = if cfg!(target_os = "linux") || adapter.is_none() {
-            let current = complete_before(
-                platform_timeout(options.response_timeout),
-                "list Bluetooth adapters",
-                async { manager.adapters().await.context("list Bluetooth adapters") },
+        let adapter_timeout = platform_timeout(options.response_timeout);
+        #[cfg(target_os = "linux")]
+        {
+            // A successful Adapter1 GetAll validates the cached BlueZ object.
+            // Re-enumerate only when that object is stale or the check fails.
+            reuse_or_refresh_adapter(
+                adapter,
+                adapter_timeout,
+                async |cached| {
+                    cached
+                        .adapter_address()
+                        .await
+                        .context("validate cached Bluetooth adapter")
+                },
+                || async { list_first_adapter(manager).await },
             )
-            .await?
-            .into_iter()
-            .next()
-            .context("no Bluetooth adapter is available")?;
-            *adapter = Some(current);
-            adapter.as_ref().expect("adapter stored above")
-        } else {
-            adapter.as_ref().expect("adapter initialized above")
-        };
+            .await?;
+        }
+        #[cfg(not(target_os = "linux"))]
+        if adapter.is_none() {
+            *adapter = Some(
+                complete_before(adapter_timeout, "list Bluetooth adapters", async {
+                    list_first_adapter(manager).await
+                })
+                .await?,
+            );
+        }
+        let selected_adapter = adapter.as_ref().expect("adapter initialized above");
 
         probe_with_adapter(
             selected_adapter,
@@ -127,6 +142,46 @@ impl BleBackend {
         )
         .await
     }
+}
+
+async fn list_first_adapter(manager: &Manager) -> AnyhowResult<Adapter> {
+    manager
+        .adapters()
+        .await
+        .context("list Bluetooth adapters")?
+        .into_iter()
+        .next()
+        .context("no Bluetooth adapter is available")
+}
+
+#[cfg(any(target_os = "linux", test))]
+async fn reuse_or_refresh_adapter<T, A, Validate, Refresh, RefreshFuture>(
+    cached: &mut Option<T>,
+    timeout: Duration,
+    validate: Validate,
+    refresh: Refresh,
+) -> AnyhowResult<()>
+where
+    Validate: for<'a> AsyncFnOnce(&'a T) -> AnyhowResult<Option<A>>,
+    Refresh: FnOnce() -> RefreshFuture,
+    RefreshFuture: Future<Output = AnyhowResult<T>>,
+{
+    let deadline = Instant::now() + timeout;
+    if let Some(cached_adapter) = cached.as_ref()
+        && let Ok(Ok(_)) = timeout_at(deadline, validate(cached_adapter)).await
+    {
+        return Ok(());
+    }
+
+    if Instant::now() >= deadline {
+        anyhow::bail!("list Bluetooth adapters timed out");
+    }
+
+    let current = timeout_at(deadline, refresh())
+        .await
+        .context("list Bluetooth adapters timed out")??;
+    *cached = Some(current);
+    Ok(())
 }
 
 async fn finish_without_cancelling<T: Send + 'static>(
@@ -384,6 +439,132 @@ mod tests {
         .expect("empty state needs no cleanup");
         assert_eq!(disconnect_attempts.get(), disconnect_attempts_when_empty);
         assert_eq!(scan_attempts.get(), scan_attempts_when_empty);
+    }
+
+    #[tokio::test]
+    async fn cached_adapter_validation_reuses_adapter_even_without_address() {
+        use std::cell::Cell;
+
+        let validations = Cell::new(0);
+        let enumerations = Cell::new(0);
+        let mut cached = Some("cached");
+        super::reuse_or_refresh_adapter(
+            &mut cached,
+            std::time::Duration::from_secs(1),
+            async |_| {
+                validations.set(validations.get() + 1);
+                Ok(None::<()>)
+            },
+            || {
+                enumerations.set(enumerations.get() + 1);
+                async { Ok("replacement") }
+            },
+        )
+        .await
+        .expect("an adapter that answers GetAll is still live");
+
+        assert_eq!(cached, Some("cached"));
+        assert_eq!(validations.get(), 1);
+        assert_eq!(enumerations.get(), 0);
+    }
+
+    #[tokio::test]
+    async fn missing_cached_adapter_is_enumerated() {
+        use std::cell::Cell;
+
+        let validations = Cell::new(0);
+        let enumerations = Cell::new(0);
+        let mut cached = None;
+        super::reuse_or_refresh_adapter(
+            &mut cached,
+            std::time::Duration::from_secs(1),
+            async |_| {
+                validations.set(validations.get() + 1);
+                Ok(None::<()>)
+            },
+            || {
+                enumerations.set(enumerations.get() + 1);
+                async { Ok("first adapter") }
+            },
+        )
+        .await
+        .expect("the first probe should enumerate adapters");
+
+        assert_eq!(cached, Some("first adapter"));
+        assert_eq!(validations.get(), 0);
+        assert_eq!(enumerations.get(), 1);
+    }
+
+    #[tokio::test]
+    async fn failed_adapter_validation_replaces_and_then_reuses_adapter() {
+        use std::cell::Cell;
+
+        let enumerations = Cell::new(0);
+        let mut cached = Some("stale");
+        super::reuse_or_refresh_adapter(
+            &mut cached,
+            std::time::Duration::from_secs(1),
+            async |_| Err::<Option<()>, _>(anyhow::anyhow!("adapter object disappeared")),
+            || {
+                enumerations.set(enumerations.get() + 1);
+                async { Ok("replacement") }
+            },
+        )
+        .await
+        .expect("a stale adapter should be refreshed");
+        assert_eq!(cached, Some("replacement"));
+        assert_eq!(enumerations.get(), 1);
+
+        super::reuse_or_refresh_adapter(
+            &mut cached,
+            std::time::Duration::from_secs(1),
+            async |_| Ok(Some(())),
+            || {
+                enumerations.set(enumerations.get() + 1);
+                async { Ok("unexpected second replacement") }
+            },
+        )
+        .await
+        .expect("the replacement should be cached on the next probe");
+        assert_eq!(cached, Some("replacement"));
+        assert_eq!(enumerations.get(), 1);
+    }
+
+    #[tokio::test]
+    async fn adapter_enumeration_failure_is_returned() {
+        let mut cached = Some("stale");
+        let error = super::reuse_or_refresh_adapter(
+            &mut cached,
+            std::time::Duration::from_secs(1),
+            async |_| Err::<Option<()>, _>(anyhow::anyhow!("adapter object disappeared")),
+            || async { Err(anyhow::anyhow!("D-Bus enumeration failed")) },
+        )
+        .await
+        .expect_err("refresh failure must be returned");
+
+        assert!(format!("{error:#}").contains("D-Bus enumeration failed"));
+        assert_eq!(cached, Some("stale"));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn adapter_validation_and_enumeration_share_one_timeout() {
+        let mut cached = Some("stale");
+        let error = super::reuse_or_refresh_adapter(
+            &mut cached,
+            std::time::Duration::from_secs(1),
+            async |_| {
+                tokio::time::sleep(std::time::Duration::from_millis(750)).await;
+                Err::<Option<()>, _>(anyhow::anyhow!("adapter object disappeared"))
+            },
+            || async {
+                tokio::time::sleep(std::time::Duration::from_millis(750)).await;
+                Ok("replacement")
+            },
+        )
+        .await
+        .expect_err("validation and enumeration must share one deadline");
+
+        assert!(format!("{error:#}").contains("list Bluetooth adapters timed out"));
     }
 
     #[tokio::test(start_paused = true)]
