@@ -110,11 +110,21 @@ enum RuntimeUnavailableReason {
     Missing,
     Inventory,
     ControlReadback,
+    Bluetooth,
+    RefreshDeadline,
 }
 
 impl RuntimeUnavailableReason {
     fn status_message(self) -> (DeviceInventoryStatus, &'static str) {
         match self {
+            Self::RefreshDeadline => (
+                DeviceInventoryStatus::Unavailable,
+                "device refresh deadline exceeded",
+            ),
+            Self::Bluetooth => (
+                DeviceInventoryStatus::Unavailable,
+                "Bluetooth state unavailable",
+            ),
             Self::Detail => (
                 DeviceInventoryStatus::Present,
                 "QuickConnect device detail unavailable",
@@ -209,6 +219,21 @@ impl DeviceRuntime {
         let mut observation = self.observation.write().await;
         self.state_generation.fetch_add(1, Ordering::AcqRel);
         *observation = RuntimeObservation::Available(state);
+    }
+
+    pub(crate) async fn mark_ble_state_unavailable(&self) {
+        let mut observation = self.observation.write().await;
+        self.state_generation.fetch_add(1, Ordering::AcqRel);
+        *observation = RuntimeObservation::Unavailable(RuntimeUnavailableReason::Bluetooth);
+    }
+
+    pub(crate) fn state_generation(&self) -> u64 {
+        self.state_generation.load(Ordering::Acquire)
+    }
+
+    pub(crate) async fn mark_refresh_unavailable_if_current(&self, generation: u64) -> bool {
+        self.mark_unavailable_if_current(generation, RuntimeUnavailableReason::RefreshDeadline)
+            .await
     }
 
     pub(crate) fn is_current_state_read(&self, generation: u64) -> bool {
@@ -326,11 +351,17 @@ impl DeviceRuntime {
 }
 
 fn state_is_fresh(state: &DeviceState, now_unix_ms: u64) -> bool {
-    state
-        .provenance
-        .fetched_at_unix_ms
-        .and_then(|fetched_at| now_unix_ms.checked_sub(fetched_at))
-        .is_some_and(|age| age <= DEVICE_STATE_FRESHNESS_LIMIT_MS)
+    let provenance = &state.provenance;
+    provenance.fetched_at_unix_ms.is_some_and(|fetched| {
+        [Some(fetched), provenance.observed_at_unix_ms]
+            .into_iter()
+            .flatten()
+            .all(|time| {
+                now_unix_ms
+                    .checked_sub(time)
+                    .is_some_and(|age| age <= DEVICE_STATE_FRESHNESS_LIMIT_MS)
+            })
+    })
 }
 
 #[cfg(test)]
@@ -393,6 +424,14 @@ mod tests {
             };
             for _ in 0..2 {
                 assert!(match reason {
+                    RuntimeUnavailableReason::RefreshDeadline =>
+                        runtime
+                            .mark_refresh_unavailable_if_current(generation)
+                            .await,
+                    RuntimeUnavailableReason::Bluetooth => {
+                        runtime.mark_ble_state_unavailable().await;
+                        true
+                    }
                     RuntimeUnavailableReason::Detail =>
                         runtime.mark_detail_unavailable_if_current(generation).await,
                     RuntimeUnavailableReason::Missing =>

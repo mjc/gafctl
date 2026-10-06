@@ -20,7 +20,7 @@ A direct CLI operation closes its connection before returning.
 | Responses | Enable local notifications, write CCCD `2902`, then read FF01 | Register native notifications, subscribe, then read FF01; the OS handles CCCD |
 | Initialization | Identity → sensors → thresholds → mode | `idg` → `sdg` → `atg` → `dmg`, awaiting each reply |
 | Timer initialization | Read timer for timer mode with fan on | Request `ttg` for `dmrtn`; timer observations otherwise absent |
-| Normal polling | Request sensors every three seconds | Request `sdg` three seconds after the preceding successful poll completes |
+| Normal polling | Request sensors every three seconds | Read sensors, thresholds, mode, and conditional timer three seconds after the preceding successful poll completes |
 | Ordinary controls | `ams` / `tms`, ASCII and LF, firmware version 2 or later | Same encoding and firmware gate; no sent control is automatically replayed |
 | Teardown | Disconnect, close GATT, clear the handle | Drop the stream/session and disconnect the tracked native peripheral |
 
@@ -35,14 +35,18 @@ saved automatic thresholds: connecting for readings must not change settings.
 
 ## Settings and controls
 
-Identity, mode, and thresholds are cached for the retained connection. Sensor
-polls update the reading timestamp. Every thirty seconds, Gafctl also reads mode
-and fan status, followed by timer state when timer mode is running. The Android
-app does not periodically refresh these values or run a local countdown. This
-additional status read keeps Home Assistant diagnostics current without
-reconnecting or repeating identity and threshold reads. Received unsolicited state replies update
-the corresponding cached observations. Settings reply timestamps do not renew
-sensor freshness. Timer values are nullable when no timer reply was requested.
+Identity is connection-scoped metadata. Each published poll reads sensors,
+automatic thresholds, mode, and timer when timer mode is running. The Android
+app's recurring request reads sensors only; its mode and timer display can be
+stale. Gafctl reads the changing fields together so Home Assistant receives
+current settings and fan status. These reads share the retained connection.
+Timer values are null when no timer reply was requested.
+
+The reading timestamp starts when the sensor reply arrives. Later replies and
+unsolicited frames do not renew that timestamp. HTTP and MQTT freshness use
+both observation and fetch timestamps. A failed poll or invalid control
+readback immediately makes readings unavailable; a complete successful reading
+restores availability. Last raw observations remain in diagnostics.
 
 Controls retain their acknowledgement and then read settings, mode, sensors,
 and timer for confirmation. Partial threshold changes first read current

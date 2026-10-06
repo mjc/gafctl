@@ -59,6 +59,7 @@ impl DeviceService {
         backend: DeviceBackend,
         runtime: &DeviceRuntime,
     ) -> Result<DeviceRefreshV2Response, ServiceError> {
+        let generation = runtime.state_generation();
         let response = match tokio::time::timeout(
             DEVICE_REFRESH_TIMEOUT,
             self.read_device_locked(id, backend, runtime),
@@ -67,12 +68,27 @@ impl DeviceService {
         {
             Ok(response) => response?,
             Err(_) => {
+                let status = match backend {
+                    DeviceBackend::LegacyBle => {
+                        if self
+                            .ble_device
+                            .as_ref()
+                            .ok_or(ServiceError::BackendUnavailable)?
+                            .record_refresh_timeout(generation)
+                            .await
+                        {
+                            DeviceRefreshStatus::Failed
+                        } else {
+                            DeviceRefreshStatus::Superseded
+                        }
+                    }
+                    DeviceBackend::QuickConnect => DeviceRefreshStatus::Failed,
+                };
                 let mut device = self.state(id).await?;
-                device.last_error = Some("device refresh deadline exceeded".to_owned());
-                DeviceRefreshV2Response {
-                    status: DeviceRefreshStatus::Failed,
-                    device,
+                if backend == DeviceBackend::QuickConnect {
+                    device.last_error = Some("device refresh deadline exceeded".to_owned());
                 }
+                DeviceRefreshV2Response { status, device }
             }
         };
         self.publish_state().await;

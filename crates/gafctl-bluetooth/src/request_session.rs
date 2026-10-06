@@ -1,4 +1,7 @@
-use std::{future, time::Duration};
+use std::{
+    future,
+    time::{Duration, Instant, SystemTime},
+};
 
 use anyhow::{Context, Result};
 use bytes::Bytes;
@@ -21,7 +24,6 @@ pub(crate) struct RequestSession<T, S> {
     decoder: FrameDecoder,
     response_timeout: Duration,
     snapshot: Option<DeviceSnapshot>,
-    status_read_at: tokio::time::Instant,
 }
 
 impl<T, S> RequestSession<T, S>
@@ -36,7 +38,6 @@ where
             decoder: FrameDecoder::default(),
             response_timeout,
             snapshot: None,
-            status_read_at: tokio::time::Instant::now(),
         }
     }
 
@@ -52,7 +53,6 @@ where
         &mut self,
         control_command: Option<ControlCommand>,
         control_deadline: Option<tokio::time::Instant>,
-        refresh_settings: bool,
     ) -> Result<QueryResult> {
         if control_command.is_some() {
             check_control_deadline(control_deadline)?;
@@ -62,7 +62,7 @@ where
             self.query_control(identity, command, control_deadline)
                 .await
         } else {
-            let snapshot = self.query_state(identity, refresh_settings).await?;
+            let snapshot = self.query_state(identity).await?;
             let state_error = snapshot.decoding_error().map(|error| error.to_string());
             Ok(QueryResult {
                 snapshot: Some(snapshot),
@@ -90,7 +90,7 @@ where
         validate_gaf_identity(&identity)?;
         check_control_deadline(deadline)?;
         if self.snapshot.is_none() {
-            let initialized = self.query_state(identity.clone(), false).await?;
+            let initialized = self.query_state(identity.clone()).await?;
             if let Some(error) = initialized.decoding_error() {
                 return Err(error.into());
             }
@@ -113,7 +113,6 @@ where
             .as_ref()
             .filter(|snapshot| snapshot.decoding_error().is_none())
             .cloned();
-        self.status_read_at = tokio::time::Instant::now();
         Ok(QueryResult {
             snapshot,
             state_error,
@@ -123,56 +122,13 @@ where
         })
     }
 
-    async fn query_state(
-        &mut self,
-        identity: Frame<'static>,
-        refresh_settings: bool,
-    ) -> Result<DeviceSnapshot> {
-        if self.snapshot.is_none() || refresh_settings {
-            let snapshot = self.read_state(identity, false).await?;
-            self.snapshot = snapshot
-                .decoding_error()
-                .is_none()
-                .then(|| snapshot.clone());
-            self.status_read_at = tokio::time::Instant::now();
-            return Ok(snapshot);
-        }
-        let sensors = self.exchange(ReadCommand::Sensors.into(), None).await?;
-        if self.status_read_at.elapsed() >= Duration::from_secs(30) {
-            self.refresh_status().await?;
-        }
-        let snapshot = self
-            .snapshot
-            .as_mut()
-            .context("BLE settings have not been initialized")?;
-        snapshot.refresh_sensors(sensors)?;
-        if snapshot.decoding_error().is_some() {
-            return self
-                .snapshot
-                .take()
-                .context("BLE snapshot is not initialized");
-        }
-        Ok(snapshot.clone())
-    }
-
-    async fn refresh_status(&mut self) -> Result<()> {
-        let mode = self.exchange(ReadCommand::Mode.into(), None).await?;
-        let timer = if mode.payload().starts_with(b"tn") {
-            Some(self.exchange(ReadCommand::Timer.into(), None).await?)
-        } else {
-            None
-        };
-        let snapshot = self
-            .snapshot
-            .as_mut()
-            .context("BLE settings have not been initialized")?;
-        snapshot.timer = None;
-        snapshot.observe_frame(mode)?;
-        if let Some(timer) = timer {
-            snapshot.observe_frame(timer)?;
-        }
-        self.status_read_at = tokio::time::Instant::now();
-        Ok(())
+    async fn query_state(&mut self, identity: Frame<'static>) -> Result<DeviceSnapshot> {
+        let snapshot = self.read_state(identity, false).await?;
+        self.snapshot = snapshot
+            .decoding_error()
+            .is_none()
+            .then(|| snapshot.clone());
+        Ok(snapshot)
     }
 
     async fn read_state(
@@ -181,6 +137,8 @@ where
         read_timer: bool,
     ) -> Result<DeviceSnapshot> {
         let sensors = self.exchange(ReadCommand::Sensors.into(), None).await?;
+        let observed_at = SystemTime::now();
+        let freshness_started_at = Instant::now();
         let thresholds = self
             .exchange(ReadCommand::AutoThresholds.into(), None)
             .await?;
@@ -190,8 +148,16 @@ where
         } else {
             None
         };
-        let snapshot = DeviceSnapshot::from_frames(identity, mode, sensors, thresholds, timer)
-            .context("validate device snapshot")?;
+        let snapshot = DeviceSnapshot::from_frames_at(
+            identity,
+            mode,
+            sensors,
+            thresholds,
+            timer,
+            observed_at,
+            freshness_started_at,
+        )
+        .context("validate device snapshot")?;
         Ok(snapshot)
     }
 
@@ -364,27 +330,27 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn repeated_polls_initialize_once_then_only_request_sensors() {
+    async fn repeated_polls_refresh_all_readings_without_repeating_identity() {
         let (mut session, transport) = session(&[
             b"#idr030000x\n",
             b"#sdr03ca00aa\n",
             b"#atr041a012c\n",
             b"#dmraf\n",
             b"#sdr03cb00ab\n",
+            b"#atr041b012d\n",
+            b"#dmran\n",
         ]);
-        session.query(None, None, false).await.unwrap();
-        let second = session.query(None, None, false).await.unwrap();
+        session.query(None, None).await.unwrap();
+        let second = session.query(None, None).await.unwrap().snapshot.unwrap();
         assert_eq!(
-            second
-                .snapshot
-                .unwrap()
-                .sensors
-                .decoded()
-                .unwrap()
-                .temperature
-                .value(),
-            971
+            second.thresholds.decoded().unwrap().temperature.value(),
+            1051
         );
+        assert_eq!(
+            second.mode.decoded().unwrap().fan,
+            gafctl_protocol::FanState::On
+        );
+        assert_eq!(second.sensors.decoded().unwrap().temperature.value(), 971);
         assert_eq!(
             transport.writes.lock().unwrap().as_slice(),
             &[
@@ -393,43 +359,37 @@ mod tests {
                 b"#atg\n".to_vec(),
                 b"#dmg\n".to_vec(),
                 b"#sdg\n".to_vec(),
+                b"#atg\n".to_vec(),
+                b"#dmg\n".to_vec(),
             ]
         );
     }
 
     #[tokio::test(start_paused = true)]
-    async fn dynamic_status_refreshes_on_retained_connection_without_reinitializing_settings() {
+    async fn timer_expiry_is_observed_on_the_next_poll() {
         let (mut session, transport) = session(&[
             b"#idr030000x\n",
             b"#sdr03ca00aa\n",
             b"#atr041a012c\n",
             b"#dmraf\n",
             b"#sdr03cb00ab\n",
+            b"#atr041a012c\n",
             b"#dmrtn\n",
             b"#ttr00010002\n",
             b"#sdr03cc00ac\n",
+            b"#atr041a012c\n",
             b"#dmrtf\n",
         ]);
-        session.query(None, None, false).await.unwrap();
-        tokio::time::sleep(Duration::from_secs(30)).await;
-        let running = session
-            .query(None, None, false)
-            .await
-            .unwrap()
-            .snapshot
-            .unwrap();
+        session.query(None, None).await.unwrap();
+        tokio::time::sleep(Duration::from_secs(3)).await;
+        let running = session.query(None, None).await.unwrap().snapshot.unwrap();
         assert_eq!(
             running.mode.decoded().unwrap().fan,
             gafctl_protocol::FanState::On
         );
         assert!(running.timer.is_some());
-        tokio::time::sleep(Duration::from_secs(30)).await;
-        let stopped = session
-            .query(None, None, false)
-            .await
-            .unwrap()
-            .snapshot
-            .unwrap();
+        tokio::time::sleep(Duration::from_secs(3)).await;
+        let stopped = session.query(None, None).await.unwrap().snapshot.unwrap();
         assert_eq!(
             stopped.mode.decoded().unwrap().fan,
             gafctl_protocol::FanState::Off
@@ -443,12 +403,46 @@ mod tests {
                 b"#atg\n".to_vec(),
                 b"#dmg\n".to_vec(),
                 b"#sdg\n".to_vec(),
+                b"#atg\n".to_vec(),
                 b"#dmg\n".to_vec(),
                 b"#ttg\n".to_vec(),
                 b"#sdg\n".to_vec(),
+                b"#atg\n".to_vec(),
                 b"#dmg\n".to_vec(),
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn delayed_settings_do_not_renew_sensor_observation_time() {
+        struct DelayedSettings(RecordingTransport);
+        impl GattTransport for DelayedSettings {
+            async fn write(&mut self, bytes: &[u8]) -> Result<()> {
+                if bytes == b"#atg\n" {
+                    tokio::time::sleep(Duration::from_millis(40)).await;
+                }
+                self.0.write(bytes).await
+            }
+        }
+        let (session, transport) = session(&[
+            b"#idr030000x\n",
+            b"#sdr03ca00aa\n",
+            b"#atr041a012c\n",
+            b"#dmraf\n",
+        ]);
+        let mut session = RequestSession::new(
+            DelayedSettings(transport),
+            session.notifications,
+            Duration::from_secs(1),
+        );
+        let snapshot = session.query(None, None).await.unwrap().snapshot.unwrap();
+        assert!(
+            std::time::SystemTime::now()
+                .duration_since(snapshot.observed_at)
+                .unwrap()
+                >= Duration::from_millis(40)
+        );
+        assert!(!snapshot.is_fresh_at(std::time::Instant::now(), Duration::from_millis(10)));
     }
 
     #[tokio::test]
@@ -459,7 +453,7 @@ mod tests {
             b"#atr041a012c\n",
             b"#dmraf\n",
         ]);
-        session.query(None, None, false).await.unwrap();
+        session.query(None, None).await.unwrap();
         transport
             .sender
             .lock()
@@ -469,7 +463,7 @@ mod tests {
             .send(b"#tmr0\n".to_vec())
             .unwrap();
         let result = session
-            .query(Some(ControlCommand::SetTimer(Minutes::new(1))), None, false)
+            .query(Some(ControlCommand::SetTimer(Minutes::new(1))), None)
             .await;
         assert!(result.is_err());
         assert_eq!(
@@ -487,9 +481,9 @@ mod tests {
             b"#dmraf\n",
             b"#tmr0\n#atrbad\n",
         ]);
-        session.query(None, None, false).await.unwrap();
+        session.query(None, None).await.unwrap();
         let result = session
-            .query(Some(ControlCommand::SetTimer(Minutes::new(1))), None, false)
+            .query(Some(ControlCommand::SetTimer(Minutes::new(1))), None)
             .await
             .unwrap();
         assert_eq!(
@@ -501,15 +495,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn queued_settings_reply_updates_retained_state_without_extra_requests() {
+    async fn queued_settings_reply_is_replaced_by_current_readback() {
         let (mut session, transport) = session(&[
             b"#idr030000x\n",
             b"#sdr03ca00aa\n",
             b"#atr041a012c\n",
             b"#dmraf\n",
             b"#sdr03cb00ab\n",
+            b"#atr041a012c\n",
+            b"#dmraf\n",
         ]);
-        session.query(None, None, false).await.unwrap();
+        session.query(None, None).await.unwrap();
         transport
             .sender
             .lock()
@@ -518,12 +514,12 @@ mod tests {
             .unwrap()
             .send(b"#dmran\n".to_vec())
             .unwrap();
-        let result = session.query(None, None, false).await.unwrap();
+        let result = session.query(None, None).await.unwrap();
         assert_eq!(
             result.snapshot.unwrap().mode.decoded().unwrap().fan,
-            gafctl_protocol::FanState::On
+            gafctl_protocol::FanState::Off
         );
-        assert_eq!(transport.writes.lock().unwrap().len(), 5);
+        assert_eq!(transport.writes.lock().unwrap().len(), 7);
     }
 
     #[tokio::test(start_paused = true)]
@@ -534,7 +530,7 @@ mod tests {
             b"#atr041a012c\n",
             b"#dmraf\n",
         ]);
-        session.query(None, None, false).await.unwrap();
+        session.query(None, None).await.unwrap();
         let sender = transport.sender.lock().unwrap().as_ref().unwrap().clone();
         sender.send(b"#tm".to_vec()).unwrap();
         tokio::spawn(async move {
@@ -545,7 +541,6 @@ mod tests {
             .query(
                 Some(ControlCommand::SetTimer(Minutes::new(1))),
                 Some(tokio::time::Instant::now() + Duration::from_millis(100)),
-                false,
             )
             .await
             .unwrap_err();
@@ -565,7 +560,7 @@ mod tests {
             b"#dmrtn\n",
             b"#ttr00010002\n",
         ]);
-        let result = session.query(None, None, false).await.unwrap();
+        let result = session.query(None, None).await.unwrap();
         assert!(result.snapshot.unwrap().timer.is_some());
         assert_eq!(transport.writes.lock().unwrap().last().unwrap(), b"#ttg\n");
     }
@@ -578,7 +573,7 @@ mod tests {
             b"#atrgarbage\n",
             b"#dmraf\n",
         ]);
-        let result = session.query(None, None, false).await.unwrap();
+        let result = session.query(None, None).await.unwrap();
         assert!(result.state_error.is_some());
         assert_eq!(
             result.snapshot.unwrap().thresholds.frame().payload(),
@@ -595,10 +590,10 @@ mod tests {
             b"#atr041a012c\n",
             b"#dmraf\n",
         ]);
-        session.query(None, None, false).await.unwrap();
+        session.query(None, None).await.unwrap();
         assert!(
             session
-                .query(Some(ControlCommand::SetTimer(Minutes::new(1))), None, false)
+                .query(Some(ControlCommand::SetTimer(Minutes::new(1))), None)
                 .await
                 .is_err()
         );
@@ -621,7 +616,6 @@ mod tests {
             .query(
                 Some(ControlCommand::SetTimer(Minutes::new(1))),
                 Some(tokio::time::Instant::now() + Duration::from_millis(100)),
-                false,
             )
             .await;
         let error = crate::ProbeError::classify(result.unwrap_err());
@@ -635,7 +629,7 @@ mod tests {
     #[tokio::test]
     async fn ordinary_state_read_failure_is_returned_as_error() {
         let (mut session, transport) = session(&[b"#idr030000x\n"]);
-        let error = session.query(None, None, false).await.unwrap_err();
+        let error = session.query(None, None).await.unwrap_err();
 
         assert!(format!("{error:#}").contains("BLE notification stream ended"));
         assert_eq!(
@@ -654,7 +648,7 @@ mod tests {
             b"#tmr0\n",
         ]);
         let result = session
-            .query(Some(ControlCommand::SetTimer(Minutes::new(1))), None, false)
+            .query(Some(ControlCommand::SetTimer(Minutes::new(1))), None)
             .await
             .unwrap();
 
@@ -693,7 +687,7 @@ mod tests {
         let (mut session, transport) = session(&[b"#idrnot-gaf\n"]);
         assert!(
             session
-                .query(Some(ControlCommand::SetTimer(Minutes::new(1))), None, false)
+                .query(Some(ControlCommand::SetTimer(Minutes::new(1))), None)
                 .await
                 .is_err()
         );

@@ -35,8 +35,6 @@ pub struct ProbeOptions {
     pub response_timeout: Duration,
     /// Latest instant a control may be written; reads and CLI controls have no deadline.
     pub control_deadline: Option<tokio::time::Instant>,
-    /// Read settings again before a partial settings change.
-    pub refresh_settings: bool,
     /// Action to take after scanning.
     pub mode: ProbeMode,
 }
@@ -61,7 +59,6 @@ impl Default for ProbeOptions {
             scan_duration: Duration::from_secs(5),
             response_timeout: Duration::from_secs(3),
             control_deadline: None,
-            refresh_settings: false,
             mode: ProbeMode::Query {
                 device_id: None,
                 control_command: None,

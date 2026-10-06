@@ -207,7 +207,6 @@ impl BleBackend {
                 options.response_timeout,
                 control_command,
                 options.control_deadline,
-                options.refresh_settings,
             )
             .await;
         self.finish_session_query(query, options.response_timeout)
@@ -219,7 +218,6 @@ impl BleBackend {
         timeout: Duration,
         command: Option<ControlCommand>,
         deadline: Option<Instant>,
-        refresh_settings: bool,
     ) -> AnyhowResult<crate::QueryResult> {
         let peripheral = self
             .pending_disconnect
@@ -244,10 +242,7 @@ impl BleBackend {
             .as_mut()
             .context("BLE session is not initialized")?;
         session.requests.set_response_timeout(timeout);
-        session
-            .requests
-            .query(command, deadline, refresh_settings)
-            .await
+        session.requests.query(command, deadline).await
     }
 
     async fn finish_session_query(
@@ -680,11 +675,7 @@ async fn query_selected_device(
                 .context("BLE session is not initialized")?;
             let mut result = session
                 .requests
-                .query(
-                    *control_command,
-                    options.control_deadline,
-                    options.refresh_settings,
-                )
+                .query(*control_command, options.control_deadline)
                 .await?;
             if result.state_error.is_some() {
                 *active_session = None;

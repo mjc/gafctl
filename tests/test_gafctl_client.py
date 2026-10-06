@@ -178,7 +178,10 @@ class ApiClientTests(unittest.IsolatedAsyncioTestCase):
         result = await client.fetch_state("configured")
         self.assertIs(result, payload)
         self.assertTrue(result["available"])
-        self.assertEqual(result["state"]["provenance"]["observed_at_unix_ms"], 1234)
+        self.assertEqual(
+            result["state"]["provenance"]["observed_at_unix_ms"],
+            payload["state"]["provenance"]["observed_at_unix_ms"],
+        )
         self.assertEqual(session.urls, ["http://proxy/api/v2/devices/configured/state"])
 
     async def test_inventory_requires_unique_ids_consistent_proxy_and_single_owner(

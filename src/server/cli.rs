@@ -179,7 +179,6 @@ impl BleOptions {
             scan_duration: Duration::from_secs(self.scan_seconds.get()),
             response_timeout: Duration::from_secs(self.response_timeout_seconds.get()),
             control_deadline: None,
-            refresh_settings: false,
             mode,
         }
     }

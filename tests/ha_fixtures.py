@@ -1,5 +1,9 @@
 """Fixed API responses for adapter tests."""
 
+from time import time
+
+NOW_MS = int(time() * 1000)
+
 PROXY_ID = "550e8400-e29b-41d4-a716-446655440000"
 
 
@@ -62,8 +66,10 @@ def readings(*, settings=None, **overrides):
         "diagnostics": None,
         "provenance": {
             "backend": settings["backend"],
-            "fetched_at_unix_ms": None,
-            "observed_at_unix_ms": None,
+            "fetched_at_unix_ms": NOW_MS,
+            "observed_at_unix_ms": NOW_MS
+            if settings["backend"] == "legacy_ble"
+            else None,
         },
     } | overrides
 
@@ -100,8 +106,8 @@ def reported_state(backend="legacy_ble", **overrides):
             ),
             provenance={
                 "backend": backend,
-                "fetched_at_unix_ms": 2000,
-                "observed_at_unix_ms": 1234 if backend == "legacy_ble" else None,
+                "fetched_at_unix_ms": NOW_MS,
+                "observed_at_unix_ms": NOW_MS if backend == "legacy_ble" else None,
             },
         )
         | overrides

@@ -4,15 +4,23 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Callable
+from time import time
 
 from homeassistant.config_entries import ConfigEntry, ConfigEntryState
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import entity_registry as er
+from homeassistant.helpers.event import async_call_later
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
 from .client import ApiClient
-from .const import CONF_DEVICE_ID, UPDATE_INTERVAL
+from .const import (
+    CLOUD_UPDATE_INTERVAL,
+    CONF_DEVICE_ID,
+    READING_MAX_AGE,
+    UPDATE_INTERVAL,
+)
 from .controls import (
     CONTROL_PRESETS,
     QUICKCONNECT_MODES,
@@ -47,6 +55,7 @@ class GafctlCoordinator(DataUpdateCoordinator[DeviceState]):
         self.loaded_entity_keys: dict[str, set[str]] = {}
         self.command_lock = asyncio.Lock()
         self._reload_task: asyncio.Task[None] | None = None
+        self._expiry_cancel: Callable[[], None] | None = None
         self._unloaded = False
         self._entities_loaded = False
         super().__init__(
@@ -54,7 +63,9 @@ class GafctlCoordinator(DataUpdateCoordinator[DeviceState]):
             config_entry=entry,
             logger=LOGGER,
             name=f"Gafctl {entry.title}",
-            update_interval=UPDATE_INTERVAL,
+            update_interval=UPDATE_INTERVAL
+            if entry.data["backend"] == "legacy_ble"
+            else CLOUD_UPDATE_INTERVAL,
         )
 
     async def _async_update_data(self) -> DeviceState:
@@ -65,9 +76,55 @@ class GafctlCoordinator(DataUpdateCoordinator[DeviceState]):
             state = await self.client.fetch_state(self.device_id)
             if state["backend"] != current["backend"]:
                 raise ApiError("proxy returned state for a different backend")
-            return state
+            return self._schedule_reading_expiry(state)
         except ApiError as error:
             raise UpdateFailed(str(error)) from error
+
+    @callback
+    def async_set_updated_data(self, data: DeviceState) -> None:
+        super().async_set_updated_data(self._schedule_reading_expiry(data))
+
+    @callback
+    def _cancel_reading_expiry(self) -> None:
+        if self._expiry_cancel is not None:
+            self._expiry_cancel()
+            self._expiry_cancel = None
+
+    @staticmethod
+    def _expired_readings(data: DeviceState) -> DeviceState:
+        return data | {
+            "available": False,
+            "state": None,
+            "last_error": "device state expired",
+        }
+
+    @callback
+    def _schedule_reading_expiry(self, data: DeviceState) -> DeviceState:
+        self._cancel_reading_expiry()
+        if not data["available"] or data["state"] is None or self._unloaded:
+            return data
+        provenance = data["state"]["provenance"]
+        fetched = provenance["fetched_at_unix_ms"]
+        timestamps = [
+            value / 1000
+            for value in (fetched, provenance["observed_at_unix_ms"])
+            if value is not None
+        ]
+        now = time()
+        if fetched is None or any(value > now for value in timestamps):
+            return self._expired_readings(data)
+        remaining = min(timestamps) + READING_MAX_AGE - now
+        if remaining <= 0:
+            return self._expired_readings(data)
+
+        @callback
+        def expire(_):
+            if self.data is data and not self._unloaded:
+                self._expiry_cancel = None
+                self.async_set_updated_data(self._expired_readings(data))
+
+        self._expiry_cancel = async_call_later(self.hass, remaining, expire)
+        return data
 
     async def _async_resolve_device(self) -> Device | None:
         devices = await self.client.fetch_devices()
@@ -101,6 +158,7 @@ class GafctlCoordinator(DataUpdateCoordinator[DeviceState]):
     async def async_unload(self) -> None:
         """Invalidate pending work without cancelling our own reload's unload."""
         self._unloaded = True
+        self._cancel_reading_expiry()
         if (
             self._reload_task is not None
             and self._reload_task is not asyncio.current_task()

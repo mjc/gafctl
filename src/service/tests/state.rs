@@ -26,13 +26,11 @@ async fn state_route_reports_normalized_state_and_expired_state_as_unavailable()
     assert_eq!(fresh["state"]["temperature_f"], 97.0);
     assert_eq!(fresh["state"]["provenance"]["backend"], "legacy_ble");
 
-    let mut expired_state = project_legacy_snapshot(&snapshot_at(
+    let expired_state = project_legacy_snapshot(&snapshot_at(
         Instant::now(),
         SystemTime::now() - Duration::from_secs(120),
     ))
     .unwrap();
-    expired_state.provenance.fetched_at_unix_ms =
-        unix_millis(SystemTime::now() - Duration::from_secs(120));
     state
         .registry
         .read()
@@ -116,4 +114,97 @@ async fn assert_client_snapshot(sensors: &'static [u8], humidity: Option<f64>) {
     assert!(serialized.contains("\"controller_fan_on\":false"));
     assert!(!serialized.contains("private-suffix"));
     assert!(!serialized.contains("private-peripheral-id"));
+}
+
+#[tokio::test]
+async fn failed_ble_poll_or_control_hides_previous_readings_and_recovers() {
+    for failure in 0..3 {
+        let state =
+            DeviceService::with_ble_device("synthetic-ble-id".to_owned(), DeviceRegistry::new());
+        let ble = state.ble_device.as_ref().unwrap();
+        let first = ble.reconciler.write().await.begin_poll();
+        ble.reconcile_control_snapshot(
+            first,
+            Some(snapshot_at(Instant::now(), SystemTime::now())),
+            "readback failed",
+        )
+        .await;
+        assert_eq!(state_response(state.clone()).await["available"], true);
+        #[cfg(feature = "mqtt")]
+        let (state, observed) = {
+            let mut state = state;
+            let (updates, observed) =
+                tokio::sync::watch::channel(Arc::new(state.state_snapshot().await.unwrap()));
+            state.attach_state_publication(updates, false);
+            (state, observed)
+        };
+        let ble = state.ble_device.as_ref().unwrap();
+        let poll_id = ble.reconciler.write().await.begin_poll();
+        match failure {
+            0 => {
+                assert_eq!(
+                    ble.reconcile_poll_result(poll_id, Ok(ProbeResult::NoDevices))
+                        .await,
+                    DeviceRefreshStatus::Failed
+                );
+            }
+            1 => {
+                ble.reconcile_control_snapshot(poll_id, None, "readback failed")
+                    .await;
+            }
+            _ => {
+                let mut invalid = snapshot_at(Instant::now(), SystemTime::now());
+                invalid
+                    .observe_frame(
+                        gafctl_protocol::Frame::from_bytes(bytes::Bytes::from_static(b"#atrbad\n"))
+                            .unwrap(),
+                    )
+                    .unwrap_err();
+                ble.reconcile_control_snapshot(poll_id, Some(invalid), "invalid readback")
+                    .await;
+            }
+        }
+        let failed = state_response(state.clone()).await;
+        assert_eq!(failed["available"], false, "failure {failure}");
+        assert!(failed["state"].is_null());
+        assert!(failed["last_error"].is_string());
+        #[cfg(feature = "mqtt")]
+        {
+            state.publish_state().await;
+            assert!(!observed.borrow().publications[0].available);
+            assert!(observed.borrow().publications[0].state.is_none());
+        }
+        let poll_id = ble.reconciler.write().await.begin_poll();
+        ble.reconcile_control_snapshot(
+            poll_id,
+            Some(snapshot_at(Instant::now(), SystemTime::now())),
+            "readback failed",
+        )
+        .await;
+        assert_eq!(state_response(state.clone()).await["available"], true);
+        #[cfg(feature = "mqtt")]
+        {
+            state.publish_state().await;
+            assert!(observed.borrow().publications[0].available);
+        }
+    }
+}
+
+#[tokio::test]
+async fn older_refresh_timeout_cannot_hide_newer_confirmed_readings() {
+    let state =
+        DeviceService::with_ble_device("synthetic-ble-id".to_owned(), DeviceRegistry::new());
+    let ble = state.ble_device.as_ref().unwrap();
+    let old_generation = ble.device.state_generation();
+    let poll_id = ble.reconciler.write().await.begin_poll();
+    ble.reconcile_control_snapshot(
+        poll_id,
+        Some(snapshot_at(Instant::now(), SystemTime::now())),
+        "readback failed",
+    )
+    .await;
+    assert!(!ble.record_refresh_timeout(old_generation).await);
+    let current = state_response(state).await;
+    assert_eq!(current["available"], true);
+    assert!(current["last_error"].is_null());
 }

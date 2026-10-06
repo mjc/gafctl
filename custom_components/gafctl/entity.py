@@ -41,7 +41,7 @@ class GafctlEntity(CoordinatorEntity[GafctlCoordinator]):
         return {
             "freshness": (
                 "fresh"
-                if data["available"]
+                if data["available"] and self.coordinator.last_update_success
                 else "unknown"
                 if data["inventory_status"] == "unknown"
                 else "stale"

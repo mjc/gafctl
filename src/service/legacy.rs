@@ -119,9 +119,7 @@ impl LegacyBleRuntime {
     ) -> Result<gafctl_protocol::ControlCommand, ControlAdmissionError> {
         let thresholds = if crate::legacy_control::needs_threshold_read(command) {
             let poll_id = self.reconciler.write().await.begin_poll();
-            let mut options = self.probe_options(None);
-            options.refresh_settings = true;
-            let result = self.ble_client.probe(options).await;
+            let result = self.probe(None).await;
             let thresholds = probe_thresholds(&result);
             self.reconcile_poll_result(poll_id, result).await;
             state.publish_state().await;
@@ -170,7 +168,6 @@ impl LegacyBleRuntime {
             scan_duration: Duration::from_secs(5),
             response_timeout: Duration::from_secs(3),
             control_deadline: None,
-            refresh_settings: false,
             mode: ProbeMode::Query {
                 device_id: Some(self.peripheral_id.to_string()),
                 control_command: command,
@@ -189,13 +186,30 @@ impl LegacyBleRuntime {
             Some(snapshot) => {
                 if let Some(projection) = project_legacy_snapshot(&snapshot) {
                     self.device.set_state(projection).await;
+                } else {
+                    self.device.mark_ble_state_unavailable().await;
                 }
                 reconciler.apply_success(poll_id, snapshot);
             }
             None => {
+                self.device.mark_ble_state_unavailable().await;
                 reconciler.apply_failure(poll_id, message);
             }
         }
+    }
+
+    pub(super) async fn record_refresh_timeout(&self, generation: u64) -> bool {
+        let mut reconciler = self.reconciler.write().await;
+        if !self
+            .device
+            .mark_refresh_unavailable_if_current(generation)
+            .await
+        {
+            return false;
+        }
+        let poll_id = reconciler.begin_poll();
+        reconciler.apply_failure(poll_id, "device refresh deadline exceeded");
+        true
     }
 
     pub(super) async fn read_state_locked(&self) -> DeviceRefreshStatus {
@@ -216,6 +230,7 @@ impl LegacyBleRuntime {
             self.device.set_state(projection).await;
             DeviceRefreshStatus::Fresh
         } else {
+            self.device.mark_ble_state_unavailable().await;
             DeviceRefreshStatus::Failed
         };
         let mut reconciler = self.reconciler.write().await;

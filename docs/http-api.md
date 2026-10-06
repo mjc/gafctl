@@ -29,8 +29,8 @@ the shared worker running.
 Periodic BLE reads use this operation too.
 
 The response contains the state fields shown below plus `status`: `fresh`
-(`200`), `failed` (`502`), or `superseded` (`409`). A failed refresh can contain
-previous cached readings; its status still records that the new read failed.
+(`200`), `failed` (`502`), or `superseded` (`409`). A failed Bluetooth refresh clears current readings and reports the device
+unavailable. A cloud refresh may retain earlier readings until their expiry.
 A superseded read lost to a newer state or control operation. Unknown devices
 return `404`, and unconfigured backends return `503`. A worker that closes without a result returns `500` and can be
 replaced by the next request.
@@ -121,9 +121,11 @@ Example original-controller state:
 ```
 
 The endpoint returns cached state. The service polls the original Bluetooth
-controller every three seconds and QuickConnect devices every 30 seconds; original-controller state becomes unavailable after 90 seconds
-without a complete reading. Use `available` and state timestamps to check device
-freshness. `/health` checks the process.
+controller every three seconds and QuickConnect devices every thirty seconds.
+A failed Bluetooth read immediately clears current state. Readings also expire
+ninety seconds after their earliest observation/fetch time. Later settings replies
+and HTTP cache reads do not extend that lifetime. Use `available` and state
+timestamps to check freshness. `/health` checks the process.
 
 Unknown measurements are `null`. An unavailable device has `state: null` and
 `available: false`. `inventory_status` is `unknown`, `present`, `missing`, or

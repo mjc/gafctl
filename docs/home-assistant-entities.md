@@ -70,8 +70,12 @@ Running is estimated from mode and measurements. Airflow is unmeasured.
 
 The service polls the original Bluetooth controller every three seconds and
 QuickConnect devices every 30 seconds. Failed Bluetooth polls back off with
-jitter up to sixty seconds. The HTTP integration updates every 30 seconds and reads the service's cached state. Original-controller snapshots
-become unavailable after 90 seconds without a complete successful reading.
+jitter up to sixty seconds. The HTTP integration reads cached state every three seconds for Bluetooth and
+every thirty seconds for QuickConnect. Each Bluetooth poll refreshes sensors,
+thresholds, mode, and conditional timer state on the retained connection. Failed
+Bluetooth reads immediately invalidate current state. Both the service and HTTP
+adapter expire readings after ninety seconds from the earliest observation/fetch
+time; receiving an old cached response does not extend its life.
 
 `/health` checks whether the service responds. To check the fan, use
 `/api/v2/devices/{id}/state` and inspect `available`, `last_error`, and the
@@ -119,7 +123,8 @@ broker and discovery at startup. A broker outage does not change ownership.
 The HTTP adapter removes its obsolete registry entities and empty device record
 when it observes the change, including after a restart. MQTT discovery is removed
 by publishing empty retained configurations, including for saved devices absent
-from the active inventory. The adapter polls every 30 seconds, so handoff can
+from the active inventory. The adapter polls every three seconds for Bluetooth and every thirty seconds for
+QuickConnect, so handoff can
 briefly expose both owners. HA gives integrations separate device records;
 changing the owner can change HA device and entity IDs. Update automations that
 refer to the old owner.

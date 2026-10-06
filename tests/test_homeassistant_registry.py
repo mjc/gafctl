@@ -1296,6 +1296,71 @@ class RegistryTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(self.entities.async_get(obsolete.entity_id))
         self.assertIsNotNone(self.devices.async_get(registered.id))
 
+    async def test_reading_expiry_cannot_replace_newer_data_and_is_cancelled_on_unload(
+        self,
+    ):
+        entry = await self.entry()
+        coordinator = coordinator_for(self.hass, AsyncMock(), device(), entry)
+        response = state_data(
+            state=reported_state(
+                provenance={
+                    "backend": "legacy_ble",
+                    "fetched_at_unix_ms": 9000,
+                    "observed_at_unix_ms": 9000,
+                }
+            )
+        )
+        with (
+            patch(
+                "custom_components.gafctl.coordinator.time",
+                return_value=10,
+                create=True,
+            ),
+            patch(
+                "custom_components.gafctl.coordinator.async_call_later", create=True
+            ) as schedule,
+        ):
+            coordinator.async_set_updated_data(response)
+            self.assertIsNotNone(coordinator.current_readings)
+            schedule.assert_called_once()
+            self.assertEqual(schedule.call_args.args[1], 89)
+            old_expiry = schedule.call_args.args[2]
+            newer = response | {"state": response["state"] | {"temperature_f": 99.0}}
+            coordinator.async_set_updated_data(newer)
+            old_expiry(None)
+            self.assertIs(coordinator.data, newer)
+            schedule.call_args.args[2](None)
+            self.assertIsNone(coordinator.current_readings)
+            self.assertFalse(coordinator.data["available"])
+            coordinator.async_set_updated_data(newer)
+            await coordinator.async_unload()
+            schedule.return_value.assert_called()
+            schedule.call_args.args[2](None)
+            self.assertIs(coordinator.data, newer)
+
+    async def test_expired_reading_is_unavailable_on_receipt(self):
+        entry = await self.entry()
+        coordinator = coordinator_for(self.hass, AsyncMock(), device(), entry)
+        with patch(
+            "custom_components.gafctl.coordinator.time", return_value=100, create=True
+        ):
+            for observed in (0, 101000, None):
+                coordinator.async_set_updated_data(
+                    state_data(
+                        state=reported_state(
+                            provenance={
+                                "backend": "legacy_ble",
+                                "fetched_at_unix_ms": 99000,
+                                "observed_at_unix_ms": observed,
+                            }
+                        )
+                    )
+                )
+                if observed is None:
+                    self.assertIsNotNone(coordinator.current_readings)
+                else:
+                    self.assertIsNone(coordinator.current_readings)
+
     async def test_generated_mqtt_templates_accept_nullable_payloads(self) -> None:
         configs = await self.discovery_configs()
         normal = state_data(

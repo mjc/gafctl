@@ -10,6 +10,11 @@ async fn refresh_deadline_releases_worker_without_starting_a_second_ble_owner() 
         .await
         .runtime(&DeviceId::configured_ble())
         .unwrap();
+    let projection = crate::legacy_projection::project_snapshot(&snapshot_at(
+        std::time::Instant::now(),
+        SystemTime::now(),
+    ));
+    runtime.set_state(projection).await;
     let transaction = runtime.acquire_transaction().await;
     let first = state
         .refresh_device(&DeviceId::configured_ble())
@@ -18,6 +23,13 @@ async fn refresh_deadline_releases_worker_without_starting_a_second_ble_owner() 
     assert_eq!(first.status, DeviceRefreshStatus::Failed);
     assert_eq!(
         first.device.last_error.as_deref(),
+        Some("device refresh deadline exceeded")
+    );
+    assert!(!first.device.available);
+    let canonical = state.state(&DeviceId::configured_ble()).await.unwrap();
+    assert!(!canonical.available);
+    assert_eq!(
+        canonical.last_error.as_deref(),
         Some("device refresh deadline exceeded")
     );
     let second = state

@@ -184,7 +184,7 @@ pub(super) fn validate_response(
 /// Sensor readings and connection settings, retaining their original reply frames.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DeviceSnapshot {
-    /// Wall-clock timestamp for display and logs.
+    /// Wall-clock time of the first dynamic observation in this reading.
     pub observed_at: SystemTime,
     freshness_started_at: Instant,
     /// Identity and firmware version prefix.
@@ -220,7 +220,7 @@ impl DeviceSnapshot {
         )
     }
 
-    /// Pair replies with the time at which the complete set was observed.
+    /// Pair replies with the first dynamic observation time.
     pub fn from_frames_at(
         identity: Frame<'static>,
         mode: Frame<'static>,
@@ -260,16 +260,7 @@ impl DeviceSnapshot {
         })
     }
 
-    /// Update sensor readings while retaining the connection's identity and settings.
-    pub fn refresh_sensors(&mut self, sensors: Frame<'static>) -> Result<(), UnexpectedResponse> {
-        validate_response(&sensors, ReadCommand::Sensors.response_id())?;
-        self.sensors = Observation::new(sensors, SensorReadings::parse);
-        self.observed_at = SystemTime::now();
-        self.freshness_started_at = Instant::now();
-        Ok(())
-    }
-
-    /// Apply an unsolicited state reply without changing sensor freshness for settings replies.
+    /// Apply an unsolicited reply without renewing a complete reading's freshness.
     pub fn observe_frame(&mut self, frame: Frame<'static>) -> Result<(), PayloadError> {
         match frame.command() {
             id if id == ReadCommand::Identity.response_id() => {
@@ -277,11 +268,16 @@ impl DeviceSnapshot {
             }
             id if id == ReadCommand::Sensors.response_id() => {
                 self.sensors = Observation::new(frame, SensorReadings::parse);
-                self.observed_at = SystemTime::now();
-                self.freshness_started_at = Instant::now();
             }
             id if id == ReadCommand::Mode.response_id() => {
                 self.mode = Observation::new(frame, DeviceMode::parse);
+                if !self
+                    .mode
+                    .decoded()
+                    .is_ok_and(|mode| mode.mode == OperatingMode::Timer && mode.fan == FanState::On)
+                {
+                    self.timer = None;
+                }
             }
             id if id == ReadCommand::AutoThresholds.response_id() => {
                 self.thresholds = Observation::new(frame, |payload| {
