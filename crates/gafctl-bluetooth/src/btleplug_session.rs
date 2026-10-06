@@ -1,118 +1,116 @@
-use std::{future, time::Duration};
+use std::{future, pin::Pin, time::Duration};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use btleplug::api::{CharPropFlags, Characteristic, Peripheral as _, ValueNotification, WriteType};
 use btleplug::platform::Peripheral;
-use futures_util::{Stream, StreamExt};
-use gafctl_protocol::ControlCommand;
+use futures_util::{FutureExt, Stream, StreamExt, stream::FilterMap};
 
 use super::request_session::{GattTransport, RequestSession};
 use crate::{
-    GAF_CHARACTERISTIC_UUID, GAF_SERVICE_UUID, QueryResult,
-    lifecycle::{
-        complete_before, disconnect_peripheral, fail_with_cleanup, finish_with_cleanup,
-        platform_timeout, retry_connection,
-    },
+    GAF_CHARACTERISTIC_UUID, GAF_SERVICE_UUID,
+    lifecycle::{complete_before, disconnect_peripheral, platform_timeout, retry_connection},
 };
 
-struct ConnectedPeripheral<'a> {
-    peripheral: &'a Peripheral,
-    operation_timeout: Duration,
-}
+type Notifications = FilterMap<
+    Pin<Box<dyn Stream<Item = ValueNotification> + Send>>,
+    future::Ready<Option<Vec<u8>>>,
+    fn(ValueNotification) -> future::Ready<Option<Vec<u8>>>,
+>;
+pub(crate) type BtleplugSession = RequestSession<BtleplugTransport, Notifications>;
 
-struct BtleplugTransport<'a> {
-    peripheral: &'a Peripheral,
+pub(crate) struct BtleplugTransport {
+    peripheral: Peripheral,
     characteristic: Characteristic,
-    write_type: WriteType,
 }
 
-pub async fn query_peripheral(
+pub(crate) async fn open_session(
     peripheral: &Peripheral,
     response_timeout: Duration,
-    control_command: Option<ControlCommand>,
-    control_deadline: Option<tokio::time::Instant>,
-) -> Result<QueryResult> {
-    let connected = retry_connection(|| {
-        ConnectedPeripheral::connect(peripheral, platform_timeout(response_timeout))
+) -> Result<BtleplugSession> {
+    let mut attempted = false;
+    retry_connection(|| {
+        let retry = std::mem::replace(&mut attempted, true);
+        async move {
+            if retry {
+                disconnect_peripheral(peripheral, platform_timeout(response_timeout))
+                    .await
+                    .map_err(|cleanup| {
+                        anyhow::Error::new(crate::error::CleanupFailed {
+                            operation: anyhow::anyhow!(
+                                "clean previous failed BLE connection before retry"
+                            ),
+                            cleanup,
+                        })
+                    })?;
+            }
+            connect(peripheral, platform_timeout(response_timeout)).await
+        }
     })
     .await?;
-    let query = async {
-        request_session(&connected, response_timeout)
-            .await?
-            .query(control_command, control_deadline)
+    let characteristic = writable_characteristic(peripheral, response_timeout).await?;
+    let notifications = complete_before(response_timeout, "register BLE notifications", async {
+        peripheral
+            .notifications()
             .await
-    }
-    .await;
-    let (mut result, disconnect) = finish_with_cleanup(query, connected.disconnect().await)?;
-    result.disconnect = disconnect;
-    Ok(result)
-}
-
-impl<'a> ConnectedPeripheral<'a> {
-    async fn connect(peripheral: &'a Peripheral, operation_timeout: Duration) -> Result<Self> {
-        let connection =
-            complete_before(operation_timeout, "connect to GAF BLE peripheral", async {
-                peripheral
-                    .connect()
-                    .await
-                    .context("connect to GAF BLE peripheral")
-            })
-            .await;
-        match connection {
-            Ok(()) => Ok(Self {
-                peripheral,
-                operation_timeout,
-            }),
-            Err(error) => fail_with_cleanup(
-                error,
-                disconnect_peripheral(peripheral, operation_timeout).await,
-            ),
-        }
-    }
-
-    async fn disconnect(&self) -> Result<()> {
-        disconnect_peripheral(self.peripheral, self.operation_timeout).await
-    }
-}
-
-async fn request_session<'a, 'device>(
-    connected: &'a ConnectedPeripheral<'device>,
-    response_timeout: Duration,
-) -> Result<RequestSession<BtleplugTransport<'a>, impl Stream<Item = Vec<u8>> + Send + Unpin>> {
-    let (characteristic, write_type) = writable_characteristic(connected, response_timeout).await?;
-    let notifications =
-        complete_before(response_timeout, "subscribe to BLE notifications", async {
-            connected
-                .peripheral
-                .notifications()
-                .await
-                .context("subscribe to BLE notifications")
-        })
-        .await?;
+            .context("register BLE notifications")
+    })
+    .await?;
     complete_before(response_timeout, "enable GAF characteristic FF01", async {
-        connected
-            .peripheral
+        peripheral
             .subscribe(&characteristic)
             .await
-            .context("enable responses on GAF characteristic FF01")
+            .context("enable GAF responses")
     })
     .await?;
-
-    let notifications = notifications.filter_map(|notification: ValueNotification| {
-        future::ready(
-            notification_matches(notification.service_uuid, notification.uuid)
-                .then_some(notification.value),
-        )
-    });
+    complete_before(
+        response_timeout,
+        "read initial GAF characteristic FF01",
+        async {
+            peripheral
+                .read(&characteristic)
+                .await
+                .context("read initial GAF characteristic FF01")
+        },
+    )
+    .await?;
+    let mut notifications = notifications.filter_map(gaf_notification as fn(_) -> _);
+    discard_startup_notifications(&mut notifications)?;
     Ok(RequestSession::new(
         BtleplugTransport {
-            peripheral: connected.peripheral,
+            peripheral: peripheral.clone(),
             characteristic,
-            write_type,
         },
         notifications,
         response_timeout,
     ))
+}
+
+async fn connect(peripheral: &Peripheral, operation_timeout: Duration) -> Result<()> {
+    complete_before(operation_timeout, "connect to GAF BLE peripheral", async {
+        peripheral
+            .connect()
+            .await
+            .context("connect to GAF BLE peripheral")
+    })
+    .await
+}
+
+fn discard_startup_notifications(notifications: &mut Notifications) -> Result<()> {
+    for _ in 0..64 {
+        match notifications.next().now_or_never() {
+            None => return Ok(()),
+            Some(None) => anyhow::bail!("BLE notification stream ended during initialization"),
+            Some(Some(_)) => {}
+        }
+    }
+    anyhow::bail!("BLE notification stream flooded during initialization")
+}
+
+fn gaf_notification(notification: ValueNotification) -> future::Ready<Option<Vec<u8>>> {
+    future::ready(
+        notification_matches(notification.service_uuid, notification.uuid)
+            .then_some(notification.value),
+    )
 }
 
 fn notification_matches(service_uuid: uuid::Uuid, characteristic_uuid: uuid::Uuid) -> bool {
@@ -120,19 +118,17 @@ fn notification_matches(service_uuid: uuid::Uuid, characteristic_uuid: uuid::Uui
 }
 
 async fn writable_characteristic(
-    connected: &ConnectedPeripheral<'_>,
+    peripheral: &Peripheral,
     operation_timeout: Duration,
-) -> Result<(Characteristic, WriteType)> {
+) -> Result<Characteristic> {
     complete_before(operation_timeout, "discover GAF BLE services", async {
-        connected
-            .peripheral
+        peripheral
             .discover_services()
             .await
             .context("discover GAF BLE services")
     })
     .await?;
-    let characteristic = connected
-        .peripheral
+    let characteristic = peripheral
         .services()
         .into_iter()
         .flat_map(|service| service.characteristics)
@@ -141,24 +137,19 @@ async fn writable_characteristic(
                 && characteristic.uuid == GAF_CHARACTERISTIC_UUID
         })
         .context("GAF service 00FF has no characteristic FF01")?;
-
-    let write_type = match (
-        characteristic.properties.contains(CharPropFlags::WRITE),
-        characteristic
-            .properties
-            .contains(CharPropFlags::WRITE_WITHOUT_RESPONSE),
-    ) {
-        (true, _) => WriteType::WithResponse,
-        (false, true) => WriteType::WithoutResponse,
-        (false, false) => bail!("GAF characteristic FF01 does not permit writes"),
-    };
-    Ok((characteristic, write_type))
+    let required = CharPropFlags::READ | CharPropFlags::WRITE | CharPropFlags::NOTIFY;
+    if !characteristic.properties.contains(required) {
+        anyhow::bail!(
+            "GAF characteristic FF01 must support reads, writes with response, and notifications"
+        );
+    }
+    Ok(characteristic)
 }
 
-impl GattTransport for BtleplugTransport<'_> {
+impl GattTransport for BtleplugTransport {
     async fn write(&mut self, bytes: &[u8]) -> Result<()> {
         self.peripheral
-            .write(&self.characteristic, bytes, self.write_type)
+            .write(&self.characteristic, bytes, WriteType::WithResponse)
             .await
             .context("write GAF BLE characteristic")
     }

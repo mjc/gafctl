@@ -293,7 +293,7 @@ fn snapshot_decodes_known_values_and_retains_raw_frames_in_request_order() {
         })
     );
     assert_eq!(
-        snapshot.timer.decoded(),
+        snapshot.timer.as_ref().unwrap().decoded(),
         Ok(&TimerState {
             remaining: Minutes::new(0),
             original: Minutes::new(0),
@@ -352,7 +352,7 @@ fn snapshot_retains_malformed_payloads_but_rejects_wrong_response_id() {
         Err(&PayloadError::from(ReadbackError::InvalidLength))
     );
     assert_eq!(
-        malformed.timer.decoded(),
+        malformed.timer.as_ref().unwrap().decoded(),
         Err(&PayloadError::from(ReadbackError::InvalidHex))
     );
     assert_eq!(malformed.identity.frame().payload(), b"03x000suffix");
@@ -495,7 +495,7 @@ fn timer_outcome_allows_elapsed_time_and_keeps_readback_errors() {
     let unavailable = ControlOutcome::from_response(command, frame(b"#tmr0\n"), None).unwrap();
     assert_eq!(unavailable.readback(), &ControlReadback::Unavailable);
     assert!(!unavailable.is_confirmed());
-    assert_eq!(malformed.timer.frame().payload(), b"bad");
+    assert_eq!(malformed.timer.as_ref().unwrap().frame().payload(), b"bad");
     assert_eq!(
         ControlOutcome::from_response(command, frame(b"#amr0\n"), Some(&matching)).err(),
         Some(UnexpectedResponse {

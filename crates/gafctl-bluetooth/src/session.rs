@@ -4,4 +4,4 @@ mod request_session;
 #[path = "btleplug_session.rs"]
 mod implementation;
 
-pub(super) use implementation::query_peripheral;
+pub(super) use implementation::{BtleplugSession, open_session};

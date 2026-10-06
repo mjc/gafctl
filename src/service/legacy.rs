@@ -119,7 +119,9 @@ impl LegacyBleRuntime {
     ) -> Result<gafctl_protocol::ControlCommand, ControlAdmissionError> {
         let thresholds = if crate::legacy_control::needs_threshold_read(command) {
             let poll_id = self.reconciler.write().await.begin_poll();
-            let result = self.probe(None).await;
+            let mut options = self.probe_options(None);
+            options.refresh_settings = true;
+            let result = self.ble_client.probe(options).await;
             let thresholds = probe_thresholds(&result);
             self.reconcile_poll_result(poll_id, result).await;
             state.publish_state().await;
@@ -165,9 +167,10 @@ impl LegacyBleRuntime {
 
     fn probe_options(&self, command: Option<gafctl_protocol::ControlCommand>) -> ProbeOptions {
         ProbeOptions {
-            scan_duration: Duration::from_secs(6),
+            scan_duration: Duration::from_secs(5),
             response_timeout: Duration::from_secs(3),
             control_deadline: None,
+            refresh_settings: false,
             mode: ProbeMode::Query {
                 device_id: Some(self.peripheral_id.to_string()),
                 control_command: command,
@@ -301,7 +304,7 @@ impl ControlOutcome {
 fn disconnect_error(outcome: DisconnectOutcome) -> Option<String> {
     match outcome {
         DisconnectOutcome::Failed(error) => Some(error),
-        DisconnectOutcome::Disconnected => None,
+        DisconnectOutcome::Disconnected | DisconnectOutcome::Retained => None,
     }
 }
 
@@ -331,7 +334,9 @@ fn project_legacy_snapshot(snapshot: &DeviceSnapshot) -> Option<DeviceState> {
     snapshot.mode.decoded().ok()?;
     snapshot.sensors.decoded().ok()?;
     snapshot.thresholds.decoded().ok()?;
-    snapshot.timer.decoded().ok()?;
+    if let Some(timer) = &snapshot.timer {
+        timer.decoded().ok()?;
+    }
     Some(crate::legacy_projection::project_snapshot(snapshot))
 }
 

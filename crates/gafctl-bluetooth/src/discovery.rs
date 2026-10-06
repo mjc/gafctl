@@ -9,7 +9,7 @@ use futures_util::{StreamExt, future, stream};
 use tokio::time::sleep;
 
 use crate::{
-    GAF_SERVICE_UUID, ProbeResult,
+    ProbeResult,
     lifecycle::{complete_before, fail_with_cleanup, stop_ble_scan},
 };
 
@@ -159,7 +159,7 @@ pub(super) async fn discover_candidates(
     *scan_pending = true;
     let scan_start = complete_before(operation_timeout, "start BLE scan", async {
         adapter
-            .start_scan(scan_filter(requested_device_id))
+            .start_scan(ScanFilter::default())
             .await
             .context("start BLE scan")
     })
@@ -242,23 +242,15 @@ fn should_inspect_peripheral(
     }
 }
 
-fn scan_filter(requested_device_id: Option<&str>) -> ScanFilter {
-    if requested_device_id.is_some() {
-        ScanFilter::default()
-    } else {
-        ScanFilter {
-            services: vec![GAF_SERVICE_UUID],
-        }
-    }
-}
-
 fn should_keep_candidate(
     id: &PeripheralId,
-    services: Option<&[uuid::Uuid]>,
+    name: Option<&str>,
     requested_device_id: Option<&str>,
 ) -> bool {
-    requested_device_id.is_some_and(|expected| peripheral_id_matches(id, expected))
-        || services.is_some_and(|services| services.contains(&GAF_SERVICE_UUID))
+    match requested_device_id {
+        Some(expected) => peripheral_id_matches(id, expected),
+        None => name.is_some_and(|name| name.starts_with("GAFVent_")),
+    }
 }
 
 async fn inspect_peripherals<I, H, C, E, F, Fut>(
@@ -360,7 +352,7 @@ async fn read_gaf_advertisement(
         &id,
         properties
             .as_ref()
-            .map(|properties| properties.services.as_slice()),
+            .and_then(|properties| properties.local_name.as_deref()),
         requested_device_id,
     ) {
         return Ok(None);
@@ -416,6 +408,7 @@ impl Candidate {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::GAF_SERVICE_UUID;
     use btleplug::api::CentralEvent;
 
     fn test_peripheral_id(index: u8) -> PeripheralId {
@@ -552,28 +545,24 @@ mod tests {
     }
 
     #[test]
-    fn configured_device_is_queryable_when_services_are_not_advertised() {
+    fn discovery_uses_app_name_prefix_and_exact_configured_id() {
         let configured = test_peripheral_id(0);
         let unrelated = test_peripheral_id(1);
         let configured_id = configured.to_string();
-        let advertised = [GAF_SERVICE_UUID];
-        for (id, services, keep) in [
-            (&configured, None, true),
-            (&unrelated, None, false),
-            (&unrelated, Some(advertised.as_slice()), true),
+        for (id, name, selected, keep) in [
+            (&configured, None, Some(configured_id.as_str()), true),
+            (
+                &unrelated,
+                Some("GAFVent_other"),
+                Some(configured_id.as_str()),
+                false,
+            ),
+            (&configured, Some("GAFVent_fan"), None, true),
+            (&configured, Some("other"), None, false),
+            (&configured, None, None, false),
         ] {
-            assert_eq!(
-                should_keep_candidate(id, services, Some(&configured_id)),
-                keep,
-                "id={id} services={services:?}"
-            );
+            assert_eq!(should_keep_candidate(id, name, selected), keep);
         }
-    }
-
-    #[test]
-    fn configured_queries_scan_without_a_service_advertisement_filter() {
-        assert!(scan_filter(Some("configured")).services.is_empty());
-        assert_eq!(scan_filter(None).services, [GAF_SERVICE_UUID]);
     }
 
     #[test]

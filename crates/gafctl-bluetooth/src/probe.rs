@@ -11,7 +11,7 @@ use anyhow::Result as AnyhowResult;
 #[cfg(target_os = "linux")]
 use btleplug::api::Central as _;
 use btleplug::{
-    api::Manager as _,
+    api::{Manager as _, Peripheral as _},
     platform::{Adapter, Manager, Peripheral},
 };
 use gafctl_protocol::ControlCommand;
@@ -28,10 +28,10 @@ use crate::{
         incomplete_result, select_candidate, summarize_scan,
     },
     lifecycle::{complete_before, disconnect_peripheral, platform_timeout, stop_ble_scan},
-    session::query_peripheral,
+    session::{BtleplugSession, open_session},
 };
 
-/// BLE client that retains its manager and adapter across queries.
+/// BLE client that retains its manager, adapter, and configured-device session.
 ///
 /// The manager and adapter are initialized lazily and retained for the client's
 /// lifetime. On Linux, btleplug's manager starts
@@ -76,7 +76,13 @@ impl ShutdownState {
     }
 }
 
+struct ActiveSession {
+    device: crate::DiscoveredDevice,
+    requests: BtleplugSession,
+}
+
 struct BleBackend {
+    active_session: Option<ActiveSession>,
     manager: OnceCell<Manager>,
     adapter: Option<Adapter>,
     pending_disconnect: Option<Peripheral>,
@@ -89,6 +95,7 @@ struct BleBackend {
 impl Default for BleBackend {
     fn default() -> Self {
         Self {
+            active_session: None,
             manager: OnceCell::new(),
             adapter: None,
             pending_disconnect: None,
@@ -166,6 +173,7 @@ impl BleBackend {
         deadline: Instant,
         force_disconnect: bool,
     ) -> AnyhowResult<()> {
+        self.active_session = None;
         let adapter = self.adapter.clone();
         drain_shutdown_resources(
             &mut self.pending_disconnect,
@@ -189,6 +197,97 @@ impl BleBackend {
         .await
     }
 
+    fn can_reuse_session(&self, mode: &ProbeMode) -> bool {
+        match (self.active_session.as_ref(), mode) {
+            (
+                Some(session),
+                ProbeMode::Query {
+                    device_id: Some(id),
+                    ..
+                },
+            ) => crate::discovery::peripheral_id_matches(&session.device.id, id),
+            _ => false,
+        }
+    }
+
+    async fn query_active_session(&mut self, options: ProbeOptions) -> AnyhowResult<ProbeResult> {
+        let ProbeMode::Query {
+            control_command, ..
+        } = options.mode
+        else {
+            anyhow::bail!("a retained BLE session requires a device query");
+        };
+        let query = self
+            .query_connected_session(
+                options.response_timeout,
+                control_command,
+                options.control_deadline,
+                options.refresh_settings,
+            )
+            .await;
+        self.finish_session_query(query, options.response_timeout)
+            .await
+    }
+
+    async fn query_connected_session(
+        &mut self,
+        timeout: Duration,
+        command: Option<ControlCommand>,
+        deadline: Option<Instant>,
+        refresh_settings: bool,
+    ) -> AnyhowResult<crate::QueryResult> {
+        let peripheral = self
+            .pending_disconnect
+            .as_ref()
+            .context("retained BLE link is not tracked")?;
+        if !complete_before(
+            platform_timeout(timeout),
+            "check retained BLE connection",
+            async {
+                peripheral
+                    .is_connected()
+                    .await
+                    .context("check retained BLE connection")
+            },
+        )
+        .await?
+        {
+            anyhow::bail!("retained GAF BLE connection was lost");
+        }
+        let session = self
+            .active_session
+            .as_mut()
+            .context("BLE session is not initialized")?;
+        session.requests.set_response_timeout(timeout);
+        session
+            .requests
+            .query(command, deadline, refresh_settings)
+            .await
+    }
+
+    async fn finish_session_query(
+        &mut self,
+        query: AnyhowResult<crate::QueryResult>,
+        timeout: Duration,
+    ) -> AnyhowResult<ProbeResult> {
+        let mut query = query?;
+        let device = self
+            .active_session
+            .as_ref()
+            .context("BLE session is not initialized")?
+            .device
+            .clone();
+        if query.state_error.is_some() {
+            self.active_session = None;
+            let cleanup = self.cleanup_pending(platform_timeout(timeout)).await;
+            query.disconnect = crate::lifecycle::finish_with_cleanup(Ok(()), cleanup)?.1;
+        }
+        Ok(ProbeResult::Queried {
+            device,
+            result: Box::new(query),
+        })
+    }
+
     async fn cleanup_pending(&mut self, operation_timeout: Duration) -> AnyhowResult<()> {
         let adapter = self.adapter.clone();
         let force_disconnect = self.force_disconnect_pending;
@@ -207,6 +306,10 @@ impl BleBackend {
     }
 
     async fn probe(&mut self, options: ProbeOptions) -> AnyhowResult<ProbeResult> {
+        if self.can_reuse_session(&options.mode) {
+            return self.query_active_session(options).await;
+        }
+        self.active_session = None;
         self.cleanup_pending(platform_timeout(options.response_timeout))
             .await?;
         let Self {
@@ -257,6 +360,7 @@ impl BleBackend {
             options,
             &mut self.pending_disconnect,
             &mut self.scan_pending,
+            &mut self.active_session,
             #[cfg(any(target_os = "linux", test))]
             &mut self.startup_disconnect_pending,
         )
@@ -326,8 +430,12 @@ async fn run_until_shutdown<T>(
 trait CancellableBackend {
     type Output;
 
+    fn has_retained_session(&self, _options: &ProbeOptions) -> bool {
+        false
+    }
+
     async fn run_operation(&mut self, options: ProbeOptions) -> AnyhowResult<Self::Output>;
-    async fn shutdown_cleanup(
+    async fn cleanup_until(
         &mut self,
         deadline: Instant,
         force_disconnect: bool,
@@ -337,11 +445,19 @@ trait CancellableBackend {
 impl CancellableBackend for BleBackend {
     type Output = ProbeResult;
 
+    fn has_retained_session(&self, _options: &ProbeOptions) -> bool {
+        self.can_reuse_session(&_options.mode)
+            && self
+                .active_session
+                .as_ref()
+                .is_some_and(|session| session.requests.is_initialized())
+    }
+
     async fn run_operation(&mut self, options: ProbeOptions) -> AnyhowResult<Self::Output> {
         self.probe(options).await
     }
 
-    async fn shutdown_cleanup(
+    async fn cleanup_until(
         &mut self,
         deadline: Instant,
         force_disconnect: bool,
@@ -355,11 +471,24 @@ async fn run_cancellable_operation<B: CancellableBackend>(
     shutdown: &ShutdownState,
     options: ProbeOptions,
 ) -> AnyhowResult<B::Output> {
+    let retained = backend.has_retained_session(&options);
+    let cleanup_timeout = platform_timeout(options.response_timeout);
     match run_until_shutdown(&shutdown.token, backend.run_operation(options)).await {
-        Ok(result) => result,
+        Ok(Err(error))
+            if retained && ProbeError::kind_for(&error) == crate::ProbeErrorKind::StaleControl =>
+        {
+            Err(error)
+        }
+        Ok(Err(error)) => {
+            let cleanup = backend
+                .cleanup_until(Instant::now() + cleanup_timeout, false)
+                .await;
+            crate::lifecycle::fail_with_cleanup(error, cleanup)
+        }
+        Ok(Ok(result)) => Ok(result),
         Err(()) => {
             backend
-                .shutdown_cleanup(shutdown.cleanup_deadline()?, true)
+                .cleanup_until(shutdown.cleanup_deadline()?, true)
                 .await
                 .context("BLE shutdown cleanup after cancelled operation")?;
             anyhow::bail!("BLE operation cancelled during shutdown");
@@ -531,7 +660,17 @@ impl Default for ProbeClient {
 /// Discover GAF BLE peripherals and query one selected device, with an optional
 /// threshold or timer write.
 pub async fn probe(options: ProbeOptions) -> Result<ProbeResult, ProbeError> {
-    ProbeClient::new().probe(options).await
+    let client = ProbeClient::new();
+    let result = client.probe(options).await;
+    client.begin_shutdown();
+    let cleanup = client.wait_until_idle().await.map_err(anyhow::Error::new);
+    let (mut result, disconnect) =
+        crate::lifecycle::finish_with_cleanup(result.map_err(anyhow::Error::new), cleanup)
+            .map_err(ProbeError::classify)?;
+    if let ProbeResult::Queried { result, .. } = &mut result {
+        result.disconnect = disconnect;
+    }
+    Ok(result)
 }
 
 async fn probe_with_adapter(
@@ -539,6 +678,7 @@ async fn probe_with_adapter(
     options: ProbeOptions,
     pending_disconnect: &mut Option<Peripheral>,
     scan_pending: &mut bool,
+    active_session: &mut Option<ActiveSession>,
     #[cfg(any(target_os = "linux", test))] startup_disconnect_pending: &mut bool,
 ) -> AnyhowResult<ProbeResult> {
     let requested_device_id = match &options.mode {
@@ -554,19 +694,14 @@ async fn probe_with_adapter(
     )
     .await?;
 
-    match options.mode {
+    match &options.mode {
         ProbeMode::Scan => Ok(summarize_scan(discovery)),
-        ProbeMode::Query {
-            device_id,
-            control_command,
-        } => {
+        ProbeMode::Query { .. } => {
             query_selected_device(
                 discovery,
-                device_id.as_deref(),
-                control_command,
-                options.response_timeout,
-                options.control_deadline,
+                &options,
                 pending_disconnect,
+                active_session,
                 #[cfg(any(target_os = "linux", test))]
                 startup_disconnect_pending,
             )
@@ -577,13 +712,20 @@ async fn probe_with_adapter(
 
 async fn query_selected_device(
     discovery: DiscoveryReport<Candidate>,
-    device_id: Option<&str>,
-    control_command: Option<ControlCommand>,
-    response_timeout: Duration,
-    control_deadline: Option<tokio::time::Instant>,
+    options: &ProbeOptions,
     pending_disconnect: &mut Option<Peripheral>,
+    active_session: &mut Option<ActiveSession>,
     #[cfg(any(target_os = "linux", test))] startup_disconnect_pending: &mut bool,
 ) -> AnyhowResult<ProbeResult> {
+    let ProbeMode::Query {
+        device_id,
+        control_command,
+    } = &options.mode
+    else {
+        anyhow::bail!("selected BLE device requires a query");
+    };
+    let device_id = device_id.as_deref();
+    let response_timeout = options.response_timeout;
     if !can_query_with_report(&discovery, device_id) {
         return Ok(incomplete_result(discovery));
     }
@@ -606,15 +748,30 @@ async fn query_selected_device(
                 .await?;
             }
             *pending_disconnect = Some(peripheral.clone());
-            let mut result = query_peripheral(
-                &peripheral,
-                response_timeout,
-                control_command,
-                control_deadline,
-            )
-            .await?;
-            if result.disconnect == crate::DisconnectOutcome::Disconnected {
-                *pending_disconnect = None;
+            let requests = open_session(&peripheral, response_timeout).await?;
+            *active_session = Some(ActiveSession {
+                device: device.clone(),
+                requests,
+            });
+            let session = active_session
+                .as_mut()
+                .context("BLE session is not initialized")?;
+            let mut result = session
+                .requests
+                .query(
+                    *control_command,
+                    options.control_deadline,
+                    options.refresh_settings,
+                )
+                .await?;
+            if result.state_error.is_some() {
+                *active_session = None;
+                let cleanup =
+                    disconnect_peripheral(&peripheral, platform_timeout(response_timeout)).await;
+                if cleanup.is_ok() {
+                    *pending_disconnect = None;
+                }
+                result.disconnect = crate::lifecycle::finish_with_cleanup(Ok(()), cleanup)?.1;
             }
             result.discovery_failures = failures;
             Ok(ProbeResult::Queried {
@@ -666,7 +823,7 @@ mod tests {
                 future::pending().await
             }
 
-            async fn shutdown_cleanup(
+            async fn cleanup_until(
                 &mut self,
                 deadline: tokio::time::Instant,
                 force_disconnect: bool,
@@ -740,7 +897,7 @@ mod tests {
         assert!(backend.force_disconnect_pending);
         assert_eq!(backend.disconnect_attempts, [true]);
 
-        super::CancellableBackend::shutdown_cleanup(
+        super::CancellableBackend::cleanup_until(
             &mut backend,
             shutdown.cleanup_deadline().unwrap(),
             false,
@@ -750,6 +907,49 @@ mod tests {
         assert!(backend.pending_disconnect.is_none());
         assert!(!backend.force_disconnect_pending);
         assert_eq!(backend.disconnect_attempts, [true, true]);
+    }
+
+    #[tokio::test]
+    async fn expired_controls_clean_cold_sessions_and_preserve_reusable_sessions() {
+        struct ExpiringBackend {
+            reusable: bool,
+            cleaned: bool,
+        }
+        impl super::CancellableBackend for ExpiringBackend {
+            type Output = ();
+            fn has_retained_session(&self, _options: &crate::ProbeOptions) -> bool {
+                self.reusable
+            }
+            async fn run_operation(&mut self, _options: crate::ProbeOptions) -> anyhow::Result<()> {
+                Err(crate::error::ControlExpired.into())
+            }
+            async fn cleanup_until(
+                &mut self,
+                _deadline: tokio::time::Instant,
+                _force: bool,
+            ) -> anyhow::Result<()> {
+                self.cleaned = true;
+                Ok(())
+            }
+        }
+        for reusable in [false, true] {
+            let mut backend = ExpiringBackend {
+                reusable,
+                cleaned: false,
+            };
+            let error = super::run_cancellable_operation(
+                &mut backend,
+                &super::ShutdownState::new(),
+                crate::ProbeOptions::default(),
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(
+                crate::ProbeError::classify(error).kind(),
+                crate::ProbeErrorKind::StaleControl
+            );
+            assert_eq!(backend.cleaned, !reusable);
+        }
     }
 
     #[tokio::test]

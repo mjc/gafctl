@@ -15,7 +15,7 @@ pub(crate) mod config;
 #[cfg(feature = "mqtt")]
 pub(crate) mod mqtt;
 
-const DEFAULT_POLL_INTERVAL: Duration = Duration::from_secs(30);
+const CLOUD_POLL_INTERVAL: Duration = Duration::from_secs(30);
 #[cfg(feature = "mqtt")]
 const STATE_PUBLICATION_INTERVAL: Duration = Duration::from_secs(1);
 const TRANSPORT_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
@@ -82,17 +82,14 @@ pub(crate) fn start_polling(state: &DeviceService) -> (JoinSet<()>, Vec<tokio::t
     let stop_polls = [
         state
             .state_polling_enabled()
-            .then(|| polls.spawn(poll_device(state.clone(), DEFAULT_POLL_INTERVAL))),
+            .then(|| polls.spawn(poll_device(state.clone(), Duration::from_secs(3)))),
         #[cfg(feature = "mqtt")]
         state
             .state_publication_enabled()
             .then(|| polls.spawn(publish_state_periodically(state.clone()))),
-        state.quickconnect_polling_enabled().then(|| {
-            polls.spawn(poll_quickconnect_device(
-                state.clone(),
-                DEFAULT_POLL_INTERVAL,
-            ))
-        }),
+        state
+            .quickconnect_polling_enabled()
+            .then(|| polls.spawn(poll_quickconnect_device(state.clone(), CLOUD_POLL_INTERVAL))),
     ]
     .into_iter()
     .flatten()
@@ -218,9 +215,35 @@ async fn shutdown_signal() {
 }
 
 async fn poll_device(state: DeviceService, poll_interval: Duration) {
-    poll_ticks(poll_interval)
-        .for_each(|_| state.poll_and_publish_state())
+    futures_util::stream::repeat(())
+        .fold(
+            poll_failure_backoff(poll_interval),
+            |mut backoff, ()| async {
+                let status = state.poll_and_publish_state().await;
+                let delay = if status == gafctl_api::DeviceRefreshStatus::Fresh {
+                    backoff = poll_failure_backoff(poll_interval);
+                    poll_interval
+                } else {
+                    backoff
+                        .next()
+                        .unwrap_or(Duration::from_secs(60))
+                        .min(Duration::from_secs(60))
+                };
+                tokio::time::sleep(delay).await;
+                backoff
+            },
+        )
         .await;
+}
+
+fn poll_failure_backoff(minimum: Duration) -> backon::ExponentialBackoff {
+    use backon::BackoffBuilder as _;
+    backon::ExponentialBuilder::default()
+        .with_min_delay(minimum)
+        .with_max_delay(Duration::from_secs(60))
+        .without_max_times()
+        .with_jitter()
+        .build()
 }
 
 async fn poll_quickconnect_device(state: DeviceService, poll_interval: Duration) {

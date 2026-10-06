@@ -89,20 +89,24 @@ impl ControlOutcome {
                         .map_err(|error| *error),
                 )
             }
-            (ControlCommand::SetTimer(requested), Some(snapshot)) => ControlReadback::Timer(
-                snapshot
-                    .timer
-                    .decoded()
-                    .map(|actual| Readback {
-                        actual: *actual,
-                        comparison: if actual.matches_requested_duration(requested) {
-                            ReadbackMatch::Matches
-                        } else {
-                            ReadbackMatch::Differs
-                        },
-                    })
-                    .map_err(|error| *error),
-            ),
+            (ControlCommand::SetTimer(requested), Some(snapshot)) => snapshot
+                .timer
+                .as_ref()
+                .map_or(ControlReadback::Unavailable, |timer| {
+                    ControlReadback::Timer(
+                        timer
+                            .decoded()
+                            .map(|actual| Readback {
+                                actual: *actual,
+                                comparison: if actual.matches_requested_duration(requested) {
+                                    ReadbackMatch::Matches
+                                } else {
+                                    ReadbackMatch::Differs
+                                },
+                            })
+                            .map_err(|error| *error),
+                    )
+                }),
         };
         let mode_readback = snapshot.map_or(ModeReadback::Unavailable, |snapshot| {
             let device_mode = match snapshot.mode.decoded() {
@@ -118,8 +122,10 @@ impl ControlOutcome {
                 ControlCommand::SetTimer(requested)
                     if requested.value() > 0
                         && (mode == OperatingMode::Timer || mode == OperatingMode::Automatic)
-                        && snapshot.timer.decoded().is_ok_and(|timer| {
-                            timer.original == requested && timer.remaining.value() == 0
+                        && snapshot.timer.as_ref().is_some_and(|timer| {
+                            timer.decoded().is_ok_and(|timer| {
+                                timer.original == requested && timer.remaining.value() == 0
+                            })
                         }) =>
                 {
                     ModeReadback::UnverifiedTimerExpiry(mode)

@@ -68,8 +68,9 @@ Running is estimated from mode and measurements. Airflow is unmeasured.
 
 ## Availability and updates
 
-The service polls every 30 seconds. The HTTP integration also updates every 30
-seconds and reads the service's cached state. Original-controller snapshots
+The service polls the original Bluetooth controller every three seconds and
+QuickConnect devices every 30 seconds. Failed Bluetooth polls back off with
+jitter up to sixty seconds. The HTTP integration updates every 30 seconds and reads the service's cached state. Original-controller snapshots
 become unavailable after 90 seconds without a complete successful reading.
 
 `/health` checks whether the service responds. To check the fan, use

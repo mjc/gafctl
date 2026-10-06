@@ -100,6 +100,12 @@ pub struct FrameDecoder {
 }
 
 impl FrameDecoder {
+    /// Whether a notification left an incomplete frame awaiting its remaining bytes.
+    #[must_use]
+    pub fn has_partial_frame(&self) -> bool {
+        !self.pending.is_empty()
+    }
+
     /// Visit each complete frame without allocating an output collection.
     ///
     /// A callback may have run before a later malformed frame returns an error.

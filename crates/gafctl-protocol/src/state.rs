@@ -181,7 +181,7 @@ pub(super) fn validate_response(
     }
 }
 
-/// One complete set of state replies, retaining every original frame.
+/// Sensor readings and connection settings, retaining their original reply frames.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DeviceSnapshot {
     /// Wall-clock timestamp for display and logs.
@@ -195,19 +195,19 @@ pub struct DeviceSnapshot {
     pub sensors: Observation<SensorReadings>,
     /// Automatic mode thresholds.
     pub thresholds: Observation<AutomaticThresholds>,
-    /// Timer durations.
-    pub timer: Observation<TimerState>,
+    /// Timer durations when the controller's timer was queried.
+    pub timer: Option<Observation<TimerState>>,
 }
 
 impl DeviceSnapshot {
-    /// Pair the five known response IDs with raw and decoded observations.
+    /// Pair the required replies and optional timer reply with raw and decoded observations.
     /// Invalid payloads remain available through their observation frames.
     pub fn from_frames(
         identity: Frame<'static>,
         mode: Frame<'static>,
         sensors: Frame<'static>,
         thresholds: Frame<'static>,
-        timer: Frame<'static>,
+        timer: impl Into<Option<Frame<'static>>>,
     ) -> Result<Self, UnexpectedResponse> {
         Self::from_frames_at(
             identity,
@@ -226,19 +226,22 @@ impl DeviceSnapshot {
         mode: Frame<'static>,
         sensors: Frame<'static>,
         thresholds: Frame<'static>,
-        timer: Frame<'static>,
+        timer: impl Into<Option<Frame<'static>>>,
         observed_at: SystemTime,
         freshness_started_at: Instant,
     ) -> Result<Self, UnexpectedResponse> {
+        let timer = timer.into();
         [
             (ReadCommand::Identity, &identity),
             (ReadCommand::Mode, &mode),
             (ReadCommand::Sensors, &sensors),
             (ReadCommand::AutoThresholds, &thresholds),
-            (ReadCommand::Timer, &timer),
         ]
         .into_iter()
         .try_for_each(|(request, frame)| validate_response(frame, request.response_id()))?;
+        if let Some(timer) = &timer {
+            validate_response(timer, ReadCommand::Timer.response_id())?;
+        }
 
         Ok(Self {
             observed_at,
@@ -249,10 +252,50 @@ impl DeviceSnapshot {
             thresholds: Observation::new(thresholds, |payload| {
                 AutomaticThresholds::parse(payload).map_err(PayloadError::from)
             }),
-            timer: Observation::new(timer, |payload| {
-                TimerState::parse(payload).map_err(PayloadError::from)
+            timer: timer.map(|timer| {
+                Observation::new(timer, |payload| {
+                    TimerState::parse(payload).map_err(PayloadError::from)
+                })
             }),
         })
+    }
+
+    /// Update sensor readings while retaining the connection's identity and settings.
+    pub fn refresh_sensors(&mut self, sensors: Frame<'static>) -> Result<(), UnexpectedResponse> {
+        validate_response(&sensors, ReadCommand::Sensors.response_id())?;
+        self.sensors = Observation::new(sensors, SensorReadings::parse);
+        self.observed_at = SystemTime::now();
+        self.freshness_started_at = Instant::now();
+        Ok(())
+    }
+
+    /// Apply an unsolicited state reply without changing sensor freshness for settings replies.
+    pub fn observe_frame(&mut self, frame: Frame<'static>) -> Result<(), PayloadError> {
+        match frame.command() {
+            id if id == ReadCommand::Identity.response_id() => {
+                self.identity = Observation::new(frame, Identity::from_payload);
+            }
+            id if id == ReadCommand::Sensors.response_id() => {
+                self.sensors = Observation::new(frame, SensorReadings::parse);
+                self.observed_at = SystemTime::now();
+                self.freshness_started_at = Instant::now();
+            }
+            id if id == ReadCommand::Mode.response_id() => {
+                self.mode = Observation::new(frame, DeviceMode::parse);
+            }
+            id if id == ReadCommand::AutoThresholds.response_id() => {
+                self.thresholds = Observation::new(frame, |payload| {
+                    AutomaticThresholds::parse(payload).map_err(PayloadError::from)
+                });
+            }
+            id if id == ReadCommand::Timer.response_id() => {
+                self.timer = Some(Observation::new(frame, |payload| {
+                    TimerState::parse(payload).map_err(PayloadError::from)
+                }));
+            }
+            _ => {}
+        }
+        self.decoding_error().map_or(Ok(()), Err)
     }
 
     /// Whether this snapshot is no older than `max_age` at `now`.
@@ -262,7 +305,9 @@ impl DeviceSnapshot {
             .is_some_and(|age| age <= max_age)
     }
 
-    fn decoding_error(&self) -> Option<PayloadError> {
+    /// The first malformed observation payload, if any.
+    #[must_use]
+    pub fn decoding_error(&self) -> Option<PayloadError> {
         self.identity
             .decoded()
             .err()
@@ -270,19 +315,27 @@ impl DeviceSnapshot {
             .or_else(|| self.mode.decoded().err().copied())
             .or_else(|| self.sensors.decoded().err().copied())
             .or_else(|| self.thresholds.decoded().err().copied())
-            .or_else(|| self.timer.decoded().err().copied())
+            .or_else(|| {
+                self.timer
+                    .as_ref()
+                    .and_then(|timer| timer.decoded().err().copied())
+            })
     }
 
-    /// Iterate through the five retained replies in request order.
+    /// Iterate through the retained replies, including the timer when queried.
     pub fn frames(&self) -> impl Iterator<Item = (ReadCommand, &Frame<'static>)> {
         [
             (ReadCommand::Identity, self.identity.frame()),
             (ReadCommand::Mode, self.mode.frame()),
             (ReadCommand::Sensors, self.sensors.frame()),
             (ReadCommand::AutoThresholds, self.thresholds.frame()),
-            (ReadCommand::Timer, self.timer.frame()),
         ]
         .into_iter()
+        .chain(
+            self.timer
+                .as_ref()
+                .map(|timer| (ReadCommand::Timer, timer.frame())),
+        )
     }
 }
 

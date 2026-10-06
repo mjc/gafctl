@@ -10,7 +10,10 @@ pub(crate) fn project_snapshot(snapshot: &DeviceSnapshot) -> DeviceState {
     let mode = snapshot.mode.decoded().ok();
     let sensors = snapshot.sensors.decoded().ok();
     let thresholds = snapshot.thresholds.decoded().ok();
-    let timer = snapshot.timer.decoded().ok();
+    let timer = snapshot
+        .timer
+        .as_ref()
+        .and_then(|timer| timer.decoded().ok());
     let firmware = snapshot.identity.decoded().ok().map(|identity| {
         let version = identity.firmware_version;
         format!("{}.{}.{}", version.major, version.minor, version.patch)

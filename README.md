@@ -97,7 +97,9 @@ curl http://GAFCTL_HOST:8787/api/v2/devices/configured/state
 
 Replace `GAFCTL_HOST` with the address of the computer running Gafctl. The
 Bluetooth fan has the service device ID `configured`. Look for `available: true`
-and current readings in the state response. The service polls every 30 seconds.
+and current readings in the state response. The service polls the original Bluetooth controller every three seconds on a
+retained connection. QuickConnect devices are polled every 30 seconds. See
+[Bluetooth behavior](docs/bluetooth.md).
 
 For automatic startup and logs, follow the [service setup guide](docs/deployment.md).
 

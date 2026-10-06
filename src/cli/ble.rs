@@ -25,7 +25,7 @@ pub(super) struct BleCommand {
 
 #[derive(Debug, Args)]
 struct BleSettings {
-    #[arg(long, global = true, default_value = "6")]
+    #[arg(long, global = true, default_value = "5")]
     scan_seconds: DeadlineSeconds,
     /// Seconds for GATT setup, command writes, and responses; platform calls allow at least 40s.
     #[arg(long, global = true, default_value = "3")]
@@ -104,6 +104,7 @@ impl BleCommand {
             scan_duration: Duration::from_secs(settings.scan_seconds.get()),
             response_timeout: Duration::from_secs(settings.timeout_seconds.get()),
             control_deadline: None,
+            refresh_settings: false,
             mode,
         };
         (intent, settings, options)
@@ -227,6 +228,7 @@ struct QueryReport {
 #[derive(Serialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
 enum DisconnectReport {
+    Retained,
     Disconnected,
     Failed { message: String },
 }
@@ -322,7 +324,13 @@ fn project_query(result: &QueryResult, show_identity: bool) -> QueryReport {
             ("mode", snapshot.mode.decoded().err()),
             ("sensors", snapshot.sensors.decoded().err()),
             ("thresholds", snapshot.thresholds.decoded().err()),
-            ("timer", snapshot.timer.decoded().err()),
+            (
+                "timer",
+                snapshot
+                    .timer
+                    .as_ref()
+                    .and_then(|timer| timer.decoded().err()),
+            ),
         ]
         .into_iter()
         .filter_map(|(field, error)| {
@@ -341,6 +349,7 @@ fn project_query(result: &QueryResult, show_identity: bool) -> QueryReport {
         state_error: result.state_error.clone(),
         discovery_failures: discovery_errors(&result.discovery_failures),
         disconnect: match &result.disconnect {
+            DisconnectOutcome::Retained => DisconnectReport::Retained,
             DisconnectOutcome::Disconnected => DisconnectReport::Disconnected,
             DisconnectOutcome::Failed(message) => DisconnectReport::Failed {
                 message: message.clone(),

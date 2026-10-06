@@ -118,7 +118,7 @@ struct BleOptions {
     device_id: Option<String>,
 
     /// How long to scan for the GAF service.
-    #[arg(long, default_value = "6")]
+    #[arg(long, default_value = "5")]
     scan_seconds: DeadlineSeconds,
 
     /// Seconds for GATT setup, command writes, and responses; platform calls allow at least 40s.
@@ -179,6 +179,7 @@ impl BleOptions {
             scan_duration: Duration::from_secs(self.scan_seconds.get()),
             response_timeout: Duration::from_secs(self.response_timeout_seconds.get()),
             control_deadline: None,
+            refresh_settings: false,
             mode,
         }
     }
@@ -301,7 +302,7 @@ mod tests {
     #[test]
     fn diagnostic_probe_preserves_default_and_explicit_deadlines() {
         [
-            (&["gafctl-server", "probe", "ble"][..], 6, 3),
+            (&["gafctl-server", "probe", "ble"][..], 5, 3),
             (
                 &[
                     "gafctl-server",

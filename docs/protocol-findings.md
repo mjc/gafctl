@@ -58,9 +58,14 @@ readback leaves a write unconfirmed. Timer clear leaves timer mode active; write
 The identity suffix is opaque. `controller_fan_on` reports the controller flag;
 Gafctl keeps `estimated_running` null for this backend. Airflow is unmeasured.
 
+## Android Bluetooth lifecycle
+
+The [Bluetooth guide](bluetooth.md) records the Android connection, initialization,
+polling, control, and teardown behavior used by Gafctl.
+
 ## Timeouts and recovery
 
-Scan defaults to six seconds. GATT setup, each request write and each response
+Scan defaults to five seconds. GATT setup, each request write and each response
 wait default to three seconds. Platform adapter setup, scanning, connection and
 cleanup allow at least 40 seconds for operating-system calls.
 

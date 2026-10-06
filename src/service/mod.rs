@@ -2,7 +2,7 @@ use self::{
     control::RecentV2ControlResults, legacy::LegacyBleRuntime, quickconnect::QuickConnectBackend,
 };
 use crate::backend::DeviceRegistry;
-use gafctl_api::DeviceId;
+use gafctl_api::{DeviceId, DeviceRefreshStatus};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 pub(crate) mod control;
@@ -64,13 +64,18 @@ impl DeviceService {
     #[cfg(not(feature = "mqtt"))]
     async fn publish_state(&self) {}
 
-    pub(crate) async fn poll_and_publish_state(&self) {
+    pub(crate) async fn poll_and_publish_state(&self) -> DeviceRefreshStatus {
         if self.ble_device.is_some() {
-            if let Err(status) = self.refresh_device(&DeviceId::configured_ble()).await {
-                tracing::warn!(%status, "device refresh worker failed");
+            match self.refresh_device(&DeviceId::configured_ble()).await {
+                Ok(response) => response.status,
+                Err(status) => {
+                    tracing::warn!(%status, "device refresh worker failed");
+                    DeviceRefreshStatus::Failed
+                }
             }
         } else {
             self.publish_state().await;
+            DeviceRefreshStatus::Fresh
         }
     }
 

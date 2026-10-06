@@ -149,6 +149,10 @@ pub(super) struct ControlExpired;
 #[error("device did not return a GAF identity response")]
 pub(super) struct InvalidIdentityResponse;
 
+#[derive(Debug, ThisError)]
+#[error("GAF firmware before version 2 does not support ordinary controls")]
+pub(super) struct UnsupportedControlFirmware;
+
 fn is_authentication_error(cause: &(dyn StdError + 'static)) -> bool {
     cause
         .downcast_ref::<btleplug::Error>()
@@ -165,6 +169,7 @@ fn is_protocol_error(cause: &(dyn StdError + 'static)) -> bool {
         || cause.downcast_ref::<ReadbackError>().is_some()
         || cause.downcast_ref::<UnexpectedResponse>().is_some()
         || cause.downcast_ref::<InvalidIdentityResponse>().is_some()
+        || cause.downcast_ref::<UnsupportedControlFirmware>().is_some()
 }
 
 fn is_transient_io_error(kind: io::ErrorKind) -> bool {

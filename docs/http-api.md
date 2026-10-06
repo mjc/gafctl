@@ -120,8 +120,8 @@ Example original-controller state:
 }
 ```
 
-The endpoint returns cached state. The service polls every
-30 seconds; original-controller state becomes unavailable after 90 seconds
+The endpoint returns cached state. The service polls the original Bluetooth
+controller every three seconds and QuickConnect devices every 30 seconds; original-controller state becomes unavailable after 90 seconds
 without a complete reading. Use `available` and state timestamps to check device
 freshness. `/health` checks the process.
 

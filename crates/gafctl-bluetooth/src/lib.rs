@@ -28,13 +28,15 @@ pub const SHUTDOWN_DRAIN_TIMEOUT: Duration = Duration::from_secs(85);
 /// Settings for one GAF BLE inspection.
 #[derive(Clone, Debug)]
 pub struct ProbeOptions {
-    /// How long to scan for the GAF service before selecting a peripheral.
+    /// How long to scan for GAFVent advertisements before selecting a peripheral.
     pub scan_duration: Duration,
     /// Maximum time for GATT setup, each command write, and each response.
     /// Manager setup, scanning, connection, and cleanup allow at least 40 seconds.
     pub response_timeout: Duration,
     /// Latest instant a control may be written; reads and CLI controls have no deadline.
     pub control_deadline: Option<tokio::time::Instant>,
+    /// Read settings again before a partial settings change.
+    pub refresh_settings: bool,
     /// Action to take after scanning.
     pub mode: ProbeMode,
 }
@@ -56,9 +58,10 @@ pub enum ProbeMode {
 impl Default for ProbeOptions {
     fn default() -> Self {
         Self {
-            scan_duration: Duration::from_secs(6),
+            scan_duration: Duration::from_secs(5),
             response_timeout: Duration::from_secs(3),
             control_deadline: None,
+            refresh_settings: false,
             mode: ProbeMode::Query {
                 device_id: None,
                 control_command: None,
@@ -70,7 +73,7 @@ impl Default for ProbeOptions {
 /// State and optional control result from one device query.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct QueryResult {
-    /// All five state observations when every request completed.
+    /// Sensor readings and settings, with timer observations when queried.
     pub snapshot: Option<DeviceSnapshot>,
     /// Failure to collect state after an acknowledged command.
     pub state_error: Option<String>,
@@ -78,13 +81,15 @@ pub struct QueryResult {
     pub discovery_failures: Vec<DiscoveryFailure>,
     /// Control acknowledgement and readback, when a control was requested.
     pub control: Option<ControlOutcome>,
-    /// Whether the BLE connection closed cleanly after the query.
+    /// Whether the BLE connection is retained, closed, or failed to close.
     pub disconnect: DisconnectOutcome,
 }
 
-/// Outcome of closing the BLE connection after a query.
+/// Connection ownership after a query.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum DisconnectOutcome {
+    /// The service retains the connection for subsequent polls and controls.
+    Retained,
     /// The BLE connection closed successfully.
     Disconnected,
     /// The query succeeded but the platform reported an error while disconnecting.
@@ -94,7 +99,7 @@ pub enum DisconnectOutcome {
 /// Result of scanning and, when selected, querying a peripheral.
 #[derive(Debug)]
 pub enum ProbeResult {
-    /// No peripherals advertising the service were found.
+    /// No matching GAFVent peripherals were found.
     NoDevices,
     /// Scan-only mode found one or more candidates.
     Discovered { devices: Vec<Candidate> },

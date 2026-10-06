@@ -134,7 +134,7 @@ multiple candidates, supply the peripheral ID returned by the scan. Direct
 `control` requires this ID and supports the four tested presets above. It checks
 identity, acknowledgement and readback.
 
-BLE discovery defaults to six seconds (`--scan-seconds`). GATT setup, each command
+BLE discovery defaults to five seconds (`--scan-seconds`). GATT setup, each command
 write, and each response wait default to three seconds (`--timeout-seconds`).
 Platform adapter setup, scanning, connection, and cleanup allow at least 40
 seconds for operating-system calls. Both options require positive integers;
