@@ -96,6 +96,12 @@ impl DeviceService {
         self.quickconnect.is_some()
     }
 
+    pub(crate) fn begin_backend_shutdown(&self) {
+        if let Some(ble) = &self.ble_device {
+            ble.begin_shutdown();
+        }
+    }
+
     pub(crate) async fn finish_backend_cleanup(&self, deadline: tokio::time::Instant) {
         if let Some(ble) = &self.ble_device {
             match tokio::time::timeout_at(deadline, ble.wait_until_idle()).await {

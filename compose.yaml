@@ -3,6 +3,7 @@ services:
     build: .
     image: gafctl:local
     restart: unless-stopped
+    stop_grace_period: 100s
     ports:
       - "${GAFCTL_LISTEN_IP:-127.0.0.1}:8787:8787"
     env_file:

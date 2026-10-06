@@ -76,28 +76,6 @@ class ApiClient:
         payload = await self._get_json(_device_path(device_id, "state"))
         return _state_response(payload, device_id)
 
-    async def refresh(self, device_id: str, backend: str) -> DeviceState:
-        path = _device_path(device_id, "refresh")
-        try:
-            http_status, payload = await self._request("POST", path)
-            if not isinstance(payload, Mapping):
-                raise ApiError("proxy returned invalid refresh outcome")
-            status = payload.get("status")
-            if status == "superseded":
-                raise ApiError("device refresh was superseded by another operation")
-            if http_status != 200 or status != "fresh":
-                raise ApiError("device refresh did not complete")
-            result = _state_response(payload, device_id)
-            if result["backend"] != backend:
-                raise ApiError("proxy returned a refresh for a different backend")
-            if not result["available"] or result["inventory_status"] != "present":
-                raise ApiError("proxy returned a refresh without current readings")
-            return result
-        except ApiError:
-            raise
-        except Exception as error:
-            raise ApiError("cannot refresh readings from the local proxy") from error
-
     async def set_control(self, device_id: str, command: JsonObject) -> None:
         """Send exactly once and require a matching confirmed response."""
         path = _device_path(device_id, "control")

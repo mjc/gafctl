@@ -70,6 +70,12 @@ stop starting after 20 seconds. Authentication, protocol and cleanup errors stop
 recovery. Requests already sent are never automatically replayed. Read current
 state before retrying a timed-out control.
 
+On shutdown, Gafctl rejects new BLE operations, cancels the active operation,
+and disconnects its tracked peripheral before exiting. BLE cleanup has an
+85-second limit; HTTP and MQTT drain independently for five seconds. The
+systemd service, Compose service and Home Assistant app allow 100 seconds before
+forcing termination. A control interrupted after its write remains unconfirmed.
+
 ## BLE state capture
 
 On 2026-09-29, Gafctl scanned for service `00FF`, connected to characteristic `FF01`, read five state fields, and disconnected. The device identifier and identity suffix are omitted.

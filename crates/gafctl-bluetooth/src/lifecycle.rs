@@ -124,6 +124,7 @@ pub(super) async fn disconnect_peripheral(
     .await
 }
 
+#[cfg(not(target_os = "linux"))]
 pub(super) async fn recover_disconnect(
     peripheral: &Peripheral,
     operation_timeout: Duration,

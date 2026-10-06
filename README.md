@@ -115,7 +115,7 @@ For automatic startup and logs, follow the [service setup guide](docs/deployment
 5. Select the fans to add. Each selected fan gets its own integration entry.
 
 Home Assistant exposes measurements, diagnostics, selectors, adjustable target
-numbers, timer duration and refresh for the original controller. Numbers use
+numbers and timer duration for the original controller. Numbers use
 90–120 °F, 30–80%, and 0–360 timer minutes in whole-unit steps. The service reads
 and preserves the unchanged target before writing. Fixed threshold presets and
 one-minute/clear timer presets are also available. The fan flag reports the

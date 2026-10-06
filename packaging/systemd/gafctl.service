@@ -13,6 +13,7 @@ EnvironmentFile=/etc/gafctl/gafctl.env
 ExecStart=/usr/bin/gafctl-server --bind 127.0.0.1:8787
 Restart=on-failure
 RestartSec=5
+TimeoutStopSec=100
 UMask=0077
 NoNewPrivileges=true
 ProtectSystem=strict

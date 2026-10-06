@@ -67,7 +67,6 @@ from custom_components.gafctl import button as gafctl_button
 from custom_components.gafctl import number as gafctl_number
 from custom_components.gafctl import sensor as gafctl_sensor
 from custom_components.gafctl import switch as gafctl_switch
-from custom_components.gafctl.button import GafctlButton
 from custom_components.gafctl.config_flow import GafctlConfigFlow
 from custom_components.gafctl.controls import NUMBER_CONTROLS, entity_keys
 from custom_components.gafctl.models import ApiError, ControlOutcomeUnknown
@@ -85,12 +84,11 @@ def api_client(client, module="custom_components.gafctl.config_flow"):
         yield
 
 
-def fake_client(*, devices=None, state=None, states=None, refresh=None):
+def fake_client(*, devices=None, state=None, states=None):
     client = AsyncMock()
     client.fetch_devices.return_value = [device()] if devices is None else devices
     client.fetch_state.return_value = state
     client.fetch_state.side_effect = states
-    client.refresh.return_value = refresh
     return client
 
 
@@ -128,7 +126,7 @@ class RegistryTests(unittest.IsolatedAsyncioTestCase):
             entry, data=entry.data | {"backend": backend}
         )
         state = state_data(backend=backend, state=reported_state(backend))
-        client = fake_client(devices=[selected], state=state, refresh=state)
+        client = fake_client(devices=[selected], state=state)
         with api_client(client, "custom_components.gafctl"):
             self.assertTrue(await async_setup_component(self.hass, "gafctl", {}))
             if entry.state is not ConfigEntryState.LOADED:
@@ -145,7 +143,6 @@ class RegistryTests(unittest.IsolatedAsyncioTestCase):
             ),
             "mode": ("select", "select_option", "mode", {"option": "Automatic"}),
             "number": ("number", "set_value", "automatic_temperature", {"value": 105}),
-            "refresh": ("button", "press", "refresh", {}),
         }[operation]
         entity_id = self.entities.async_get_entity_id(
             domain, "gafctl", f"{entry.unique_id}_{key}"
@@ -200,7 +197,7 @@ class RegistryTests(unittest.IsolatedAsyncioTestCase):
                 )
 
     async def test_queued_native_services_reject_unloaded_or_replaced_coordinator(self):
-        for operation in ("preset", "mode", "number", "refresh"):
+        for operation in ("preset", "mode", "number"):
             for lifecycle in ("unloaded", "replaced", "unloading"):
                 with self.subTest(operation=operation, lifecycle=lifecycle):
                     entry, client, coordinator, call = await self.native_service_case(
@@ -232,7 +229,6 @@ class RegistryTests(unittest.IsolatedAsyncioTestCase):
                                 client.fetch_devices.assert_not_awaited()
                                 client.fetch_state.assert_not_awaited()
                                 client.set_control.assert_not_awaited()
-                                client.refresh.assert_not_awaited()
                                 self.assertFalse(lock.locked())
                         finally:
                             if held:
@@ -240,18 +236,14 @@ class RegistryTests(unittest.IsolatedAsyncioTestCase):
                             await asyncio.gather(task, return_exceptions=True)
 
     async def test_native_services_recheck_lifecycle_after_preparatory_read(self):
-        for operation in ("preset", "mode", "number", "refresh"):
+        for operation in ("preset", "mode", "number"):
             for lifecycle in ("unloaded", "replaced", "unloading"):
                 with self.subTest(operation=operation, lifecycle=lifecycle):
                     entry, client, coordinator, call = await self.native_service_case(
                         operation
                     )
                     entered, release = asyncio.Event(), asyncio.Event()
-                    read = (
-                        client.fetch_devices
-                        if operation == "refresh"
-                        else client.fetch_state
-                    )
+                    read = client.fetch_state
 
                     async def delayed_read(
                         *_, entered=entered, release=release, read=read
@@ -271,14 +263,13 @@ class RegistryTests(unittest.IsolatedAsyncioTestCase):
                             ):
                                 await asyncio.wait_for(task, 2)
                             client.set_control.assert_not_awaited()
-                            client.refresh.assert_not_awaited()
                             self.assertFalse(coordinator.command_lock.locked())
                     finally:
                         release.set()
                         await asyncio.gather(task, return_exceptions=True)
 
     async def test_failed_native_unload_keeps_retained_services_usable(self):
-        for operation in ("preset", "mode", "number", "refresh"):
+        for operation in ("preset", "mode", "number"):
             with self.subTest(operation=operation):
                 entry, client, coordinator, call = await self.native_service_case(
                     operation
@@ -294,12 +285,7 @@ class RegistryTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIs(entry.state, ConfigEntryState.FAILED_UNLOAD)
                 self.assertIs(entry.runtime_data, coordinator)
                 await call()
-                if operation == "refresh":
-                    client.refresh.assert_awaited_once()
-                    client.set_control.assert_not_awaited()
-                else:
-                    client.set_control.assert_awaited_once()
-                    client.refresh.assert_not_awaited()
+                client.set_control.assert_awaited_once()
                 # Restore retained platforms for fixture cleanup; HA does not
                 # automatically recover a FAILED_UNLOAD entry.
                 entry._async_set_state(self.hass, ConfigEntryState.LOADED, None)
@@ -308,15 +294,13 @@ class RegistryTests(unittest.IsolatedAsyncioTestCase):
                 )
 
     async def test_native_unload_does_not_cancel_or_replay_submitted_requests(self):
-        for operation in ("preset", "mode", "number", "refresh"):
+        for operation in ("preset", "mode", "number"):
             with self.subTest(operation=operation):
                 entry, client, coordinator, call = await self.native_service_case(
                     operation
                 )
                 entered, release = asyncio.Event(), asyncio.Event()
-                submitted = (
-                    client.refresh if operation == "refresh" else client.set_control
-                )
+                submitted = client.set_control
                 uncertain = ControlOutcomeUnknown(f"submitted-{operation}")
 
                 async def delayed_submission(
@@ -325,13 +309,10 @@ class RegistryTests(unittest.IsolatedAsyncioTestCase):
                     release=release,
                     uncertain=uncertain,
                     operation=operation,
-                    result=submitted.return_value,
                 ):
                     entered.set()
                     await release.wait()
-                    if operation != "refresh":
-                        raise uncertain
-                    return result
+                    raise uncertain
 
                 submitted.side_effect = delayed_submission
                 task = asyncio.create_task(call())
@@ -342,11 +323,7 @@ class RegistryTests(unittest.IsolatedAsyncioTestCase):
                     )
                     self.assertFalse(task.done())
                     release.set()
-                    message = (
-                        "no longer active"
-                        if operation == "refresh"
-                        else f"submitted-{operation}"
-                    )
+                    message = f"submitted-{operation}"
                     with self.assertRaisesRegex(HomeAssistantError, message):
                         await asyncio.wait_for(task, 2)
                     submitted.assert_awaited_once()
@@ -427,6 +404,18 @@ class RegistryTests(unittest.IsolatedAsyncioTestCase):
         entry._async_set_state(self.hass, ConfigEntryState.SETUP_IN_PROGRESS, None)
         sensor, _ = self.registered_sensor(entry)
         obsolete, _ = self.registered_sensor(entry, "obsolete")
+        registered_device = self.devices.async_get_or_create(
+            config_entry_id=entry.entry_id,
+            identifiers={(entry.domain, entry.unique_id)},
+            name="Vent",
+        )
+        refresh_button = self.entities.async_get_or_create(
+            "button",
+            entry.domain,
+            f"{entry.unique_id}_refresh",
+            config_entry=entry,
+            device_id=registered_device.id,
+        )
         client = fake_client(
             devices=[device()], state=state_data(state=readings(temperature_f=99))
         )
@@ -447,6 +436,7 @@ class RegistryTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(entry.runtime_data._entities_loaded)
         self.assertIsNotNone(self.entities.async_get(sensor.entity_id))
         self.assertIsNone(self.entities.async_get(obsolete.entity_id))
+        self.assertIsNone(self.entities.async_get(refresh_button.entity_id))
 
     async def test_setup_failure_preserves_registry_until_matching_device_is_resolved(
         self,
@@ -1139,41 +1129,6 @@ class RegistryTests(unittest.IsolatedAsyncioTestCase):
         await self.hass.async_stop()
         self.directory.cleanup()
 
-    async def test_refresh_button_reads_unavailable_device_and_applies_returned_state(
-        self,
-    ) -> None:
-        entry = await self.entry()
-        client = fake_client(
-            devices=[device()], refresh=state_data(state=readings(temperature_f=100))
-        )
-        client.fetch_state.return_value = client.refresh.return_value
-        coordinator = coordinator_for(self.hass, client, device(), entry)
-        coordinator.async_set_updated_data(state_data(available=False, state=None))
-        button = GafctlButton(coordinator, "refresh")
-        self.assertTrue(button.available)
-        await button.async_press()
-        client.refresh.assert_awaited_once_with("configured", "legacy_ble")
-        client.fetch_state.assert_awaited_once_with("configured")
-        self.assertEqual(coordinator.data["state"]["temperature_f"], 100)
-
-    async def test_late_refresh_response_does_not_replace_newer_periodic_data(
-        self,
-    ) -> None:
-        entry = await self.entry()
-        client = fake_client(devices=[device()])
-        newer = state_data(state=readings(temperature_f=110))
-        older = state_data(state=readings(temperature_f=100))
-        coordinator = coordinator_for(self.hass, client, device(), entry)
-
-        async def delayed_response(*_):
-            coordinator.async_set_updated_data(newer)
-            return older
-
-        client.refresh.side_effect = delayed_response
-        client.fetch_state.return_value = newer
-        await GafctlButton(coordinator, "refresh").async_press()
-        self.assertEqual(coordinator.data, newer)
-
     def flow(self, context):
         flow = GafctlConfigFlow()
         flow.hass = self.hass
@@ -1571,6 +1526,9 @@ class RegistryTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(document["payload_available"], "online")
             self.assertEqual(document["payload_not_available"], "offline")
             self.assertEqual(len(document["availability"]), 2)
+            self.assertEqual(
+                document["components"]["button_refresh"], {"platform": "button"}
+            )
             for key, component in document["components"].items():
                 domain = component["platform"]
                 self.assertTrue(key.startswith(f"{domain}_"))
@@ -1633,13 +1591,7 @@ class RegistryTests(unittest.IsolatedAsyncioTestCase):
                     {"kind": "quick_connect_conditional_off", "only_if_current": mode},
                 )
                 self.assertIsNone(render("invalid")["command"])
-            elif key == "button_refresh":
-                checked.add("refresh")
-                self.assertEqual(
-                    set(render("PRESS")), {"request_id", "issued_at_unix_ms"}
-                )
-                self.assertEqual(len(config["availability"]), 1)
-        self.assertEqual(checked, {"number", "switch", "refresh"})
+        self.assertEqual(checked, {"number", "switch"})
 
     async def test_generated_mqtt_binary_modes_and_presets_preserve_unknown(
         self,
@@ -1682,48 +1634,6 @@ class RegistryTests(unittest.IsolatedAsyncioTestCase):
                     render({"timer_remaining_minutes": 0, "timer_original_minutes": 1})
                 )
         self.assertEqual(checked, {"binary_mode", "automatic_thresholds", "timer"})
-
-    async def test_refresh_validates_owner_and_proxy_before_and_after_reading(self):
-        entry = await self.entry()
-        for phase in ("before", "after"):
-            for changed in (
-                device(owner="mqtt"),
-                device("650e8400-e29b-41d4-a716-446655440000"),
-            ):
-                with self.subTest(phase=phase, changed=changed):
-                    fresh = state_data(state=readings(temperature_f=99))
-                    client = fake_client(state=fresh, refresh=fresh)
-                    client.fetch_devices.side_effect = (
-                        [[changed]] if phase == "before" else [[device()], [changed]]
-                    )
-                    coordinator = coordinator_for(self.hass, client, device(), entry)
-                    old = state_data(available=False)
-                    coordinator.async_set_updated_data(old)
-                    with self.assertRaises(HomeAssistantError):
-                        await GafctlButton(coordinator, "refresh").async_press()
-                    self.assertEqual(coordinator.data, old)
-                    self.assertEqual(client.refresh.await_count, phase == "after")
-
-    async def test_refresh_failure_and_unavailable_followup(self):
-        entry = await self.entry()
-        for failure in ("refresh", "followup"):
-            with self.subTest(failure=failure):
-                client = fake_client(
-                    state=state_data(available=False),
-                    refresh=state_data(state=readings(temperature_f=100)),
-                )
-                if failure == "refresh":
-                    client.refresh.side_effect = ApiError(
-                        "device refresh did not complete"
-                    )
-                coordinator = coordinator_for(self.hass, client, device(), entry)
-                old = state_data(state=readings(temperature_f=99))
-                coordinator.async_set_updated_data(old)
-                with self.assertRaises(HomeAssistantError):
-                    await GafctlButton(coordinator, "refresh").async_press()
-                client.refresh.assert_awaited_once()
-                if failure == "refresh":
-                    self.assertEqual(coordinator.data, old)
 
     async def test_poll_requires_current_proxy_identity_and_successful_inventory(self):
         from homeassistant.helpers.update_coordinator import UpdateFailed

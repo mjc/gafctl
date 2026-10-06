@@ -81,30 +81,6 @@ class GafctlCoordinator(DataUpdateCoordinator[DeviceState]):
         self._reload_changed_entities()
         return current
 
-    async def async_refresh_device(self) -> None:
-        async with self.command_lock:
-            current = await self._async_http_state_device()
-            await self.client.refresh(self.device_id, current["backend"])
-            await self._async_http_state_device()
-            await self.async_refresh()
-            self._require_active()
-            if self.current_readings is None:
-                raise ApiError(
-                    "device was refreshed, but current HTTP readings are unavailable"
-                )
-
-    async def _async_http_state_device(self) -> Device:
-        self._require_active()
-        current = await self._async_resolve_device()
-        self._require_active()
-        if (
-            current is None
-            or not current["capabilities"]["read_state"]
-            or not self.http_owned
-        ):
-            raise ApiError("this device does not own HTTP readings")
-        return current
-
     def _require_active(self) -> None:
         if (
             self._unloaded

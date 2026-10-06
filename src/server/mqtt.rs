@@ -62,10 +62,10 @@ mod tests {
         };
         let started = tokio::time::Instant::now();
         runtime
-            .drain(started + super::super::SHUTDOWN_CLEANUP_TIMEOUT)
+            .drain(started + super::super::TRANSPORT_SHUTDOWN_TIMEOUT)
             .await;
         assert!(runtime.requests.is_finished());
-        assert_eq!(started.elapsed(), super::super::SHUTDOWN_CLEANUP_TIMEOUT);
+        assert_eq!(started.elapsed(), super::super::TRANSPORT_SHUTDOWN_TIMEOUT);
     }
 
     #[tokio::test]
@@ -104,7 +104,7 @@ mod tests {
         assert!(!runtime.requests.is_finished());
         fixture.release.notify_one();
         runtime
-            .drain(tokio::time::Instant::now() + super::super::SHUTDOWN_CLEANUP_TIMEOUT)
+            .drain(tokio::time::Instant::now() + super::super::TRANSPORT_SHUTDOWN_TIMEOUT)
             .await;
         let crate::mqtt::MqttReply::Refresh { status, .. } = response.await.unwrap() else {
             unreachable!("refresh request must return a refresh reply");

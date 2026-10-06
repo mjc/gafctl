@@ -43,6 +43,7 @@ fn possible_components(
             ("select", "timer"),
         ])
         .chain(number_controls(backend).map(|control| ("number", control.key)))
+        // Keep the old key so grouped discovery removes previously published buttons.
         .chain([("button", "refresh"), ("button", "all_off")])
         .chain(binary_sensors(backend).map(|sensor| ("binary_sensor", sensor.key)))
         .chain([
@@ -581,13 +582,6 @@ fn request_template(command: Option<&str>) -> String {
 }
 
 fn button_configs(device: &DeviceDescriptor) -> impl Iterator<Item = (String, Value)> + '_ {
-    let refresh = device.capabilities.read_state.then(|| {
-        let mut config = button_config(device, "refresh", "Refresh readings", "refresh/set");
-        config["availability"] = json!([{"topic":Topics(device.proxy_id).process_availability()}]);
-        config["command_template"] = json!(request_template(None));
-        config["entity_category"] = json!("diagnostic");
-        component("button", "refresh", config)
-    });
     let off = device
         .capabilities
         .commands
@@ -599,7 +593,7 @@ fn button_configs(device: &DeviceDescriptor) -> impl Iterator<Item = (String, Va
             ));
             component("button", "all_off", config)
         });
-    refresh.into_iter().chain(off)
+    off.into_iter()
 }
 
 fn set_command_topic(config: &mut Value, device: &DeviceDescriptor, suffix: &str) {
@@ -710,14 +704,10 @@ mod tests {
             topics.device(&device.id, "control/result")
         );
         assert_eq!(
-            config["components"]["button_refresh"]["availability"],
-            json!([{"topic": topics.process_availability()}])
+            config["components"]["button_refresh"],
+            json!({"platform": "button"})
         );
-        assert!(
-            config["components"]["button_refresh"]
-                .get("value_template")
-                .is_none()
-        );
+        assert!(config["components"]["button_all_off"]["command_topic"].is_string());
         let other = mqtt_device(ProxyId::default(), "cloud");
         assert_ne!(
             configs(&[other]).next().unwrap().0,

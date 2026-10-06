@@ -1,6 +1,10 @@
 #[cfg(any(target_os = "linux", test))]
 use std::ops::AsyncFnOnce;
-use std::{future::Future, sync::Arc, time::Duration};
+use std::{
+    future::Future,
+    sync::{Arc, OnceLock},
+    time::Duration,
+};
 
 use anyhow::Context;
 use anyhow::Result as AnyhowResult;
@@ -12,16 +16,18 @@ use btleplug::{
 };
 use gafctl_protocol::ControlCommand;
 use tokio::sync::{Mutex, OnceCell};
-#[cfg(any(target_os = "linux", test))]
 use tokio::time::{Instant, timeout_at};
+use tokio_util::sync::CancellationToken;
 
+#[cfg(not(target_os = "linux"))]
+use crate::lifecycle::recover_disconnect;
 use crate::{
-    ProbeError, ProbeMode, ProbeOptions, ProbeResult,
+    ProbeError, ProbeMode, ProbeOptions, ProbeResult, SHUTDOWN_CLEANUP_TIMEOUT,
     discovery::{
         Candidate, CandidateSelection, DiscoveryReport, can_query_with_report, discover_candidates,
         incomplete_result, select_candidate, summarize_scan,
     },
-    lifecycle::{complete_before, platform_timeout, recover_disconnect, stop_ble_scan},
+    lifecycle::{complete_before, disconnect_peripheral, platform_timeout, stop_ble_scan},
     session::query_peripheral,
 };
 
@@ -32,14 +38,66 @@ use crate::{
 /// a detached D-Bus task that keeps its socket open after the manager is dropped.
 pub struct ProbeClient {
     backend: Arc<Mutex<BleBackend>>,
+    shutdown: Arc<ShutdownState>,
 }
 
-#[derive(Default)]
+struct ShutdownState {
+    token: CancellationToken,
+    cleanup_deadline: OnceLock<Instant>,
+}
+
+impl ShutdownState {
+    fn new() -> Self {
+        Self {
+            token: CancellationToken::new(),
+            cleanup_deadline: OnceLock::new(),
+        }
+    }
+
+    fn begin(&self) {
+        let _ = self
+            .cleanup_deadline
+            .set(Instant::now() + SHUTDOWN_CLEANUP_TIMEOUT);
+        self.token.cancel();
+    }
+
+    fn cleanup_deadline(&self) -> AnyhowResult<Instant> {
+        self.cleanup_deadline
+            .get()
+            .copied()
+            .context("BLE shutdown cleanup deadline was not initialized")
+    }
+
+    fn ensure_open(&self) -> AnyhowResult<()> {
+        if self.token.is_cancelled() {
+            anyhow::bail!("BLE client is shutting down");
+        }
+        Ok(())
+    }
+}
+
 struct BleBackend {
     manager: OnceCell<Manager>,
     adapter: Option<Adapter>,
     pending_disconnect: Option<Peripheral>,
     scan_pending: bool,
+    force_disconnect_pending: bool,
+    #[cfg(any(target_os = "linux", test))]
+    startup_disconnect_pending: bool,
+}
+
+impl Default for BleBackend {
+    fn default() -> Self {
+        Self {
+            manager: OnceCell::new(),
+            adapter: None,
+            pending_disconnect: None,
+            scan_pending: false,
+            force_disconnect_pending: false,
+            #[cfg(any(target_os = "linux", test))]
+            startup_disconnect_pending: true,
+        }
+    }
 }
 
 impl ProbeClient {
@@ -48,17 +106,30 @@ impl ProbeClient {
     pub fn new() -> Self {
         Self {
             backend: Arc::new(Mutex::new(BleBackend::default())),
+            shutdown: Arc::new(ShutdownState::new()),
         }
+    }
+
+    /// Reject new operations and cancel an active probe so it can release BLE resources.
+    pub fn begin_shutdown(&self) {
+        self.shutdown.begin();
     }
 
     /// Wait for the current operation and its cleanup, including a detached query.
     pub async fn wait_until_idle(&self) -> Result<(), ProbeError> {
         let backend = Arc::clone(&self.backend);
+        let shutdown = Arc::clone(&self.shutdown);
         finish_without_cancelling(async move {
             let mut backend = backend.lock_owned().await;
-            backend
-                .cleanup_pending(platform_timeout(Duration::from_secs(3)))
-                .await
+            if shutdown.token.is_cancelled() {
+                backend
+                    .cleanup_pending_until(shutdown.cleanup_deadline()?, false)
+                    .await
+            } else {
+                backend
+                    .cleanup_pending(platform_timeout(Duration::from_secs(3)))
+                    .await
+            }
         })
         .await
         .map_err(ProbeError::classify)
@@ -66,20 +137,67 @@ impl ProbeClient {
 
     /// Discover GAF BLE peripherals and, when selected, query or control one.
     pub async fn probe(&self, options: ProbeOptions) -> Result<ProbeResult, ProbeError> {
-        let mut backend = Arc::clone(&self.backend).lock_owned().await;
-        finish_without_cancelling(async move { backend.probe(options).await })
-            .await
-            .map_err(ProbeError::classify)
+        let shutdown = Arc::clone(&self.shutdown);
+        if let Err(error) = shutdown.ensure_open() {
+            return Err(ProbeError::classify(error));
+        }
+        let backend = Arc::clone(&self.backend);
+        let mut backend = tokio::select! {
+            biased;
+            () = shutdown.token.cancelled() => {
+                return Err(ProbeError::classify(anyhow::anyhow!("BLE client is shutting down")));
+            }
+            backend = backend.lock_owned() => backend,
+        };
+        if let Err(error) = shutdown.ensure_open() {
+            return Err(ProbeError::classify(error));
+        }
+        finish_without_cancelling(async move {
+            run_cancellable_operation(&mut *backend, &shutdown, options).await
+        })
+        .await
+        .map_err(ProbeError::classify)
     }
 }
 
 impl BleBackend {
+    async fn cleanup_pending_until(
+        &mut self,
+        deadline: Instant,
+        force_disconnect: bool,
+    ) -> AnyhowResult<()> {
+        let adapter = self.adapter.clone();
+        drain_shutdown_resources(
+            &mut self.pending_disconnect,
+            &mut self.scan_pending,
+            &mut self.force_disconnect_pending,
+            deadline,
+            force_disconnect,
+            |peripheral, force| async move {
+                disconnect_pending_resource(
+                    &peripheral,
+                    platform_timeout(Duration::from_secs(3)),
+                    force,
+                )
+                .await
+            },
+            || async move {
+                let adapter = adapter.context("pending BLE scan cleanup has no adapter")?;
+                stop_ble_scan(&adapter, platform_timeout(Duration::from_secs(3))).await
+            },
+        )
+        .await
+    }
+
     async fn cleanup_pending(&mut self, operation_timeout: Duration) -> AnyhowResult<()> {
         let adapter = self.adapter.clone();
+        let force_disconnect = self.force_disconnect_pending;
         drain_pending_cleanup(
             &mut self.pending_disconnect,
             &mut self.scan_pending,
-            |peripheral| async move { recover_disconnect(&peripheral, operation_timeout).await },
+            |peripheral| async move {
+                disconnect_pending_resource(&peripheral, operation_timeout, force_disconnect).await
+            },
             || async move {
                 let adapter = adapter.context("pending BLE scan cleanup has no adapter")?;
                 stop_ble_scan(&adapter, operation_timeout).await
@@ -139,6 +257,8 @@ impl BleBackend {
             options,
             &mut self.pending_disconnect,
             &mut self.scan_pending,
+            #[cfg(any(target_os = "linux", test))]
+            &mut self.startup_disconnect_pending,
         )
         .await
     }
@@ -190,6 +310,171 @@ async fn finish_without_cancelling<T: Send + 'static>(
     tokio::spawn(operation)
         .await
         .context("BLE operation task failed")?
+}
+
+async fn run_until_shutdown<T>(
+    shutdown: &CancellationToken,
+    operation: impl Future<Output = AnyhowResult<T>>,
+) -> Result<AnyhowResult<T>, ()> {
+    tokio::select! {
+        biased;
+        () = shutdown.cancelled() => Err(()),
+        result = operation => Ok(result),
+    }
+}
+
+trait CancellableBackend {
+    type Output;
+
+    async fn run_operation(&mut self, options: ProbeOptions) -> AnyhowResult<Self::Output>;
+    async fn shutdown_cleanup(
+        &mut self,
+        deadline: Instant,
+        force_disconnect: bool,
+    ) -> AnyhowResult<()>;
+}
+
+impl CancellableBackend for BleBackend {
+    type Output = ProbeResult;
+
+    async fn run_operation(&mut self, options: ProbeOptions) -> AnyhowResult<Self::Output> {
+        self.probe(options).await
+    }
+
+    async fn shutdown_cleanup(
+        &mut self,
+        deadline: Instant,
+        force_disconnect: bool,
+    ) -> AnyhowResult<()> {
+        self.cleanup_pending_until(deadline, force_disconnect).await
+    }
+}
+
+async fn run_cancellable_operation<B: CancellableBackend>(
+    backend: &mut B,
+    shutdown: &ShutdownState,
+    options: ProbeOptions,
+) -> AnyhowResult<B::Output> {
+    match run_until_shutdown(&shutdown.token, backend.run_operation(options)).await {
+        Ok(result) => result,
+        Err(()) => {
+            backend
+                .shutdown_cleanup(shutdown.cleanup_deadline()?, true)
+                .await
+                .context("BLE shutdown cleanup after cancelled operation")?;
+            anyhow::bail!("BLE operation cancelled during shutdown");
+        }
+    }
+}
+
+async fn drain_until_deadline<T, D, DFut, S, SFut>(
+    pending_disconnect: &mut Option<T>,
+    scan_pending: &mut bool,
+    deadline: Instant,
+    disconnect: D,
+    stop_scan: S,
+) -> AnyhowResult<()>
+where
+    T: Clone,
+    D: FnOnce(T) -> DFut,
+    DFut: Future<Output = AnyhowResult<()>>,
+    S: FnOnce() -> SFut,
+    SFut: Future<Output = AnyhowResult<()>>,
+{
+    drain_pending_cleanup(
+        pending_disconnect,
+        scan_pending,
+        |peripheral| async move {
+            timeout_at(deadline, disconnect(peripheral))
+                .await
+                .context("disconnect BLE peripheral before shutdown deadline")?
+        },
+        || async move {
+            timeout_at(deadline, stop_scan())
+                .await
+                .context("stop BLE scan before shutdown deadline")?
+        },
+    )
+    .await
+}
+
+async fn drain_shutdown_resources<T, D, DFut, S, SFut>(
+    pending_disconnect: &mut Option<T>,
+    scan_pending: &mut bool,
+    force_disconnect_pending: &mut bool,
+    deadline: Instant,
+    force_this_attempt: bool,
+    disconnect: D,
+    stop_scan: S,
+) -> AnyhowResult<()>
+where
+    T: Clone,
+    D: FnOnce(T, bool) -> DFut,
+    DFut: Future<Output = AnyhowResult<()>>,
+    S: FnOnce() -> SFut,
+    SFut: Future<Output = AnyhowResult<()>>,
+{
+    if force_this_attempt && pending_disconnect.is_some() {
+        *force_disconnect_pending = true;
+    }
+    let force_disconnect = *force_disconnect_pending;
+    let result = drain_until_deadline(
+        pending_disconnect,
+        scan_pending,
+        deadline,
+        |peripheral| disconnect(peripheral, force_disconnect),
+        stop_scan,
+    )
+    .await;
+    if pending_disconnect.is_none() {
+        *force_disconnect_pending = false;
+    }
+    result
+}
+
+async fn disconnect_pending_resource(
+    peripheral: &Peripheral,
+    operation_timeout: Duration,
+    force_disconnect: bool,
+) -> AnyhowResult<()> {
+    #[cfg(target_os = "linux")]
+    {
+        let _ = force_disconnect;
+        disconnect_peripheral(peripheral, operation_timeout).await
+    }
+    #[cfg(not(target_os = "linux"))]
+    if force_disconnect {
+        disconnect_peripheral(peripheral, operation_timeout).await
+    } else {
+        recover_disconnect(peripheral, operation_timeout).await
+    }
+}
+
+#[cfg(any(target_os = "linux", test))]
+async fn disconnect_before_first_query<T, D, DFut>(
+    peripheral: &T,
+    startup_disconnect_pending: &mut bool,
+    pending_disconnect: &mut Option<T>,
+    disconnect: D,
+) -> AnyhowResult<()>
+where
+    T: Clone,
+    D: FnOnce(T) -> DFut,
+    DFut: Future<Output = AnyhowResult<()>>,
+{
+    if !*startup_disconnect_pending {
+        return Ok(());
+    }
+
+    *pending_disconnect = Some(peripheral.clone());
+    match disconnect(peripheral.clone()).await {
+        Ok(()) => {
+            *pending_disconnect = None;
+            *startup_disconnect_pending = false;
+            Ok(())
+        }
+        Err(error) => Err(error).context("disconnect stale configured BLE link before query"),
+    }
 }
 
 async fn drain_pending_cleanup<T, D, DFut, S, SFut>(
@@ -254,6 +539,7 @@ async fn probe_with_adapter(
     options: ProbeOptions,
     pending_disconnect: &mut Option<Peripheral>,
     scan_pending: &mut bool,
+    #[cfg(any(target_os = "linux", test))] startup_disconnect_pending: &mut bool,
 ) -> AnyhowResult<ProbeResult> {
     let requested_device_id = match &options.mode {
         ProbeMode::Scan => None,
@@ -281,6 +567,8 @@ async fn probe_with_adapter(
                 options.response_timeout,
                 options.control_deadline,
                 pending_disconnect,
+                #[cfg(any(target_os = "linux", test))]
+                startup_disconnect_pending,
             )
             .await
         }
@@ -294,6 +582,7 @@ async fn query_selected_device(
     response_timeout: Duration,
     control_deadline: Option<tokio::time::Instant>,
     pending_disconnect: &mut Option<Peripheral>,
+    #[cfg(any(target_os = "linux", test))] startup_disconnect_pending: &mut bool,
 ) -> AnyhowResult<ProbeResult> {
     if !can_query_with_report(&discovery, device_id) {
         return Ok(incomplete_result(discovery));
@@ -304,6 +593,18 @@ async fn query_selected_device(
         CandidateSelection::NoDevices => Ok(ProbeResult::NoDevices),
         CandidateSelection::Ambiguous(devices) => Ok(ProbeResult::Ambiguous { devices }),
         CandidateSelection::Chosen { device, peripheral } => {
+            #[cfg(any(target_os = "linux", test))]
+            if device_id.is_some() {
+                disconnect_before_first_query(
+                    &peripheral,
+                    startup_disconnect_pending,
+                    pending_disconnect,
+                    |peripheral| async move {
+                        disconnect_peripheral(&peripheral, platform_timeout(response_timeout)).await
+                    },
+                )
+                .await?;
+            }
             *pending_disconnect = Some(peripheral.clone());
             let mut result = query_peripheral(
                 &peripheral,
@@ -326,6 +627,214 @@ async fn query_selected_device(
 
 #[cfg(test)]
 mod tests {
+    use std::future;
+
+    #[tokio::test]
+    async fn closed_client_rejects_admission_without_opening_backend() {
+        let client = super::ProbeClient::new();
+        client.begin_shutdown();
+
+        let error = client
+            .probe(crate::ProbeOptions::default())
+            .await
+            .expect_err("shutdown must close probe admission");
+
+        assert!(format!("{error:#}").contains("shutting down"));
+        let backend = client.backend.lock().await;
+        assert!(backend.manager.get().is_none());
+    }
+
+    #[tokio::test]
+    async fn shutdown_cancels_active_operation_and_drains_tracked_link_and_scan() {
+        struct PendingBackend {
+            pending_disconnect: Option<(&'static str, bool)>,
+            scan_pending: bool,
+            force_disconnect_pending: bool,
+            disconnected: bool,
+            scan_stopped: bool,
+            disconnect_attempts: Vec<bool>,
+            fail_first_disconnect: bool,
+        }
+
+        impl super::CancellableBackend for PendingBackend {
+            type Output = ();
+
+            async fn run_operation(
+                &mut self,
+                _options: crate::ProbeOptions,
+            ) -> anyhow::Result<Self::Output> {
+                future::pending().await
+            }
+
+            async fn shutdown_cleanup(
+                &mut self,
+                deadline: tokio::time::Instant,
+                force_disconnect: bool,
+            ) -> anyhow::Result<()> {
+                let fail_disconnect = std::mem::replace(&mut self.fail_first_disconnect, false);
+                let disconnect_attempts = &mut self.disconnect_attempts;
+                let disconnected = &mut self.disconnected;
+                let scan_stopped = &mut self.scan_stopped;
+                super::drain_shutdown_resources(
+                    &mut self.pending_disconnect,
+                    &mut self.scan_pending,
+                    &mut self.force_disconnect_pending,
+                    deadline,
+                    force_disconnect,
+                    |(id, connected), force_disconnect| {
+                        disconnect_attempts.push(force_disconnect);
+                        *disconnected = true;
+                        async move {
+                            assert_eq!(id, "selected peripheral");
+                            assert!(force_disconnect);
+                            assert!(!connected, "disconnect runs before Connected is true");
+                            if fail_disconnect {
+                                Err(anyhow::anyhow!("simulated disconnect timeout"))
+                            } else {
+                                Ok(())
+                            }
+                        }
+                    },
+                    || {
+                        *scan_stopped = true;
+                        future::ready(Ok(()))
+                    },
+                )
+                .await
+            }
+        }
+
+        let shutdown = super::ShutdownState::new();
+        let mut backend = PendingBackend {
+            pending_disconnect: Some(("selected peripheral", false)),
+            scan_pending: true,
+            force_disconnect_pending: false,
+            disconnected: false,
+            scan_stopped: false,
+            disconnect_attempts: Vec::new(),
+            fail_first_disconnect: true,
+        };
+        let result = {
+            let run = super::run_cancellable_operation(
+                &mut backend,
+                &shutdown,
+                crate::ProbeOptions::default(),
+            );
+            tokio::pin!(run);
+            tokio::select! {
+                biased;
+                result = &mut run => panic!("operation unexpectedly finished: {result:?}"),
+                () = tokio::task::yield_now() => shutdown.begin(),
+            }
+            run.await
+        };
+
+        assert!(result.is_err(), "failed disconnect must remain a failure");
+        assert!(backend.disconnected);
+        assert!(backend.scan_stopped);
+        assert_eq!(
+            backend.pending_disconnect,
+            Some(("selected peripheral", false))
+        );
+        assert!(!backend.scan_pending);
+        assert!(backend.force_disconnect_pending);
+        assert_eq!(backend.disconnect_attempts, [true]);
+
+        super::CancellableBackend::shutdown_cleanup(
+            &mut backend,
+            shutdown.cleanup_deadline().unwrap(),
+            false,
+        )
+        .await
+        .expect("waiter retries with the cancellation force flag");
+        assert!(backend.pending_disconnect.is_none());
+        assert!(!backend.force_disconnect_pending);
+        assert_eq!(backend.disconnect_attempts, [true, true]);
+    }
+
+    #[tokio::test]
+    async fn shutdown_drain_reuses_one_absolute_deadline() {
+        let shutdown = super::ShutdownState::new();
+        shutdown.begin();
+        let deadline = shutdown.cleanup_deadline().unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+        assert_eq!(shutdown.cleanup_deadline().unwrap(), deadline);
+    }
+
+    #[tokio::test]
+    async fn queued_probe_is_rejected_when_shutdown_closes_admission() {
+        use std::sync::Arc;
+
+        let client = Arc::new(super::ProbeClient::new());
+        let guard = Arc::clone(&client.backend).lock_owned().await;
+        let queued_client = Arc::clone(&client);
+        let queued =
+            tokio::spawn(async move { queued_client.probe(crate::ProbeOptions::default()).await });
+        tokio::task::yield_now().await;
+        client.begin_shutdown();
+        drop(guard);
+
+        let error = queued
+            .await
+            .unwrap()
+            .expect_err("queued work must be rejected");
+        assert!(format!("{error:#}").contains("shutting down"));
+        assert!(client.backend.lock().await.manager.get().is_none());
+    }
+
+    #[tokio::test]
+    async fn admission_is_rechecked_after_backend_lock_before_detaching() {
+        let client = super::ProbeClient::new();
+        let backend = client.backend.clone().lock_owned().await;
+
+        client.shutdown.ensure_open().expect("client starts open");
+        client.begin_shutdown();
+        assert!(client.shutdown.ensure_open().is_err());
+        assert!(backend.manager.get().is_none());
+    }
+
+    #[tokio::test]
+    async fn configured_first_query_disconnect_retries_before_connecting() {
+        use std::cell::Cell;
+
+        let disconnect_attempts = Cell::new(0);
+        let mut startup_disconnect_pending = true;
+        let mut pending_disconnect = None;
+
+        let error = super::disconnect_before_first_query(
+            &"selected configured peripheral",
+            &mut startup_disconnect_pending,
+            &mut pending_disconnect,
+            |_| {
+                disconnect_attempts.set(disconnect_attempts.get() + 1);
+                future::ready(Err(anyhow::anyhow!("stale local link could not be closed")))
+            },
+        )
+        .await
+        .expect_err("failed stale-link cleanup must block the query");
+
+        assert!(format!("{error:#}").contains("stale local link"));
+        assert_eq!(disconnect_attempts.get(), 1);
+        assert!(startup_disconnect_pending);
+        assert_eq!(pending_disconnect, Some("selected configured peripheral"));
+
+        super::disconnect_before_first_query(
+            &"selected configured peripheral",
+            &mut startup_disconnect_pending,
+            &mut pending_disconnect,
+            |_| {
+                disconnect_attempts.set(disconnect_attempts.get() + 1);
+                future::ready(Ok(()))
+            },
+        )
+        .await
+        .expect("a later query retries the exact tracked peripheral");
+
+        assert_eq!(disconnect_attempts.get(), 2);
+        assert!(!startup_disconnect_pending);
+        assert!(pending_disconnect.is_none());
+    }
+
     #[tokio::test]
     async fn cancelled_caller_keeps_backend_locked_until_idle_cleanup_finishes() {
         use std::sync::Arc;

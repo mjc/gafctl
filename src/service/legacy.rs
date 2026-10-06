@@ -43,6 +43,10 @@ impl ControlAdmissionError {
 }
 
 impl LegacyBleRuntime {
+    pub(super) fn begin_shutdown(&self) {
+        self.ble_client.begin_shutdown();
+    }
+
     pub(super) async fn wait_until_idle(&self) -> Result<(), gafctl_bluetooth::ProbeError> {
         self.ble_client.wait_until_idle().await
     }

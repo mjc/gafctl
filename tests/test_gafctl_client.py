@@ -42,7 +42,6 @@ class FixtureTests(unittest.TestCase):
                     "timer_original",
                 },
                 "binary_sensor": {"controller_fan_flag"},
-                "button": {"refresh"},
             },
             "quick_connect": {
                 "sensor": common | {"signal_strength_raw", "verified_raw"},
@@ -54,7 +53,6 @@ class FixtureTests(unittest.TestCase):
                     "timer_mode",
                     "manual_mode",
                 },
-                "button": {"refresh"},
             },
         }
         for backend, expected in cases.items():
@@ -245,7 +243,7 @@ class ApiClientTests(unittest.IsolatedAsyncioTestCase):
                     "manual_mode",
                     "humidity_monitor",
                 },
-                "button": {"refresh", "all_off"},
+                "button": {"all_off"},
                 "switch": {"automatic_mode", "timer_mode", "manual_mode"},
                 "select": {"mode"},
                 "number": {
@@ -378,27 +376,6 @@ class ApiClientTests(unittest.IsolatedAsyncioTestCase):
             with self.subTest(payload=payload), self.assertRaises(ApiError):
                 client, _ = self.client(payload)
                 await client.fetch_state("configured")
-
-    async def test_refresh_posts_once_and_requires_fresh_success(self):
-        payload = state_data(state=reported_state()) | {"status": "fresh"}
-        client, session = self.client(payload, url="http://proxy/prefix")
-        self.assertTrue((await client.refresh("configured", "legacy_ble"))["available"])
-        self.assertEqual(
-            session.urls, ["http://proxy/prefix/api/v2/devices/configured/refresh"]
-        )
-        self.assertEqual(session.posts, [{"timeout": 300, "allow_redirects": False}])
-        for status, http_status in (
-            ("failed", 502),
-            ("superseded", 409),
-            ("fresh", 502),
-            (None, 200),
-        ):
-            with (
-                self.subTest(status=status, http_status=http_status),
-                self.assertRaises(ApiError),
-            ):
-                client, _ = self.client(payload | {"status": status}, http_status)
-                await client.refresh("configured", "legacy_ble")
 
     async def test_commands_keep_exact_shape_correlation_and_single_submission(self):
         commands = [

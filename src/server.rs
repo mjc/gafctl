@@ -18,7 +18,7 @@ pub(crate) mod mqtt;
 const DEFAULT_POLL_INTERVAL: Duration = Duration::from_secs(30);
 #[cfg(feature = "mqtt")]
 const STATE_PUBLICATION_INTERVAL: Duration = Duration::from_secs(1);
-const SHUTDOWN_CLEANUP_TIMEOUT: Duration = Duration::from_secs(5);
+const TRANSPORT_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 
 pub(crate) async fn serve(config: config::ServerConfig) -> Result<()> {
     config.validate()?;
@@ -113,45 +113,54 @@ async fn serve_http(
     #[cfg(feature = "mqtt")] mut mqtt: Option<mqtt::MqttRuntime>,
 ) -> Result<()> {
     let (mut polls, stop_polls) = start_polling(&state);
+    let shutdown_state = state.clone();
     #[cfg(feature = "mqtt")]
     let mqtt_intake = mqtt.as_ref().map(|runtime| runtime.intake.clone());
-    let (shutdown_started, mut shutdown_deadline) = oneshot::channel();
+    let (shutdown_started, mut shutdown_deadlines) = oneshot::channel();
     let server = axum::serve(listener, router(state.clone()))
         .with_graceful_shutdown(async move {
             shutdown_signal().await;
-            let deadline = Instant::now() + SHUTDOWN_CLEANUP_TIMEOUT;
+            let transport_deadline = Instant::now() + TRANSPORT_SHUTDOWN_TIMEOUT;
+            let backend_deadline = Instant::now() + gafctl_bluetooth::SHUTDOWN_DRAIN_TIMEOUT;
+            shutdown_state.begin_backend_shutdown();
             #[cfg(feature = "mqtt")]
             if let Some(intake) = mqtt_intake {
                 intake.close();
             }
             stop_polls.iter().for_each(tokio::task::AbortHandle::abort);
-            let _ = shutdown_started.send(deadline);
+            let _ = shutdown_started.send((transport_deadline, backend_deadline));
         })
         .into_future();
     tokio::pin!(server);
-    let deadline = tokio::select! {
+    let (transport_deadline, backend_deadline) = tokio::select! {
         result = &mut server => {
+            state.begin_backend_shutdown();
             polls.abort_all();
-            let deadline = shutdown_deadline
+            let (transport_deadline, backend_deadline) = shutdown_deadlines
                 .try_recv()
-                .unwrap_or_else(|_| Instant::now() + SHUTDOWN_CLEANUP_TIMEOUT);
+                .unwrap_or_else(|_| (
+                    Instant::now() + TRANSPORT_SHUTDOWN_TIMEOUT,
+                    Instant::now() + gafctl_bluetooth::SHUTDOWN_DRAIN_TIMEOUT,
+                ));
             cleanup_transports(
                 &state,
                 #[cfg(feature = "mqtt")]
                 &mut mqtt,
-                deadline,
+                transport_deadline,
+                backend_deadline,
             ).await;
             return result.context("HTTP server failed");
         }
-        deadline = &mut shutdown_deadline => deadline.context("HTTP shutdown notification failed")?,
+        deadlines = &mut shutdown_deadlines => deadlines.context("HTTP shutdown notification failed")?,
     };
     let (result, ()) = tokio::join!(
-        timeout_at(deadline, &mut server),
+        timeout_at(transport_deadline, &mut server),
         cleanup_transports(
             &state,
             #[cfg(feature = "mqtt")]
             &mut mqtt,
-            deadline,
+            transport_deadline,
+            backend_deadline,
         ),
     );
     match result {
@@ -168,13 +177,16 @@ async fn serve_http(
 async fn cleanup_transports(
     state: &DeviceService,
     #[cfg(feature = "mqtt")] mqtt: &mut Option<mqtt::MqttRuntime>,
-    deadline: Instant,
+    transport_deadline: Instant,
+    backend_deadline: Instant,
 ) {
-    let backend_cleanup = state.finish_backend_cleanup(deadline);
+    let backend_cleanup = state.finish_backend_cleanup(backend_deadline);
+    #[cfg(not(feature = "mqtt"))]
+    let _ = transport_deadline;
     #[cfg(feature = "mqtt")]
     tokio::join!(backend_cleanup, async {
         if let Some(mqtt) = mqtt {
-            mqtt.drain(deadline).await;
+            mqtt.drain(transport_deadline).await;
         }
     });
     #[cfg(not(feature = "mqtt"))]

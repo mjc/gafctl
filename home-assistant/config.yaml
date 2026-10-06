@@ -9,6 +9,7 @@ arch:
 startup: application
 boot: auto
 init: true
+timeout: 100
 host_dbus: true
 ports:
   8787/tcp: 8787

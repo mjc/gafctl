@@ -163,6 +163,7 @@ in
         ExecStart = launcher;
         Restart = "on-failure";
         RestartSec = 5;
+        TimeoutStopSec = 100;
         NoNewPrivileges = true;
         PrivateTmp = true;
         ProtectSystem = "strict";

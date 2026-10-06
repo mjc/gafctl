@@ -36,9 +36,8 @@ return `404`, and unconfigured backends return `503`. A worker that closes witho
 replaced by the next request.
 
 The shared worker has a 270-second deadline, including time waiting for the
-device lock. The Rust client and HA refresh button allow 300 seconds. HA checks
-identity and HTTP ownership again after the read, then obtains the coordinator's
-current state so a delayed response cannot replace newer readings.
+device lock. The Rust client allows 300 seconds for this request. The Home
+Assistant HTTP integration polls cached state and does not call this endpoint.
 
 ## Discovery
 

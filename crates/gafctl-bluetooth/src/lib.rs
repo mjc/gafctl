@@ -20,6 +20,11 @@ pub const GAF_SERVICE_UUID: Uuid = Uuid::from_u128(0x000000ff_0000_1000_8000_008
 /// GAF's observed command/response BLE characteristic UUID.
 pub const GAF_CHARACTERISTIC_UUID: Uuid = Uuid::from_u128(0x0000ff01_0000_1000_8000_00805f9b34fb);
 
+/// Maximum time allowed to cancel an in-flight operation and close tracked BLE resources.
+pub const SHUTDOWN_CLEANUP_TIMEOUT: Duration = Duration::from_secs(80);
+/// Maximum time the server waits for bounded BLE shutdown cleanup.
+pub const SHUTDOWN_DRAIN_TIMEOUT: Duration = Duration::from_secs(85);
+
 /// Settings for one GAF BLE inspection.
 #[derive(Clone, Debug)]
 pub struct ProbeOptions {

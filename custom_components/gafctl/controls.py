@@ -192,7 +192,6 @@ def entity_keys(device: Device | None) -> dict[str, set[str]]:
         entities = {
             "sensor": set(SENSORS[backend]),
             "binary_sensor": set(BINARY_FIELDS[backend]),
-            "button": {"refresh"},
         }
     if backend == "legacy_ble" and "legacy_preset" in commands:
         entities["select"] = {"automatic_thresholds", "timer"}

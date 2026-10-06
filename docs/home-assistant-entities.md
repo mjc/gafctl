@@ -25,7 +25,6 @@ For an original **GAF Master Flow Wi-Fi Attic Vent** (ERV5SMT or EGV5SMT):
 | Target temperature | 90–120 °F in 1 °F steps |
 | Target humidity | 30–80% in 1% steps |
 | Timer duration | 0–360 minutes in 1-minute steps; zero clears |
-| Refresh readings | Request a new device reading through the service |
 
 The automatic selector sets both thresholds and automatic mode. Clearing the
 timer leaves the controller in timer mode; use an automatic preset to return to
@@ -43,11 +42,10 @@ settings use whole units. The full ranges have not been tested on hardware.
 
 [QuickConnect models and retrofit controllers](hardware.md#quickconnect) expose
 temperature, humidity, and available diagnostics.
-Refresh readings is available with writes disabled. Diagnostics include raw
-signal strength and verification, OTA status, humidity monitoring, and mode
-flags. Signal strength and verification are exposed verbatim. Missing or
-conflicting mode flags show unknown. Firmware updates are unsupported. Enable
-experimental cloud writes to add these controls:
+Diagnostics include raw signal strength and verification, OTA status, humidity
+monitoring, and mode flags. Signal strength and verification are exposed
+verbatim. Missing or conflicting mode flags show unknown. Firmware updates are
+unsupported. Enable experimental cloud writes to add these controls:
 
 | Entity | Choices or range |
 | --- | --- |
@@ -71,12 +69,8 @@ Running is estimated from mode and measurements. Airflow is unmeasured.
 ## Availability and updates
 
 The service polls every 30 seconds. The HTTP integration also updates every 30
-seconds and reads the service's cached state. The **Refresh readings** button
-requests a device read, sharing any refresh already in progress for that device.
-It reports failed or superseded reads and checks current identity and ownership
-before updating HA. It can refresh a configured device whose readings are
-unavailable. Original-controller snapshots become
-unavailable after 90 seconds without a complete successful reading.
+seconds and reads the service's cached state. Original-controller snapshots
+become unavailable after 90 seconds without a complete successful reading.
 
 `/health` checks whether the service responds. To check the fan, use
 `/api/v2/devices/{id}/state` and inspect `available`, `last_error`, and the
@@ -207,9 +201,10 @@ write might have completed. Gafctl caches 64 completed requests per device. Repe
 ID with the same command returns its result; a different command with that ID is
 rejected. Restart clears the cache, so reusing an ID afterward can write again.
 
-### Refresh over MQTT
+### Administrative refresh over MQTT
 
-Publish a non-retained QoS 1 request to `gafctl/{proxy_id}/{id}/refresh/set`:
+An MQTT client can request a reading by publishing a non-retained QoS 1 request
+to `gafctl/{proxy_id}/{id}/refresh/set`:
 
 ```json
 {"request_id":"attic-refresh-1","issued_at_unix_ms":1790892000000}
@@ -224,11 +219,11 @@ on `gafctl/{proxy_id}/{id}/refresh/result` without retention. Current state is
 published on the usual state topic. MQTT waits up to 300 seconds; a backend read
 may complete even if its result is lost.
 
-The discovered refresh button requires process availability but can read an
-unavailable device. Other controls require both process and device availability.
-Numbers display confirmed state and send whole, bounded values. Switch-off uses
-the backend conditional-off command so a different current mode is preserved.
-Selectors for original-controller thresholds and timer settings are separate.
-Unavailable capabilities receive platform-only removal entries in the device
-configuration, including after a service restart. Switching to HTTP ownership
-clears the retained device configuration.
+Home Assistant does not expose a refresh button. Other controls require both
+process and device availability. Numbers display confirmed state and send
+whole, bounded values. Switch-off uses the backend conditional-off command so a
+different current mode is preserved. Selectors for original-controller
+thresholds and timer settings are separate. Unavailable capabilities receive
+platform-only removal entries in the device configuration, including after a
+service restart. Switching to HTTP ownership clears the retained device
+configuration.
