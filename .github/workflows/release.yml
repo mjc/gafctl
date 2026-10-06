@@ -111,6 +111,10 @@ jobs:
             dist/*.tar.gz
             gafctl-image.tar
             gafctl-app-image.tar
+      - name: Preserve architecture-specific package provenance
+        env:
+          PACKAGE_ARCH: ${{ matrix.arch }}
+        run: mv dist/provenance.json "dist/provenance-$PACKAGE_ARCH.json"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: packages-${{ matrix.arch }}

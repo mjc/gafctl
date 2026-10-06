@@ -8,7 +8,7 @@ import shutil
 import sys
 import tempfile
 import unittest
-from contextlib import contextmanager
+from contextlib import asynccontextmanager, contextmanager
 from datetime import timedelta
 from functools import partial
 from pathlib import Path
@@ -159,18 +159,49 @@ class RegistryTests(unittest.IsolatedAsyncioTestCase):
         )
         return entry, client, entry.runtime_data, call
 
-    async def invalidate_entry(self, entry, client, replace):
-        if replace:
+    @asynccontextmanager
+    async def invalidate_entry(self, entry, client, lifecycle):
+        if lifecycle == "replaced":
             coordinator_for(
                 self.hass, client, client.fetch_devices.return_value[0], entry
             )
-        else:
+        elif lifecycle == "unloaded":
             self.assertTrue(await self.hass.config_entries.async_unload(entry.entry_id))
+        else:
+            entered, release = asyncio.Event(), asyncio.Event()
+            original_unload = ConfigEntries.async_unload_platforms
+
+            async def delayed_unload(manager, target, platforms):
+                entered.set()
+                await release.wait()
+                return await original_unload(manager, target, platforms)
+
+            with patch.object(
+                ConfigEntries, "async_unload_platforms", new=delayed_unload
+            ):
+                task = asyncio.create_task(
+                    self.hass.config_entries.async_unload(entry.entry_id)
+                )
+                try:
+                    await asyncio.wait_for(entered.wait(), 2)
+                    self.assertIs(entry.state, ConfigEntryState.UNLOAD_IN_PROGRESS)
+                    yield
+                finally:
+                    release.set()
+                    self.assertTrue(await asyncio.wait_for(task, 2))
+            return
+        try:
+            yield
+        finally:
+            if lifecycle == "replaced":
+                self.assertTrue(
+                    await self.hass.config_entries.async_unload(entry.entry_id)
+                )
 
     async def test_queued_native_services_reject_unloaded_or_replaced_coordinator(self):
         for operation in ("preset", "mode", "number", "refresh"):
-            for replace in (False, True):
-                with self.subTest(operation=operation, replace=replace):
+            for lifecycle in ("unloaded", "replaced", "unloading"):
+                with self.subTest(operation=operation, lifecycle=lifecycle):
                     entry, client, coordinator, call = await self.native_service_case(
                         operation
                     )
@@ -185,28 +216,32 @@ class RegistryTests(unittest.IsolatedAsyncioTestCase):
 
                     with patch.object(lock, "acquire", side_effect=signal_acquire):
                         task = asyncio.create_task(call())
+                        held = True
                         try:
                             await asyncio.wait_for(queued.wait(), 2)
                             client.fetch_devices.reset_mock()
                             client.fetch_state.reset_mock()
-                            await self.invalidate_entry(entry, client, replace)
+                            async with self.invalidate_entry(entry, client, lifecycle):
+                                lock.release()
+                                held = False
+                                with self.assertRaisesRegex(
+                                    HomeAssistantError, "no longer active"
+                                ):
+                                    await asyncio.wait_for(task, 2)
+                                client.fetch_devices.assert_not_awaited()
+                                client.fetch_state.assert_not_awaited()
+                                client.set_control.assert_not_awaited()
+                                client.refresh.assert_not_awaited()
+                                self.assertFalse(lock.locked())
                         finally:
-                            lock.release()
-                        with self.assertRaisesRegex(
-                            HomeAssistantError, "no longer active"
-                        ):
-                            await asyncio.wait_for(task, 2)
-                    client.fetch_devices.assert_not_awaited()
-                    client.fetch_state.assert_not_awaited()
-                    client.set_control.assert_not_awaited()
-                    client.refresh.assert_not_awaited()
-                    if replace:
-                        await self.hass.config_entries.async_unload(entry.entry_id)
+                            if held:
+                                lock.release()
+                            await asyncio.gather(task, return_exceptions=True)
 
     async def test_native_services_recheck_lifecycle_after_preparatory_read(self):
         for operation in ("preset", "mode", "number", "refresh"):
-            for replace in (False, True):
-                with self.subTest(operation=operation, replace=replace):
+            for lifecycle in ("unloaded", "replaced", "unloading"):
+                with self.subTest(operation=operation, lifecycle=lifecycle):
                     entry, client, coordinator, call = await self.native_service_case(
                         operation
                     )
@@ -228,16 +263,96 @@ class RegistryTests(unittest.IsolatedAsyncioTestCase):
                     task = asyncio.create_task(call())
                     try:
                         await asyncio.wait_for(entered.wait(), 2)
-                        await self.invalidate_entry(entry, client, replace)
+                        async with self.invalidate_entry(entry, client, lifecycle):
+                            release.set()
+                            with self.assertRaisesRegex(
+                                HomeAssistantError, "no longer active"
+                            ):
+                                await asyncio.wait_for(task, 2)
+                            client.set_control.assert_not_awaited()
+                            client.refresh.assert_not_awaited()
+                            self.assertFalse(coordinator.command_lock.locked())
                     finally:
                         release.set()
-                    with self.assertRaisesRegex(HomeAssistantError, "no longer active"):
-                        await asyncio.wait_for(task, 2)
-                    client.set_control.assert_not_awaited()
-                    client.refresh.assert_not_awaited()
-                    self.assertFalse(coordinator.command_lock.locked())
-                    if replace:
+                        await asyncio.gather(task, return_exceptions=True)
+
+    async def test_failed_native_unload_keeps_retained_services_usable(self):
+        for operation in ("preset", "mode", "number", "refresh"):
+            with self.subTest(operation=operation):
+                entry, client, coordinator, call = await self.native_service_case(
+                    operation
+                )
+                with patch.object(
+                    ConfigEntries,
+                    "async_unload_platforms",
+                    AsyncMock(return_value=False),
+                ):
+                    self.assertFalse(
                         await self.hass.config_entries.async_unload(entry.entry_id)
+                    )
+                self.assertIs(entry.state, ConfigEntryState.FAILED_UNLOAD)
+                self.assertIs(entry.runtime_data, coordinator)
+                await call()
+                if operation == "refresh":
+                    client.refresh.assert_awaited_once()
+                    client.set_control.assert_not_awaited()
+                else:
+                    client.set_control.assert_awaited_once()
+                    client.refresh.assert_not_awaited()
+                # Restore retained platforms for fixture cleanup; HA does not
+                # automatically recover a FAILED_UNLOAD entry.
+                entry._async_set_state(self.hass, ConfigEntryState.LOADED, None)
+                self.assertTrue(
+                    await self.hass.config_entries.async_unload(entry.entry_id)
+                )
+
+    async def test_native_unload_does_not_cancel_or_replay_submitted_requests(self):
+        for operation in ("preset", "mode", "number", "refresh"):
+            with self.subTest(operation=operation):
+                entry, client, coordinator, call = await self.native_service_case(
+                    operation
+                )
+                entered, release = asyncio.Event(), asyncio.Event()
+                submitted = (
+                    client.refresh if operation == "refresh" else client.set_control
+                )
+                uncertain = ControlOutcomeUnknown(f"submitted-{operation}")
+
+                async def delayed_submission(
+                    *_,
+                    entered=entered,
+                    release=release,
+                    uncertain=uncertain,
+                    operation=operation,
+                    result=submitted.return_value,
+                ):
+                    entered.set()
+                    await release.wait()
+                    if operation != "refresh":
+                        raise uncertain
+                    return result
+
+                submitted.side_effect = delayed_submission
+                task = asyncio.create_task(call())
+                try:
+                    await asyncio.wait_for(entered.wait(), 2)
+                    self.assertTrue(
+                        await self.hass.config_entries.async_unload(entry.entry_id)
+                    )
+                    self.assertFalse(task.done())
+                    release.set()
+                    message = (
+                        "no longer active"
+                        if operation == "refresh"
+                        else f"submitted-{operation}"
+                    )
+                    with self.assertRaisesRegex(HomeAssistantError, message):
+                        await asyncio.wait_for(task, 2)
+                    submitted.assert_awaited_once()
+                    self.assertFalse(coordinator.command_lock.locked())
+                finally:
+                    release.set()
+                    await asyncio.gather(task, return_exceptions=True)
 
     async def test_empty_entry_keeps_polling_and_restores_http_entities(self) -> None:
         for selected in (device(owner="mqtt"), device(commands=[], read_state=False)):

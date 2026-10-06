@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 
-from homeassistant.config_entries import ConfigEntry
+from homeassistant.config_entries import ConfigEntry, ConfigEntryState
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import entity_registry as er
@@ -106,7 +106,11 @@ class GafctlCoordinator(DataUpdateCoordinator[DeviceState]):
         return current
 
     def _require_active(self) -> None:
-        if self._unloaded or getattr(self.entry, "runtime_data", None) is not self:
+        if (
+            self._unloaded
+            or self.entry.state is ConfigEntryState.UNLOAD_IN_PROGRESS
+            or getattr(self.entry, "runtime_data", None) is not self
+        ):
             raise ApiError("this device's integration entry is no longer active")
 
     def _reload_changed_entities(self) -> None:

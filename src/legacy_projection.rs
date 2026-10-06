@@ -17,7 +17,9 @@ pub(crate) fn project_snapshot(snapshot: &DeviceSnapshot) -> DeviceState {
     });
     DeviceState {
         temperature_f: sensors.map(|sensors| f64::from(sensors.temperature.value()) / 10.0),
-        humidity_percent: sensors.map(|sensors| f64::from(sensors.humidity.value()) / 10.0),
+        humidity_percent: sensors
+            .filter(|sensors| sensors.humidity.value() <= 1000)
+            .map(|sensors| f64::from(sensors.humidity.value()) / 10.0),
         settings: DeviceSettings::LegacyBle {
             mode: mode.map(|mode| match mode.mode {
                 OperatingMode::Automatic => LegacyMode::Automatic,

@@ -48,10 +48,31 @@ async fn state_route_reports_normalized_state_and_expired_state_as_unavailable()
 
 #[tokio::test]
 async fn reusable_client_reads_the_actual_service_router_without_physical_access() {
+    for (sensors, humidity) in [
+        (b"#sdr03ca00aa\n", Some(17.0)),
+        (b"#sdr03ca0000\n", Some(0.0)),
+        (b"#sdr03ca03e8\n", Some(100.0)),
+        (b"#sdr03ca03e9\n", None),
+        (b"#sdr03caffff\n", None),
+    ] {
+        assert_client_snapshot(sensors, humidity).await;
+    }
+}
+
+async fn assert_client_snapshot(sensors: &'static [u8], humidity: Option<f64>) {
     let state =
         DeviceService::with_ble_device("private-peripheral-id".to_owned(), DeviceRegistry::new());
-    let projection =
-        project_legacy_snapshot(&snapshot_at(Instant::now(), SystemTime::now())).unwrap();
+    let frame =
+        |payload| gafctl_protocol::Frame::from_bytes(bytes::Bytes::from_static(payload)).unwrap();
+    let snapshot = gafctl_protocol::DeviceSnapshot::from_frames(
+        frame(b"#idr030000private-suffix\n"),
+        frame(b"#dmraf\n"),
+        frame(sensors),
+        frame(b"#atr041a03e8\n"),
+        frame(b"#ttr00000000\n"),
+    )
+    .unwrap();
+    let projection = project_legacy_snapshot(&snapshot).unwrap();
     state
         .registry
         .read()
@@ -78,6 +99,17 @@ async fn reusable_client_reads_the_actual_service_router_without_physical_access
     assert!(response.available);
     let snapshot = response.state.unwrap();
     assert_eq!(snapshot.temperature_f, Some(97.0));
+    assert_eq!(snapshot.humidity_percent, humidity);
+    assert_eq!(
+        match snapshot.settings {
+            gafctl_api::DeviceSettings::LegacyBle {
+                automatic_humidity_tenths_percent,
+                ..
+            } => automatic_humidity_tenths_percent,
+            gafctl_api::DeviceSettings::QuickConnect { .. } => None,
+        },
+        Some(1000)
+    );
     assert_eq!(snapshot.estimated_running, None);
     let serialized = serde_json::to_string(&snapshot).unwrap();
     assert!(serialized.contains("\"estimated_running\":null"));
