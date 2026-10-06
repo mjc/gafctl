@@ -43,7 +43,7 @@ sudo install -m 0644 packaging/systemd/gafctl.service /etc/systemd/system/
 sudo install -m 0644 packaging/dbus/gafctl.conf /etc/dbus-1/system.d/
 ```
 
-Create the user only if it does not exist. Edit `/etc/gafctl/gafctl.env` with the
+Skip `useradd` if the account already exists. Edit `/etc/gafctl/gafctl.env` with the
 Bluetooth device ID or QuickConnect credentials. Start BlueZ for an original
 controller and reload the D-Bus configuration using your distribution's tools.
 The unit creates a private `/var/lib/gafctl` state directory and sets the
@@ -78,8 +78,7 @@ readings before you add the Home Assistant integration.
 Use this for any [QuickConnect model or retrofit controller](hardware.md#quickconnect)
 configured in the **GAF Master Flow QuickConnect** app.
 Original ERV5SMT and EGV5SMT controllers use Bluetooth. QuickConnect has not been
-tested with a live account or fan; see [hardware](hardware.md#quickconnect) and
-[API research](quickconnect-contract.md).
+tested with a live account or fan. See the [QuickConnect API](quickconnect-contract.md).
 
 The required settings are:
 
@@ -127,14 +126,12 @@ Remove `GAFCTL_DEVICE_ID` for cloud-only operation. After editing the unit, run
 `sudo systemctl daemon-reload` and `sudo systemctl restart gafctl.service`.
 
 `GAFCTL_QUICKCONNECT_PASSWORD` can supply the password directly through an
-existing secret manager instead. Set exactly one password source. Never put
-passwords in command-line arguments or tracked configuration.
+existing secret manager. Set one password source and keep it out of command-line
+arguments and tracked configuration.
 
-Cloud controls are disabled by default. To opt into experimental mode, target,
-and timer-duration writes, set `GAFCTL_QUICKCONNECT_WRITES_ENABLED=true` and
-restart. This advertises controls to Home Assistant and the CLI. Cloud writes
-have not been tested on a QuickConnect fan. The CLI guide lists the
-[commands and limits](cli.md#controls).
+To enable experimental mode, target and timer-duration writes, set
+`GAFCTL_QUICKCONNECT_WRITES_ENABLED=true` and restart. Controls then appear in
+Home Assistant and the CLI. See [commands and limits](cli.md#controls).
 
 Cloud polling runs separately from Bluetooth polling. A login or Internet failure
 leaves the service running and cloud devices unavailable; it retries on the next
@@ -144,8 +141,7 @@ the identity file when changing a password or recovering account access.
 ## MQTT
 
 See [Home Assistant and MQTT](home-assistant-entities.md#mqtt-setup) for broker
-settings, discovery, topics, and access rules. MQTT is optional; the HTTP
-integration does not need a broker.
+settings, discovery, topics and access rules.
 
 ## Troubleshooting
 
@@ -161,30 +157,5 @@ integration does not need a broker.
 
 For upgrades, stop the service, replace both executables, and restart. Keep the
 identity store and local configuration. To roll back, restore the previous
-executables and restart. Home Assistant's integration configuration does not need
-to be recreated for an upgrade that retains its integration domain and identity.
-
-## Migration from Updraft
-
-The rename changes executable names, the HA integration domain, MQTT namespaces,
-environment variables, and shared Nix service, user, credential, and state paths.
-Deploy the renamed service, HA integration and broker configuration together.
-Existing installations require manual migration.
-
-1. Stop the old service before starting `gafctl-server`.
-2. Preserve the existing identity-store contents, including the proxy UUID and
-   device mappings. Move the file to the new private state path and set ownership
-   for the new service user. Provision credentials at the new configured paths
-   and use `GAFCTL_` variables.
-3. Back up the HA configuration. Plan the domain/registry migration before
-   replacing `custom_components/updraft` with `custom_components/gafctl`; copying
-   the directory leaves existing entries under the old domain. Preserve entity
-   IDs used by dashboards and automations, and verify proxy/device identity
-   after migration.
-4. Remove the old retained MQTT discovery configurations before enabling the new
-   publisher. Update broker permissions for `gafctl/` and the discovery node
-   `homeassistant/+/gafctl/+/config` described in the MQTT guide.
-5. Verify state freshness, entity ownership, and control readback, then remove
-   the old component and service configuration. Keep the migration backup for
-   rollback. Restore the matching HA domain, broker configuration and state
-   paths along with the old executable.
+executables and restart. Keeping the integration domain and identity preserves
+Home Assistant's configuration.

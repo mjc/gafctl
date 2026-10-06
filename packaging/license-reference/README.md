@@ -1,32 +1,30 @@
 # Cached upstream license references
 
-These files are public upstream notices omitted from the corresponding published
-crate packages, plus Rust’s version-pinned MIT license. Preserve their bytes.
-`about.toml` uses cargo-about SHA-256 clarifications; cargo-about resolves the
-license expressions and chooses the dependency graph. The generation script only
-materializes local paths, validates package versions, and formats the tool output.
+This directory stores upstream notices missing from published crate packages
+and the pinned Rust MIT license. Preserve the source bytes. `about.toml` gives
+cargo-about their SHA-256 checksums. The generation script prepares local paths,
+checks package versions and formats cargo-about’s output.
 
 `sources.json` records the exact published package versions, upstream commit URLs,
 and SHA-256 checksums. The upstream commits came from each crate’s packaged
 .cargo_vcs_info.json; Rust’s commit is the resolved `1.98.1` release tag. A crate or
 toolchain update requires reviewing and refreshing its references.
 
-## License choices and completeness
+## License sources
 
 - BlueZ crates use their upstream MIT license with the original Luis Félix notice.
 - rumqtt crates use the full upstream Apache 2.0 license.
-- objc2-family upstream trees supply only `LICENSE.md`, which explicitly declares
-  MIT licensing and links to the license terms. This policy is preserved verbatim;
-  the consolidated notice also includes complete MIT terms from the other MIT
-  notices and the pinned Rust MIT license. Upstream supplies no separate copyright
-  notice for these packages; do not infer one from Cargo `authors` metadata.
+- objc2-family upstream trees supply `LICENSE.md`, which declares
+  MIT licensing and links to the terms. The consolidated notice includes that
+  file and full MIT terms from the other notices and pinned Rust license. Keep
+  upstream copyright text; Cargo `authors` are not copyright notices.
 - btleplug uses its packaged BSD-3-Clause license, one of its declared choices.
 - dunce uses its packaged CC0 license, one of its declared choices.
 - AWS-LC clarifications use the full packaged composite notice and the additional
-  packaged fiat-crypto MIT notice. No scanner-selected excerpts replace them.
-- A non-null cargo-about `source_path` rejects generic fallback, but explicit
-  clarifications still require source review: a policy file can contain a license
-  link without the terms themselves, as the objc2-family files demonstrate.
+  packaged fiat-crypto MIT notice.
+- Every generated entry requires a cargo-about `source_path`. Review each
+  clarification source. The objc2 policy files link to terms, so
+  the consolidated notice also needs the full terms.
 
 ## Provenance
 

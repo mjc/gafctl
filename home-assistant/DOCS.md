@@ -12,9 +12,8 @@ and ends with `_gafctl`. Then run:
 docker exec CONTAINER_NAME gafctl ble scan
 ```
 
-This scan discovers devices without opening a fan connection. Copy the reported
-ID into the app configuration and restart it. Do not use a Bluetooth ID from
-a different host without verifying it on this host.
+The scan reads advertisements. Copy the host-local ID into the app
+configuration and restart it.
 
 For QuickConnect controllers, set `quickconnect_username`,
 `quickconnect_password`, and `quickconnect_role`. This backend is experimental;
@@ -25,7 +24,7 @@ MQTT is optional. Set `mqtt_host`, `mqtt_username`, and `mqtt_password` together
 For Home Assistant's Mosquitto app, the host is `core-mosquitto`. Use a dedicated
 MQTT login. Enable `mqtt_discovery` if you want entities through MQTT.
 
-Enabling discovery does not automatically change a device's owner. Read
+Assign each device to MQTT after enabling discovery. Read
 `http://HOME_ASSISTANT_HOST:8787/api/v2/devices` to get its actual local device ID,
 then assign both sources to MQTT:
 
@@ -37,15 +36,15 @@ curl --fail -X PUT http://HOME_ASSISTANT_HOST:8787/api/v2/devices/DEVICE_ID/sour
 
 Replace `DEVICE_ID` with the inventory ID and reread inventory to confirm both
 sources. MQTT discovery must be enabled for this request to succeed. To use the
-HTTP integration instead, assign both sources to `http`. Ownership persists
-across app restarts; avoid HTTP and MQTT duplicates of the same fan.
+HTTP integration, assign both sources to `http`. Ownership persists across app
+restarts.
 
 For HTTP, install the separate **Gafctl GAF Vent** integration through the HACS
 custom repository `https://github.com/mjc/gafctl`, or copy the repository's
 `custom_components/gafctl` directory into your Home Assistant configuration.
-The integration requires Home Assistant 2026.9.4 or newer. Restart Home Assistant and add the integration with
-`http://HOME_ASSISTANT_HOST:8787`. Do not add both HTTP and MQTT entities for the
-same fan; select one entity source for each device.
+The integration requires Home Assistant 2026.9.4 or newer. Restart Home Assistant
+and add it with `http://HOME_ASSISTANT_HOST:8787`. Select one entity source per
+fan.
 
 Port 8787 is exposed to the local network and has no login. Keep it on your
 trusted network. The health watchdog checks the server process; inspect device

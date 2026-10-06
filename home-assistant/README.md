@@ -6,4 +6,4 @@ controllers use the GAF cloud API; this backend is experimental.
 
 Install the separate Gafctl integration through HACS or copy
 `custom_components/gafctl` into your Home Assistant configuration directory.
-See the app's Documentation tab for setup.
+Configure the server using the app's Documentation tab.

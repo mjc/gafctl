@@ -31,9 +31,8 @@ Periodic BLE reads use this operation too.
 The response contains the state fields shown below plus `status`: `fresh`
 (`200`), `failed` (`502`), or `superseded` (`409`). A failed refresh can contain
 previous cached readings; its status still records that the new read failed.
-A superseded read was displaced by another state or control generation and
-was not published. Unknown devices return `404`, and unconfigured backends
-return `503`. A worker that closes without a result returns `500` and can be
+A superseded read lost to a newer state or control operation. Unknown devices
+return `404`, and unconfigured backends return `503`. A worker that closes without a result returns `500` and can be
 replaced by the next request.
 
 The shared worker has a 270-second deadline, including time waiting for the
@@ -131,7 +130,7 @@ Unknown measurements are `null`. An unavailable device has `state: null` and
 `available: false`. `inventory_status` is `unknown`, `present`, `missing`, or
 `unavailable`. It records whether the device is in the inventory.
 `controller_fan_on` reports controller state; `estimated_running` is calculated
-from settings and measurements and may be `null`. Neither measures motor operation.
+from settings and measurements and may be `null`. Motor operation is unmeasured.
 
 Nullable fields are included. Clients may accept additional fields,
 but missing required fields or inconsistent values are errors.
@@ -172,7 +171,8 @@ Original-controller adjustable commands:
 Temperature accepts 90–120 °F, humidity 30–80%, and timer 0–360 minutes,
 all in whole-unit steps. Zero clears the timer. These limits come from the
 original manufacturer Android app, including its timer picker and setter
-encoding. They do not expose the app's manual or humidity-disable sentinels.
+encoding. The app's manual and humidity-disable sentinels are outside these
+input ranges.
 Changing either threshold selects automatic mode. The service reads current
 thresholds while holding the device transaction, preserves the untouched raw
 tenths field, checks request age again, then writes and verifies readback.
@@ -182,7 +182,7 @@ disable sentinel is preserved when changing temperature.
 The original controller advertises `legacy_automatic_temperature`,
 `legacy_automatic_humidity`, and `legacy_timer` capabilities. Broader values
 within the app ranges have not all been tested with readback on the controller.
-The four tested presets remain available.
+The four tested presets are also supported.
 
 QuickConnect commands:
 
@@ -211,7 +211,6 @@ the device transaction. Conditional off changes the mode only when the fresh
 backend mode matches `only_if_current`; another known mode confirms without a
 write. Unknown or conflicting mode prevents the write. HA number controls and
 mode switches use these commands.
-
 
 ```json
 {"kind":"quick_connect_timer_duration","minutes":90}
@@ -275,8 +274,8 @@ Use both `http` values to switch back. The response is the updated device
 description, and the selection is saved in the identity store. Split HTTP/MQTT
 ownership is rejected with `422`. Selecting MQTT without a configured broker and
 discovery returns `409`; unknown IDs return `404`. Persistence failures return
-`500`. Source selection controls Home Assistant entities; it does not prevent an
-administrative CLI or API client from submitting a supported command.
+`500`. Source selection controls Home Assistant entities. Administrative CLI
+and API commands stay available.
 
 See [Home Assistant and MQTT](home-assistant-entities.md) for installation,
 discovery, topics, and broker permissions.

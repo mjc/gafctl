@@ -42,11 +42,9 @@ gafctl control qc-local timer-duration 60
 ```
 
 Use the local device ID returned by `devices`. A local ID contains 1–64 ASCII
-letters, digits, underscores, or hyphens. It is distinct from a BLE peripheral ID
-and a cloud provider's private ID. State and control require an explicit local
-ID. The client checks inventory and advertised capabilities before reading
-state or submitting control. The service checks them again and handles execution,
-write gates, serialization, and replay handling.
+letters, digits, underscores, or hyphens. Use this service-local ID for state
+and control. The client and service check inventory and capabilities before
+execution.
 
 The URL is chosen in this order:
 
@@ -57,19 +55,18 @@ The URL is chosen in this order:
 HTTP and HTTPS are supported, including reverse-proxy prefixes such as
 `https://fan.example/gafctl`. Credentials, query strings, and fragments in the
 base URL are rejected. TLS certificates are verified. The client disables
-redirects, proxies, and automatic retries. It never falls back to BLE when a
-service request fails. Client commands require no QuickConnect account secrets
-and do not initialize Bluetooth.
+redirects, proxies and automatic retries. Service commands use HTTP exclusively;
+account credentials and Bluetooth configuration belong to the server.
 
 The service has no built-in authentication. Configure protected HTTP or HTTPS
 access as described in [deployment](deployment.md). HA `state_source` and
-`command_source` select HA entities. They do not restrict administrative HTTP
-or MQTT commands.
+`command_source` select HA entities. Administrative HTTP and MQTT commands stay
+available.
 
 `state` returns the service's cached snapshot. Inspect `available`,
 `inventory_status`, `last_error`, and `state.provenance` observation/fetch
-timestamps. An unavailable device with `state: null` is a valid read. This GET
-does not start a fresh physical fan query.
+timestamps. An unavailable device with `state: null` is a valid read. Use the
+[refresh endpoint](http-api.md#refresh) for a new backend reading.
 
 ### Controls
 
@@ -82,8 +79,7 @@ CLI preset names map to API values:
 | `timer-clear` | `timer_clear` | Clear the timer |
 | `timer-one-minute` | `timer_one_minute` | One-minute timer |
 
-QuickConnect controls are available only when the selected device advertises
-them and the service's write gate admits them:
+QuickConnect controls require advertised capabilities and enabled cloud writes:
 
 - `mode`: `off`, `automatic`, `timer`, or `manual`.
 - `targets`: both `--temperature-f` and `--humidity-percent` are required.
@@ -99,7 +95,7 @@ validation also runs for each command.
 
 The connection timeout is five seconds. Total discovery/state request deadlines
 default to ten seconds; control defaults to 300 seconds to allow the backend's
-preparation, write, and readback phases. `--timeout-seconds POSITIVE_INTEGER`
+settings read, write and readback. `--timeout-seconds POSITIVE_INTEGER`
 overrides read and control deadlines. The service may continue after the client
 deadline expires.
 
@@ -114,16 +110,13 @@ gafctl control configured preset timer-clear --format json --request-id attic-1
 ```
 
 Success requires a matching request ID, a successful HTTP status, and the
-backend's `confirmed` outcome. Other outcomes, including unknown future values,
-are retained as unconfirmed.
+backend's `confirmed` outcome. Other outcomes are unconfirmed.
 
 A timeout or lost control response means the outcome is unknown. The output
 retains the request ID; the worker may continue after the CLI exits. Controls
 are sent once and never automatically retried. Reusing an ID relies on the
-running service's bounded, in-memory replay cache. It does not provide durable
-idempotency across service restarts. The service also rejects reuse with
-different command content. Inspect state and the outcome before deciding
-whether to retry.
+running service's in-memory replay cache, which resets on restart. Reuse with
+different command content is rejected. Read current state before retrying.
 
 ## Direct Bluetooth
 
@@ -136,17 +129,16 @@ gafctl ble control --device-id <peripheral-id> preset automatic-105-1-f-30-1-per
 ```
 
 `scan` discovers advertisements without connecting or sending protocol requests.
-`state` performs a fresh direct device query. It auto-selects only one
-unambiguous candidate. With multiple
-candidates, supply the platform peripheral ID returned by the scan. Direct
-`control` always requires this ID and exposes exactly the four verified presets
-listed above. It validates identity and checks acknowledgement and readback.
+`state` reads the device and selects a single unambiguous candidate. With
+multiple candidates, supply the peripheral ID returned by the scan. Direct
+`control` requires this ID and supports the four tested presets above. It checks
+identity, acknowledgement and readback.
 
 BLE discovery defaults to six seconds (`--scan-seconds`). GATT setup, each command
 write, and each response wait default to three seconds (`--timeout-seconds`).
 Platform adapter setup, scanning, connection, and cleanup allow at least 40
 seconds for operating-system calls. Both options require positive integers;
-the [recovery limits](protocol-contract-v1.md#timeouts-and-recovery) also apply.
+the [recovery limits](protocol-findings.md#timeouts-and-recovery) also apply.
 These flags and `--format` work within the BLE
 command tree, including after `preset`.
 
@@ -154,8 +146,8 @@ Partial snapshots retain successfully decoded fields, nullable values, field
 errors, control acknowledgement/readback, discovery warnings, and disconnect
 failures. A write with missing or mismatched readback exits unsuccessfully.
 The `controller_fan_on` flag reports the controller's on/off state; motor
-operation and airflow are not measured. There is no verified standalone legacy on/off
-command. `estimated_running` stays unknown for legacy BLE.
+operation and airflow are unmeasured. `estimated_running` is null for legacy BLE.
+Use timer or automatic controls to change operation.
 
 Raw identity payload bytes are omitted from both text and JSON. Supply
 `--show-identity` to include `identity_payload_hex`; it may contain a private
@@ -208,7 +200,7 @@ Other execution failures use this envelope; missing context is `null`:
 {"error":{"kind":"timeout","message":"control outcome unknown for request attic-1: service request timed out","request_id":"attic-1","http_status":null}}
 ```
 
-Error kinds include `configuration`, `timeout`, `transport`, `http`,
+Error kinds are `configuration`, `timeout`, `transport`, `http`,
 `response_too_large`, `decoding`, `contract`, `correlation`, `unknown_device`,
 `unsupported_command`, `clock`, and `ble`. HTTP response bodies are limited to
 two MiB, including declared or streamed error bodies. Incomplete or malformed
@@ -251,9 +243,8 @@ Rust callers can use `gafctl-client::Client` with `ServerUrl` and
 `ClientOptions`. `devices` and `state` return shared `gafctl-api` models.
 `prepare_control` resolves capabilities and returns a `PreparedControl` intent;
 consuming `submit` sends it once. A `ControlResult::Confirmed` contains a private
-`ConfirmedControl` value constructed only after HTTP, correlation, and backend
-confirmation checks. Libraries do not depend on clap, MQTT, the BLE runtime,
-or service handlers.
+`ConfirmedControl` value constructed after HTTP, correlation and backend
+confirmation checks.
 
 Automated tests check software behavior with local HTTP servers and fake BLE
 transports. Hardware test results are in the [protocol findings](protocol-findings.md).

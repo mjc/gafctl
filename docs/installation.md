@@ -1,8 +1,8 @@
 # Install Gafctl
 
-Gafctl has two parts: a server near the fan, and a Home Assistant integration.
-The integration requires Home Assistant **2026.9.4 or newer**. Install the server once. HACS installs the integration; it does not install or
-start the server.
+Install the Gafctl server and its Home Assistant integration separately. The
+integration requires Home Assistant **2026.9.4 or newer**. HACS installs the
+integration.
 
 | Server host | Install method |
 | --- | --- |
@@ -13,20 +13,13 @@ start the server.
 | macOS | [Nix package](#nix); Bluetooth access runs natively |
 
 Original ERV5SMT and EGV5SMT controllers need a Linux Bluetooth adapter and BlueZ
-for an always-on service. Containers use the host's BlueZ over D-Bus; they do
-not need USB passthrough, host networking, or privileged mode. Keep one server
-connected to the fan. QuickConnect needs Internet access and a GAF account;
-its backend remains experimental, with writes disabled by default.
+for an always-on service. Containers use the host's BlueZ over D-Bus. Keep one
+server connected to the fan. QuickConnect needs Internet access and a GAF
+account; it is experimental, with writes disabled by default.
 
-No release binaries or registry images have been published yet. The source,
-Compose, HACS custom repository, and Home Assistant app paths work from this
-repository. The release workflow builds `.deb` packages, Linux binary archives,
-and multi-architecture container images when a release is published. Both native
-Linux architectures must pass checks of the exported archive, installed Debian
-package, runtime image and Home Assistant app image before publication. Tagged
-builds produce GitHub artifact attestations for the tested packages and image
-archives. These establish build provenance; they do not establish physical fan
-compatibility.
+Release binaries and registry images are unpublished. Use the source builds,
+Compose, HACS custom repository, or Home Assistant app below. See
+[releases](development.md#releases) for package builds and publication.
 
 ## Ubuntu and Debian
 
@@ -48,13 +41,12 @@ sudo apt install ./dist/gafctl_0.1.0_*.deb
 
 Use the package matching your architecture: `amd64` for x86-64 or `arm64` for
 64-bit ARM. Packages built by the Dockerfile target Debian 12 / Ubuntu 24.04
-and newer. Do not install those binaries on Ubuntu 22.04; build from source on
-that host or use the container.
+and newer. On Ubuntu 22.04, build from source or use the container.
 
 The package installs both executables, a systemd unit, a private configuration
 directory, and a D-Bus policy allowing the service account to use BlueZ. It
 creates the `gafctl` user and preserves device identity across reinstallations.
-It does not start the service before you configure it.
+Configure and start the service as shown below.
 
 For an original controller, scan and enter the ID in the configuration file:
 
@@ -209,14 +201,13 @@ Assistant representation per fan.
 
 This app currently builds the Rust binaries locally from a pinned source
 revision during installation. The first build takes time and needs Internet
-access and free disk space. It supports `amd64` and `aarch64`. The app stores
-identities under `/data`, which Home Assistant backups include. App passwords
+access and free disk space. Supported architectures are `amd64` and `aarch64`.
+The app stores identities under `/data`, which Home Assistant backups include. App passwords
 also appear in its private options and backups; treat those backups as secrets.
 
 The app can use Home Assistant OS's Bluetooth adapter through the host's BlueZ
-service. It does not install another Bluetooth manager. A peripheral ID from
-another computer can differ: scan on this host with `gafctl ble scan` in the app
-container, using Home Assistant OS debug SSH if needed, then copy the ID into
+service. Peripheral IDs can differ between computers: scan on this host with
+`gafctl ble scan` in the app container, using Home Assistant OS debug SSH if needed, then copy the ID into
 its configuration. See the app's Documentation tab for the command.
 
 Home Assistant Container has no app store; run the Gafctl Compose service beside
@@ -233,10 +224,9 @@ service name, in the integration.
 4. Open **Settings → Devices & services → Add integration → Gafctl GAF Vent**.
 5. Enter `http://GAFCTL_HOST:8787` and select the fans to add.
 
-This is a HACS custom repository, not a listing in its default catalog. HACS
-updates the Python integration separately from the server. Keep their versions
-aligned. Do not add HTTP and MQTT copies of the same fan; choose one entity
-source per device as described in [MQTT setup](home-assistant-entities.md).
+HACS updates the Python integration separately from the server. Keep their
+versions aligned. Choose one entity source per device as described in
+[MQTT setup](home-assistant-entities.md).
 
 ### Manual installation
 
@@ -303,8 +293,8 @@ services.gafctl = {
 
 The module creates the `gafctl` user, enables BlueZ for an original controller,
 grants that user D-Bus access, and persists identities in `/var/lib/gafctl`.
-Cloud-only or MQTT-only configurations do not enable Bluetooth. The service
-restarts after failures and loads passwords through systemd credentials.
+Bluetooth is enabled when `bluetooth.deviceId` is set. The service restarts
+after failures and loads passwords through systemd credentials.
 
 For MQTT, add:
 
@@ -329,10 +319,10 @@ services.gafctl.quickconnect = {
 };
 ```
 
-Provision these password files at runtime with private permissions. Use quoted
-absolute paths as shown, not Nix path literals or `builtins.readFile`; secrets
-must stay outside the Nix store. QuickConnect writes remain disabled unless you
-set `quickconnect.writesEnabled = true`. Backends can be enabled together.
+Provision password files at runtime with private permissions. Use quoted
+absolute paths to keep secrets outside the Nix store. To enable experimental
+cloud writes, set `quickconnect.writesEnabled = true`. Both backends can run
+together.
 
 The API listens on `127.0.0.1:8787`. If Home Assistant runs on another host,
 set `listenAddress` to a trusted LAN IP and `allowRemote = true`. `openFirewall`

@@ -3,7 +3,7 @@
 For the HTTP integration, follow the
 [README installation steps](../README.md#add-it-to-home-assistant). Gafctl runs
 on the computer that communicates with the fan; Home Assistant connects to its
-HTTP API. Home Assistant itself does not need Bluetooth for this setup.
+HTTP API. The Gafctl host supplies Bluetooth for original controllers.
 
 ## Entities
 
@@ -30,9 +30,8 @@ For an original **GAF Master Flow Wi-Fi Attic Vent** (ERV5SMT or EGV5SMT):
 The automatic selector sets both thresholds and automatic mode. Clearing the
 timer leaves the controller in timer mode; use an automatic preset to return to
 automatic operation. A selector shows unknown when the current settings do not
-match an available choice. An expired timer does not show as an active one-minute
-timer. The presets were tested on one controller; choose thresholds for your
-attic's conditions.
+match an available choice. An expired one-minute timer shows unknown. The
+presets were tested on one controller.
 
 The adjustable numbers use ranges and whole-unit steps from the original
 manufacturer app. Temperature and humidity commands change only the selected
@@ -44,12 +43,11 @@ settings use whole units. The full ranges have not been tested on hardware.
 
 [QuickConnect models and retrofit controllers](hardware.md#quickconnect) expose
 temperature, humidity, and available diagnostics.
-They include the Refresh readings button without enabling cloud writes.
-Read-only diagnostics include the raw signal-strength and verification fields,
-OTA-in-progress, humidity monitoring, and automatic/timer/manual mode mirrors.
-Raw fields have no inferred units or connectivity meaning. Unknown or conflicting
-mode remains unknown in the mirrors. OTA status does not expose firmware writes.
-When experimental cloud writes are enabled, they also expose:
+Refresh readings is available with writes disabled. Diagnostics include raw
+signal strength and verification, OTA status, humidity monitoring, and mode
+flags. Signal strength and verification are exposed verbatim. Missing or
+conflicting mode flags show unknown. Firmware updates are unsupported. Enable
+experimental cloud writes to add these controls:
 
 | Entity | Choices or range |
 | --- | --- |
@@ -67,9 +65,8 @@ Turning off a switch for an inactive mode leaves the active mode unchanged.
 Conditional off rejects unknown mode. These cloud controls are tested with
 synthetic responses and have not been tested on a QuickConnect fan.
 
-QuickConnect timer duration sets the length of a future timer run; saving it
-leaves timer mode unchanged. Running is estimated from mode and measurements.
-Airflow is not measured by either backend.
+QuickConnect timer duration saves a setting and leaves the mode unchanged.
+Running is estimated from mode and measurements. Airflow is unmeasured.
 
 ## Availability and updates
 
@@ -110,15 +107,14 @@ GAFCTL_MQTT_DISCOVERY=true
 ```
 
 Restart Gafctl, then select MQTT ownership through the
-[entity-source endpoint](http-api.md#home-assistant-entity-source). Enabling
-discovery alone leaves HTTP ownership unchanged. Each fan has one HA owner for
-both readings and controls. Both administrative transports remain available.
+[entity-source endpoint](http-api.md#home-assistant-entity-source). Each fan has
+one HA owner for readings and controls. Administrative HTTP and MQTT commands
+stay available.
 Keep the environment file private. The password is required when MQTT is enabled;
 there is currently no MQTT password-file option.
 
-Gafctl's MQTT connection currently uses plain TCP. Setting port 8883 alone does
-not enable TLS. Use a trusted network or a local TLS tunnel if your broker
-requires encrypted connections.
+Gafctl uses plain TCP on every MQTT port. Use a trusted network or a local TLS
+tunnel for a broker that requires encryption.
 
 All devices default to HTTP ownership. Set both source fields to `mqtt` to move
 a fan's HA entities to MQTT. Split ownership is rejected. The selection persists
@@ -171,10 +167,9 @@ HA can temporarily unload entities after receiving a migration message; a
 successful retry restores them. If the replacement continues to fail, restarting
 HA or reconnecting its MQTT integration replays the previous configurations.
 
-Device state and availability messages are retained. Process availability has
-its own last-will topic, `gafctl/{proxy_id}/availability`. It does not replace each fan's
-availability. After reconnecting, Gafctl republishes current state and enabled
-discovery messages.
+Device state and availability messages are retained. Process availability uses
+the last-will topic `gafctl/{proxy_id}/availability`. Each fan has a separate
+availability topic. Reconnect republishes current state and discovery.
 
 ## Controls
 
@@ -198,8 +193,7 @@ seconds ahead, retained, malformed, or unsupported are rejected before fan acces
 
 Results arrive at `gafctl/{proxy_id}/{id}/control/result`, include the request ID, and are
 not retained. A successful control requires acknowledgement and matching state
-readback. Home Assistant does not display a requested setting as if it had
-already succeeded.
+readback. Home Assistant displays confirmed settings.
 
 HA and the Rust client allow 300 seconds for a control response. Timeout,
 disconnect, malformed or mismatched confirmation leaves the outcome unknown;
@@ -211,8 +205,7 @@ worker closes, if the broker is available. Result publication has a separate
 If no result arrives, read current state before sending another command: the
 write might have completed. Gafctl caches 64 completed requests per device. Repeating a cached
 ID with the same command returns its result; a different command with that ID is
-rejected. The cache is in memory and is lost on restart. It cannot guarantee that
-a retry after a restart will avoid another write.
+rejected. Restart clears the cache, so reusing an ID afterward can write again.
 
 ### Refresh over MQTT
 
@@ -228,8 +221,8 @@ return correlated rejections without reading the fan. Accepted reads use the sam
 per-device refresh worker as HTTP, including coalescing, serialization, and the
 270-second backend deadline. A `fresh`, `failed`, or `superseded` result arrives
 on `gafctl/{proxy_id}/{id}/refresh/result` without retention. Current state is
-published on the usual state topic. MQTT waits up to 300 seconds for a result;
-If no result arrives, the backend read may still have completed.
+published on the usual state topic. MQTT waits up to 300 seconds; a backend read
+may complete even if its result is lost.
 
 The discovered refresh button requires process availability but can read an
 unavailable device. Other controls require both process and device availability.

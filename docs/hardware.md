@@ -15,11 +15,9 @@ controller and app when choosing a backend.
 | Master Flow EZ Cool plug-in with QuickConnect — Gable Mount | EZCQCG1 | GAF Master Flow QuickConnect | Experimental cloud API |
 | Master Flow QuickConnect retrofit module | ERV/EGV series with the module installed | GAF Master Flow QuickConnect | Experimental cloud API |
 
-The table includes GAF-documented model families across product revisions.
-Retail availability may differ, and SKUs may also include a finish. A standard
-ERV/EGV or EZ Cool fan needs a QuickConnect controller to use the cloud backend.
-Gafctl's hardware tests cover one original controller. Other models, finishes
-and firmware revisions are untested.
+A standard ERV/EGV or EZ Cool fan needs a QuickConnect controller for cloud
+access. Model availability and finish suffixes vary by product revision.
+Hardware tests cover one original firmware 3.0.0 controller.
 
 ## Original ERV5SMT and EGV5SMT
 
@@ -38,9 +36,8 @@ The original controller creates its own `GAFVent_XXXX` Wi-Fi access point. Gafct
 uses Bluetooth, so the service computer can stay on your normal network. Gafctl
 has no implementation of this controller's direct Wi-Fi protocol.
 
-The firmware's identity reply starts with a version and ends with a private
-identifier. The current parser does not obtain a roof/gable model number from
-that reply. A Bluetooth identifier alone does not distinguish ERV5SMT from EGV5SMT.
+The identity reply contains firmware version and a private identifier. Choose
+the roof/gable model from the fan label; the reply has no model field.
 
 ## QuickConnect
 
@@ -63,16 +60,14 @@ Manufacturer references checked on **2026-10-02**:
 Gafctl selects QuickConnect devices from the account inventory without filtering
 by fan model. Built-in and retrofit QuickConnect controllers use this backend;
 each device must return the fields described in the
-[QuickConnect contract](quickconnect-contract.md).
+[QuickConnect API](quickconnect-contract.md).
 
 Gafctl's QuickConnect backend was implemented from a community integration's
-source and synthetic test data. Live account and fan compatibility have not been
-verified in this repository. It starts read-only; optional settings writes are
-disabled by default. Instructions are in
-[deployment](deployment.md#quickconnect-experimental), and the API research is in
-[QuickConnect contract notes](quickconnect-contract.md).
+source and synthetic test data. Live account and fan compatibility are
+untested. It is read-only by default.
+See [deployment](deployment.md#quickconnect-experimental) for configuration and
+the [QuickConnect API](quickconnect-contract.md) for protocol details.
 
 ## Other fans
 
 QuietCool fans and Master Flow fans with only mechanical thermostats are unsupported.
-Other models need separate controller and protocol checks.

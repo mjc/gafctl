@@ -10,14 +10,10 @@ MQTT bridge, and CLI provide readings, settings, and controls.
 | EZ Cool plug-in with QuickConnect | EZCQCR1 (roof), EZCQCG1 (gable) | QuickConnect cloud API |
 | QuickConnect retrofit module | ERV/EGV series with the module installed | QuickConnect cloud API |
 
-GAF's [Wi-Fi Attic Vent product sheet](https://www.gaf.com/en-us/document-library/documents/data-sheets/master-flow-wi-fi-attic-vent-resmf314-%2811-22%29-_sell-sheet.pdf)
-lists the QCT models. Its [powered ventilation warranty](https://www.gaf.com/en-us/document-library/documents/warranties/master-flow-powered-ventilation-products-limited-warranty-trilingual-reswt189.pdf)
-lists the EZ Cool QuickConnect models, and its [ventilation catalog](https://www.gaf.com/en-us/document-library/documents/brochures-%26-literature/brochure__ventilation_full_line_brochure__rescb100.pdf)
-describes the retrofit module on page 19. See
-[fan models and compatibility](docs/hardware.md) for controller identification.
+See [fan models and compatibility](docs/hardware.md) for manufacturer sources
+and controller identification.
 
-QuickConnect support covers built-in and retrofit controllers. The backend is
-experimental, has no live hardware verification, and starts read-only.
+QuickConnect is experimental, untested on hardware, and read-only by default.
 
 ## What you need
 
@@ -33,8 +29,7 @@ experimental, has no live hardware verification, and starts read-only.
   the Bluetooth scan and device-ID examples below apply to original controllers.
 - Home Assistant, if you want its dashboard and automations.
 
-Both backends leave the computer on its normal network. Fan firmware updates
-require the manufacturer's app.
+Use the manufacturer's app for fan firmware updates.
 
 ## Install
 
@@ -50,13 +45,12 @@ Choose an installation method for the computer that will connect to the fan:
 
 Install the separate Home Assistant integration through
 [HACS or manual installation](docs/installation.md#home-assistant-integration).
-HACS installs the integration; the app, package, or container runs the server.
-Release binaries and registry images have not been published yet; the guide
-includes source builds for each server path.
+The app, package, or container runs the server. Release binaries and registry
+images are unpublished; use the source builds in the installation guide.
 
 The server package includes `gafctl` and `gafctl-server`. `gafctl server` launches
-its sibling `gafctl-server` and forwards arguments. For the examples below, use
-`gafctl` if you installed it, or `./target/release/gafctl` after a source build.
+its sibling `gafctl-server` and forwards arguments. The examples use
+`./target/release/gafctl` after a source build, or `gafctl` after installation.
 
 ## Find your fan
 
@@ -72,8 +66,7 @@ Copy the fan's peripheral ID from the output, then read its state:
 
 Replace `PERIPHERAL_ID` with the platform-specific Bluetooth ID from the scan.
 A successful read shows temperature, humidity, mode, thresholds, and timer values.
-If no fan appears,
-check Bluetooth, move the computer closer, and close the GAF app before retrying.
+If no fan appears, check Bluetooth and range, close the GAF app, and retry.
 
 ## Start the service
 
@@ -125,9 +118,8 @@ Home Assistant exposes measurements, diagnostics, selectors, adjustable target
 numbers, timer duration and refresh for the original controller. Numbers use
 90–120 °F, 30–80%, and 0–360 timer minutes in whole-unit steps. The service reads
 and preserves the unchanged target before writing. Fixed threshold presets and
-one-minute/clear timer presets are also available. A separate on/off
-switch is not exposed for the original controller. The fan flag reports the
-controller's on/off state; airflow is not measured.
+one-minute/clear timer presets are also available. The fan flag reports the
+controller's on/off state; airflow is unmeasured.
 
 To change the API address, open the entry's menu and choose **Reconfigure**.
 The new address must report the same persistent proxy UUID, device ID and
@@ -165,9 +157,8 @@ all presets, QuickConnect commands, timeouts, and exit codes.
 - [Command line reference](docs/cli.md)
 - [HTTP API](docs/http-api.md)
 - [Development and checks](docs/development.md)
-- [Bluetooth protocol and captured device replies](docs/protocol-findings.md)
-- [Bluetooth protocol contract](docs/protocol-contract-v1.md)
-- [QuickConnect API research](docs/quickconnect-contract.md)
+- [Bluetooth protocol and captured replies](docs/protocol-findings.md)
+- [QuickConnect API](docs/quickconnect-contract.md)
 
 ## License
 
