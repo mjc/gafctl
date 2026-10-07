@@ -27,6 +27,12 @@ ignore = true
 # The generation script materializes @GAFCTL_LICENSE_REFERENCE@ as an absolute
 # path and checks cached source package versions before invoking cargo-about.
 
+[gafctl.clarify]
+license = "MIT"
+files = [
+    { path = "LICENSE", license = "MIT", checksum = "60ec118b689f55316997d801ee2510c361a1f16be44178eac7c23dd8ee61b628" },
+]
+
 # aws-lc-rs 1.18.1: exact source file checksum(s).
 [aws-lc-rs.clarify]
 license = "ISC AND (Apache-2.0 OR ISC)"
