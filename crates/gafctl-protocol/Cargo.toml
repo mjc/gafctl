@@ -1,11 +1,11 @@
 [package]
 name = "gafctl-protocol"
-version = "0.1.1"
+version = "0.1.0"
 edition = "2024"
 license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
-publish = ["crates-io"]
+publish = false
 description = "Protocol types and codecs for GAF Master Flow attic fans"
 
 [lints]

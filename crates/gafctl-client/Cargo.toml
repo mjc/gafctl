@@ -1,11 +1,11 @@
 [package]
 name = "gafctl-client"
-version = "0.1.1"
+version = "0.1.0"
 edition = "2024"
 license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
-publish = ["crates-io"]
+publish = false
 description = "Typed asynchronous client for a running Gafctl service"
 
 [lints]
@@ -16,7 +16,7 @@ reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
-gafctl-api = { version = "0.1.1", path = "../gafctl-api" }
+gafctl-api = { path = "../gafctl-api" }
 
 [dev-dependencies]
 tokio-util.workspace = true

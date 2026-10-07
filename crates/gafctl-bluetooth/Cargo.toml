@@ -1,11 +1,11 @@
 [package]
 name = "gafctl-bluetooth"
-version = "0.1.1"
+version = "0.1.0"
 edition = "2024"
 license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
-publish = ["crates-io"]
+publish = false
 description = "Bluetooth transport for GAF Master Flow attic fans"
 
 [lints]
@@ -18,11 +18,11 @@ btleplug.workspace = true
 bytes.workspace = true
 futures-util.workspace = true
 thiserror.workspace = true
-tokio = { workspace = true, features = ["macros", "sync", "time"] }
+tokio = { workspace = true, features = ["sync", "time"] }
 tokio-util.workspace = true
 tracing.workspace = true
 uuid.workspace = true
-gafctl-protocol = { version = "0.1.1", path = "../gafctl-protocol" }
+gafctl-protocol = { path = "../gafctl-protocol" }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt", "test-util"] }

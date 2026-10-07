@@ -1,23 +1,13 @@
 [package]
 name = "gafctl"
-version = "0.1.1"
+version = "0.1.0"
 edition = "2024"
 license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
-publish = ["crates-io"]
+publish = false
 description = "A Rust proxy for GAF Master Flow attic fans"
 readme = "README.md"
-include = [
-    "src/**",
-    "tests/*.rs",
-    "fixtures/quickconnect/**",
-    "README.md",
-    "LICENSE",
-    "LICENSE-QUICKCONNECT-REFERENCE.txt",
-    "LICENSE-RUST-STDLIB.html",
-    "THIRD-PARTY-NOTICES.txt",
-]
 keywords = ["attic-fan", "gaf", "home-assistant", "ventilation"]
 default-run = "gafctl"
 
@@ -125,11 +115,11 @@ tokio-stream = { workspace = true, optional = true, features = ["time"] }
 thiserror = { workspace = true, optional = true }
 uuid = { workspace = true, optional = true }
 tempfile = { workspace = true, optional = true }
-gafctl-bluetooth = { version = "0.1.1", path = "crates/gafctl-bluetooth" }
-gafctl-quickconnect = { version = "0.1.1", path = "crates/gafctl-quickconnect", optional = true }
-gafctl-protocol = { version = "0.1.1", path = "crates/gafctl-protocol" }
-gafctl-api = { version = "0.1.1", path = "crates/gafctl-api" }
-gafctl-client = { version = "0.1.1", path = "crates/gafctl-client", optional = true }
+gafctl-bluetooth = { path = "crates/gafctl-bluetooth" }
+gafctl-quickconnect = { path = "crates/gafctl-quickconnect", optional = true }
+gafctl-protocol = { path = "crates/gafctl-protocol" }
+gafctl-api = { path = "crates/gafctl-api" }
+gafctl-client = { path = "crates/gafctl-client", optional = true }
 
 [[bin]]
 name = "gafctl-server"
@@ -155,5 +145,5 @@ assert_cmd.workspace = true
 bytes.workspace = true
 http-body-util.workspace = true
 reqwest.workspace = true
-gafctl-client = { version = "0.1.1", path = "crates/gafctl-client" }
+gafctl-client = { path = "crates/gafctl-client" }
 tower = { workspace = true, features = ["util"] }
