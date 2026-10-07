@@ -154,21 +154,41 @@ and freshness. Upstream license references are described in
 
 The [Distribution workflow](../.github/workflows/release.yml) runs native AMD64
 and ARM64 checks before building and testing the exported packages, server image
-and HA app image. Manual runs upload artifacts. A `vVERSION` tag publishes a
-GitHub Release with checksums and `ghcr.io/mjc/gafctl:VERSION` through the
+and HA app image. Manual runs upload artifacts. A signed `vVERSION` tag publishes
+a GitHub Release with checksums and `ghcr.io/mjc/gafctl:VERSION` through the
 `release` environment. Set the GHCR package visibility to public after its first
 publication.
 
 For a release:
 
 1. Set matching versions in the root Cargo manifest, HA integration manifest
-   and app configuration.
+   and app configuration. Write `docs/releases/VERSION.md` with the user-facing
+   changes and installation requirements.
 2. Commit runtime changes, then update `home-assistant/Dockerfile` to that source
    revision. The workflow compares its Cargo, toolchain, notice and runtime
    inputs against the release commit.
 3. Run the Distribution workflow manually and check both architectures.
-4. Create an immutable `vVERSION` tag matching those versions. The `release`
+4. Merge the release changes into main. Create a signed annotated tag on that
+   commit and push it:
+
+   ```sh
+   git tag -s v0.1.0 -m 'gafctl 0.1.0'
+   git push origin v0.1.0
+   ```
+
+   Replace the version for later releases. GitHub must verify both the tag and
+   commit signatures. The tagged commit must be on main, and the `release`
    environment must allow version tags.
+
+The workflow checks the tag, commit, versions and release notes before building,
+then rechecks the tag object and commit before publication. Distribution runs
+share one concurrency group. Packages, archives and provenance files receive
+checksums; GitHub release notes come from the checked-in version document.
+
+On a publication retry, an existing published GitHub release must contain
+identical assets. Different bytes fail instead of replacing published downloads.
+An existing draft can have its assets replaced before publication. If a rebuild
+changes artifact bytes, use the original artifacts or publish a new version.
 
 Tagged builds attest the package and image archives. Verify a package with:
 
