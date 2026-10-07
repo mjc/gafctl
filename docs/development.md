@@ -159,6 +159,16 @@ a GitHub Release with checksums and `ghcr.io/mjc/gafctl:VERSION` through the
 `release` environment. Set the GHCR package visibility to public after its first
 publication.
 
+The [Home Assistant workflow](../.github/workflows/home-assistant.yml) runs HACS
+and Hassfest validation on pull requests, main, and release candidates. HACS
+checks skip branding while the integration is available as a custom repository.
+Before submitting to the default HACS catalog, register `gafctl` with
+`home-assistant/brands` and remove that exception.
+
+HACS reads the GitHub release tag and installs `custom_components/gafctl` from
+that revision. No separate upload or integration ZIP is required. The release
+version check includes the integration manifest.
+
 For a release:
 
 1. Set matching versions in the root Cargo manifest, HA integration manifest

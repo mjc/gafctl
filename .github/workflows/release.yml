@@ -34,6 +34,11 @@ jobs:
             echo "commit=$GITHUB_SHA" >> "$GITHUB_OUTPUT"
             echo "version=$(packaging/version.sh)" >> "$GITHUB_OUTPUT"
           fi
+  home-assistant:
+    needs: candidate
+    uses: ./.github/workflows/home-assistant.yml
+    with:
+      revision: ${{ needs.candidate.outputs.commit }}
   checks:
     needs: candidate
     strategy:
@@ -49,7 +54,7 @@ jobs:
       - name: Check Rust and Home Assistant contracts
         run: nix run --accept-flake-config github:cachix/devenv/b904dcb51fe48c30db250038241507f60752f222 -- tasks run check:all
   build:
-    needs: [candidate, checks]
+    needs: [candidate, checks, home-assistant]
     strategy:
       matrix:
         include:
