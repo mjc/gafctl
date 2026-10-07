@@ -55,11 +55,11 @@ in {
   tasks."check:cli-bin".exec = "cargo nextest run --package gafctl --no-default-features --features cli --lib --bin gafctl --locked --status-level fail --final-status-level fail";
   tasks."check:http".exec = "cargo nextest run --package gafctl --all-targets --no-default-features --features http --locked --status-level fail --final-status-level fail";
   tasks."check:doc".exec = "cargo test --workspace --doc --locked";
-  tasks."check:python-format".exec = "ruff format --check custom_components tests/*.py";
+  tasks."check:python-format".exec = "ruff format --check custom_components tests/*.py packaging";
   tasks."check:python-types".exec = "mypy custom_components/gafctl/client.py custom_components/gafctl/models.py custom_components/gafctl/controls.py";
-  tasks."check:python-lint".exec = "ruff check custom_components tests/*.py";
+  tasks."check:python-lint".exec = "ruff check custom_components tests/*.py packaging";
   tasks."check:ha".exec = "python3 -m unittest discover -s tests -p test_gafctl_client.py";
-  tasks."check:release".exec = "python3 packaging/test-publish-images.py && python3 packaging/test_package.py";
+  tasks."check:release".exec = "python3 -m unittest discover -s packaging -p 'test_*.py'";
   tasks."check:licenses".exec = "packaging/licenses.sh --check";
   tasks."licenses:update".exec = "packaging/licenses.sh --update";
   tasks."check:ha-registry" = lib.mkIf linux {

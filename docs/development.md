@@ -209,6 +209,10 @@ digests and Linux architectures, including the complete multi-architecture set.
 Identical images are skipped. Registry authentication and connection errors stop
 publication.
 
+`check:release` tests package validation, signed-candidate checks, publication
+retries, and failure handling. Git repositories are local fixtures; GitHub and
+Docker responses are stubbed. These tests make no external writes.
+
 Tagged builds attest the package and image archives. Verify a package with:
 
 ```sh
