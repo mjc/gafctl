@@ -109,6 +109,253 @@ def read_discovery_fixture(path: str) -> list[tuple[str, dict[str, object]]]:
 
 
 class RegistryTests(unittest.IsolatedAsyncioTestCase):
+    async def test_snapshot_save_window_is_not_postponed_by_polling(self):
+        entry = await self.entry()
+        client = fake_client(state=state_data(state=reported_state()))
+        coordinator = coordinator_for(self.hass, client, device(), entry)
+        with patch.object(coordinator._store, "async_delay_save") as save:
+            for temperature in range(80, 92):
+                client.fetch_state.return_value = state_data(
+                    state=reported_state(temperature_f=temperature)
+                )
+                await coordinator.async_refresh()
+            save.assert_called_once()
+            pending_record = save.call_args.args[0]()
+            self.assertEqual(pending_record["response"]["state"]["temperature_f"], 91)
+            await coordinator.async_refresh()
+            self.assertEqual(save.call_count, 2)
+        await coordinator.async_unload()
+
+    async def test_snapshot_reaches_disk_before_unload(self):
+        entry = await self.entry()
+        client = fake_client(state=state_data(state=reported_state()))
+        coordinator = coordinator_for(self.hass, client, device(), entry)
+        schedule = coordinator._store.async_delay_save
+        with patch.object(
+            coordinator._store,
+            "async_delay_save",
+            side_effect=lambda callback, _: schedule(callback, 0.03),
+        ):
+            for temperature in range(80, 92):
+                client.fetch_state.return_value = state_data(
+                    state=reported_state(temperature_f=temperature)
+                )
+                await coordinator.async_refresh()
+            await asyncio.sleep(0.1)
+            path = Path(self.hass.config.path(".storage", f"gafctl.{entry.entry_id}"))
+            record = json.loads(await asyncio.to_thread(path.read_text))["data"]
+            self.assertEqual(record["response"]["state"]["temperature_f"], 91)
+        await coordinator.async_unload()
+
+    async def test_inflight_poll_cannot_save_after_unload(self):
+        for phase in ("inventory", "state"):
+            with self.subTest(phase=phase):
+                entry = await self.entry()
+                selected = device()
+                response = state_data(state=reported_state())
+                client = fake_client(state=response)
+                coordinator = coordinator_for(self.hass, client, selected, entry)
+                entered, release = asyncio.Event(), asyncio.Event()
+
+                async def delayed_read(
+                    *_,
+                    phase=phase,
+                    entered=entered,
+                    release=release,
+                    selected=selected,
+                    response=response,
+                ):
+                    entered.set()
+                    await release.wait()
+                    return [selected] if phase == "inventory" else response
+
+                read = (
+                    client.fetch_devices if phase == "inventory" else client.fetch_state
+                )
+                read.side_effect = delayed_read
+                with patch.object(coordinator._store, "async_delay_save") as save:
+                    task = asyncio.create_task(coordinator.async_refresh())
+                    await entered.wait()
+                    await coordinator.async_unload()
+                    replacement = GafctlCoordinator(self.hass, client, entry)
+                    entry.runtime_data = replacement
+                    await replacement._store.async_save({"replacement": True})
+                    release.set()
+                    await task
+                    save.assert_not_called()
+                    self.assertEqual(
+                        await replacement._store.async_load(), {"replacement": True}
+                    )
+                    self.assertIsNone(coordinator.data)
+
+    async def test_native_reload_during_outage_restores_sensors_but_not_controls(self):
+        from custom_components.gafctl.models import ProxyReadFailed
+
+        entry, client, coordinator, _ = await self.native_service_case("number")
+        temperature = self.entities.async_get_entity_id(
+            "sensor", "gafctl", f"{entry.unique_id}_temperature"
+        )
+        previous_temperature = self.hass.states.get(temperature).state
+        self.assertTrue(await self.hass.config_entries.async_unload(entry.entry_id))
+        client.fetch_devices.side_effect = ProxyReadFailed("proxy restarting")
+        with api_client(client, "custom_components.gafctl"):
+            self.assertTrue(await self.hass.config_entries.async_setup(entry.entry_id))
+            await self.hass.async_block_till_done()
+        restored = entry.runtime_data
+        self.assertIsNot(restored, coordinator)
+        temperature = self.entities.async_get_entity_id(
+            "sensor", "gafctl", f"{entry.unique_id}_temperature"
+        )
+        control = self.entities.async_get_entity_id(
+            "number", "gafctl", f"{entry.unique_id}_automatic_temperature"
+        )
+        self.assertEqual(self.hass.states.get(temperature).state, previous_temperature)
+        self.assertEqual(
+            self.hass.states.get(temperature).attributes["freshness"], "cached"
+        )
+        self.assertEqual(self.hass.states.get(control).state, "unavailable")
+        client.set_control.assert_not_awaited()
+        client.fetch_devices.side_effect = None
+        await restored.async_refresh()
+        await self.hass.async_block_till_done()
+        self.assertEqual(float(self.hass.states.get(control).state), 105)
+        self.assertIsNone(self.hass.states.get(temperature).attributes["api_error"])
+
+    async def test_temporary_api_failure_keeps_readings_until_original_expiry(self):
+        from custom_components.gafctl.models import ProxyReadFailed
+
+        entry = await self.entry()
+        response = state_data(
+            state=reported_state(
+                provenance={
+                    "backend": "legacy_ble",
+                    "fetched_at_unix_ms": 100000,
+                    "observed_at_unix_ms": 100000,
+                }
+            )
+        )
+        selected = device(commands=["legacy_mode"])
+        client = fake_client(devices=[selected], state=response)
+        coordinator = coordinator_for(self.hass, client, selected, entry)
+        with patch(
+            "custom_components.gafctl.coordinator.time", return_value=100
+        ) as clock:
+            await coordinator.async_refresh()
+            client.fetch_devices.side_effect = ProxyReadFailed("proxy restarting")
+            for now in (110, 150, 189):
+                clock.return_value = now
+                await coordinator.async_refresh()
+                self.assertIs(coordinator.current_readings, response["state"])
+                self.assertIsNone(
+                    coordinator.control_readings("legacy_mode", "legacy_ble")
+                )
+                attrs = gafctl_sensor.GafctlReadingEntity(
+                    coordinator, "temperature"
+                ).reading_attributes
+                self.assertEqual(attrs["freshness"], "cached")
+                self.assertEqual(attrs["api_error"], "proxy restarting")
+            clock.return_value = 190
+            await coordinator.async_refresh()
+            self.assertIsNone(coordinator.current_readings)
+            client.fetch_devices.side_effect = None
+            clock.return_value = 100
+            await coordinator.async_refresh()
+            self.assertIsNone(coordinator.api_error)
+            self.assertIsNotNone(
+                coordinator.control_readings("legacy_mode", "legacy_ble")
+            )
+        await coordinator.async_unload()
+
+    async def test_cached_readings_never_admit_or_confirm_a_control(self):
+        from custom_components.gafctl.models import ProxyReadFailed
+
+        for operation in ("mode", "legacy_mode", "number"):
+            for phase in ("before", "after"):
+                with self.subTest(operation=operation, phase=phase):
+                    coordinator, client, _, old, _, submit = await self.control_case(
+                        operation
+                    )
+                    coordinator.async_set_updated_data(old)
+                    client.fetch_state.side_effect = (
+                        [ProxyReadFailed("proxy restarting")]
+                        if phase == "before"
+                        else [old, ProxyReadFailed("proxy restarting")]
+                    )
+                    with self.assertRaises(ApiError):
+                        await submit()
+                    self.assertEqual(client.set_control.await_count, phase == "after")
+                    self.assertIsNotNone(coordinator.current_readings)
+                    await coordinator.async_unload()
+
+    async def test_authoritative_errors_discard_the_fallback(self):
+        from custom_components.gafctl.models import ProxyReadFailed
+
+        for failure in ("device", "identity", "owner", "capability", "schema"):
+            with self.subTest(failure=failure):
+                entry = await self.entry()
+                selected = device()
+                client = fake_client(state=state_data(state=reported_state()))
+                coordinator = coordinator_for(self.hass, client, selected, entry)
+                await coordinator.async_refresh()
+                if failure == "device":
+                    client.fetch_state.return_value = state_data(available=False) | {
+                        "last_error": "BLE failed"
+                    }
+                elif failure == "schema":
+                    client.fetch_state.side_effect = ApiError("invalid response")
+                else:
+                    client.fetch_devices.return_value = {
+                        "identity": [],
+                        "owner": [changed_device(selected, owner="mqtt")],
+                        "capability": [changed_device(selected, read_state=False)],
+                    }[failure]
+                    client.fetch_state.side_effect = ProxyReadFailed("proxy restarting")
+                await coordinator.async_refresh()
+                self.assertIsNone(coordinator.current_readings)
+                client.fetch_devices.side_effect = ProxyReadFailed("proxy restarting")
+                await coordinator.async_refresh()
+                self.assertIsNone(coordinator.current_readings)
+                await coordinator.async_unload()
+                self.assertFalse(await coordinator._store.async_load())
+
+    async def test_persisted_readings_are_bound_to_identity_url_and_freshness(self):
+        from custom_components.gafctl.models import ProxyReadFailed
+
+        entry = await self.entry()
+        selected = device()
+        client = fake_client(state=state_data(state=reported_state()))
+        coordinator = coordinator_for(self.hass, client, selected, entry)
+        await coordinator.async_refresh()
+        await coordinator.async_unload()
+        record = await coordinator._store.async_load()
+        self.assertTrue(record)
+        for case in ("fresh", "expired", "deadline", "url", "identity", "malformed"):
+            with self.subTest(case=case):
+                from copy import deepcopy
+
+                cached = deepcopy(record)
+                if case == "expired":
+                    cached["response"]["state"]["provenance"]["fetched_at_unix_ms"] = 1
+                elif case == "deadline":
+                    cached["expires_at"] = 1
+                elif case == "url":
+                    cached["api_url"] = "http://other-proxy"
+                elif case == "identity":
+                    cached["device"]["proxy_id"] = str(uuid4())
+                elif case == "malformed":
+                    cached["response"]["state"]["provenance"] = {}
+                await coordinator._store.async_save(cached)
+                client.fetch_devices.side_effect = ProxyReadFailed("proxy restarting")
+                restored = GafctlCoordinator(self.hass, client, entry)
+                entry.runtime_data = restored
+                await restored._async_setup()
+                await restored.async_refresh()
+                self.assertEqual(restored.current_readings is not None, case == "fresh")
+                self.assertIsNone(
+                    restored.control_readings("legacy_mode", "legacy_ble")
+                )
+                await restored.async_unload()
+
     async def native_service_case(self, operation):
         component = self.hass.config.path("custom_components/gafctl")
         if not await asyncio.to_thread(Path(component).exists):

@@ -93,6 +93,10 @@ class ApiError(Exception):
     """Gafctl API error with a message suitable for display."""
 
 
+class ProxyReadFailed(ApiError):
+    """A temporary transport or server failure during a read."""
+
+
 class ControlOutcomeUnknown(ApiError):
     def __init__(self, request_id: str) -> None:
         self.request_id = request_id

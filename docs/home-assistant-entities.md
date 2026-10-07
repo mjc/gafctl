@@ -107,6 +107,24 @@ adapter allows up to one second of clock difference between hosts, with a
 maximum of ninety seconds until local expiry. Larger future timestamps are
 rejected.
 
+During a connection failure, request timeout, or HTTP 5xx response from the
+proxy, HTTP entities keep their last validated reading until its original
+ninety-second deadline. Repeated failures do not extend that deadline. The
+`freshness` attribute changes to `cached`, and `api_error` gives the reason.
+Controls are unavailable until a live read succeeds. A confirmed command still
+requires a live readback; cached readings cannot confirm it.
+
+An explicit device failure, changed identity or transport ownership, or invalid
+API response invalidates the readings immediately. `last_error` reports device
+errors or expired readings; `api_error` reports API failures. A successful read
+clears `api_error`.
+
+Home Assistant saves the latest validated reading in its private storage for
+integration reloads and orderly restarts. It restores the reading only for the
+same API address and device identity, within the original freshness deadline.
+Controls require a live read after startup. Home Assistant entities are
+inaccessible while Home Assistant itself is stopped.
+
 `/health` checks whether the service responds. To check the fan, use
 `/api/v2/devices/{id}/state` and inspect `available`, `last_error`, and the
 state timestamps. A cloud outage affects cloud devices without stopping Bluetooth

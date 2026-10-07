@@ -110,6 +110,24 @@ class FakeSession:
 
 
 class ApiClientTests(unittest.IsolatedAsyncioTestCase):
+    async def test_only_temporary_read_failures_allow_cached_readings(self):
+        for payload, status, temporary in (
+            (OSError("private host"), 200, True),
+            (TimeoutError(), 200, True),
+            ({}, 503, True),
+            ({}, 401, False),
+            ({}, 404, False),
+            ({}, 200, False),
+            (ValueError("invalid JSON"), 200, False),
+        ):
+            with self.subTest(payload=payload, status=status):
+                client, _ = self.client(payload, status)
+                with self.assertRaises(ApiError) as raised:
+                    await client.fetch_devices()
+                self.assertEqual(
+                    isinstance(raised.exception, MODELS.ProxyReadFailed), temporary
+                )
+
     async def test_control_redirects_do_not_resubmit_commands(self):
         for status in (307, 308):
             with self.subTest(status=status):

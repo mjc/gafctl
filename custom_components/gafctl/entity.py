@@ -41,6 +41,10 @@ class GafctlEntity(CoordinatorEntity[GafctlCoordinator]):
         return {
             "freshness": (
                 "fresh"
+                if data["available"]
+                and self.coordinator.last_update_success
+                and self.coordinator.api_error is None
+                else "cached"
                 if data["available"] and self.coordinator.last_update_success
                 else "unknown"
                 if data["inventory_status"] == "unknown"
@@ -52,7 +56,12 @@ class GafctlEntity(CoordinatorEntity[GafctlCoordinator]):
             if data and data["state"]
             else None,
             "last_error": data["last_error"] if data else None,
+            "api_error": self.coordinator.api_error,
         }
+
+    @property
+    def extra_state_attributes(self) -> JsonObject:
+        return self.reading_attributes
 
     @property
     def device_info(self) -> DeviceInfo:
@@ -84,7 +93,3 @@ class GafctlReadingEntity(GafctlEntity):
     @property
     def available(self) -> bool:
         return super().available and self.coordinator.current_readings is not None
-
-    @property
-    def extra_state_attributes(self) -> JsonObject:
-        return self.reading_attributes

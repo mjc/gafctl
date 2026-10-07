@@ -9,6 +9,8 @@ from typing import Any, cast
 from urllib.parse import urljoin, urlparse
 from uuid import UUID, uuid4
 
+from aiohttp import ClientConnectionError, ClientPayloadError
+
 from .controls import CONTROL_HTTP_STATUSES
 from .models import (
     ApiError,
@@ -16,6 +18,7 @@ from .models import (
     Device,
     DeviceState,
     JsonObject,
+    ProxyReadFailed,
 )
 
 
@@ -47,30 +50,7 @@ class ApiClient:
 
     async def fetch_devices(self) -> list[Device]:
         payload = await self._get_json("api/v2/devices")
-        devices = payload.get("devices") if isinstance(payload, Mapping) else None
-        if not isinstance(devices, list):
-            raise ApiError("proxy returned no devices")
-        selected = cast(list[Device], devices)
-        try:
-            for device in selected:
-                _validate_proxy_id(device["proxy_id"])
-                if (
-                    not _valid_identifier(device["id"])
-                    or device["backend"] not in ("legacy_ble", "quick_connect")
-                    or device["state_source"] not in ("http", "mqtt")
-                    or device["state_source"] != device["command_source"]
-                ):
-                    raise ApiError(
-                        "proxy returned invalid device identity or ownership"
-                    )
-            if len({device["proxy_id"] for device in selected}) > 1:
-                raise ApiError("proxy returned inconsistent proxy identities")
-            identifiers = [device["id"] for device in selected]
-            if len(identifiers) != len(set(identifiers)):
-                raise ApiError("proxy returned duplicate device identifiers")
-        except (KeyError, TypeError) as error:
-            raise ApiError("proxy returned invalid device data") from error
-        return selected
+        return _devices_response(payload)
 
     async def fetch_state(self, device_id: str) -> DeviceState:
         payload = await self._get_json(_device_path(device_id, "state"))
@@ -113,8 +93,15 @@ class ApiClient:
             return payload
         except ApiError:
             raise
+        except (
+            ClientConnectionError,
+            ClientPayloadError,
+            OSError,
+            TimeoutError,
+        ) as error:
+            raise ProxyReadFailed("cannot connect to the local proxy") from error
         except Exception as error:
-            raise ApiError("cannot connect to the local proxy") from error
+            raise ApiError("proxy returned an invalid response") from error
 
     async def _request(self, method: str, path: str, **kwargs: Any) -> tuple[int, Any]:
         async with self._session.request(
@@ -125,8 +112,40 @@ class ApiClient:
             **kwargs,
         ) as response:
             if method == "GET" and response.status != 200:
-                raise ApiError(f"proxy returned HTTP {response.status}")
+                error = ProxyReadFailed if 500 <= response.status < 600 else ApiError
+                raise error(f"proxy returned HTTP {response.status}")
             return response.status, await response.json()
+
+
+def _devices_response(payload: Any) -> list[Device]:
+    devices = payload.get("devices") if isinstance(payload, Mapping) else None
+    if not isinstance(devices, list):
+        raise ApiError("proxy returned no devices")
+    selected = cast(list[Device], devices)
+    try:
+        for device in selected:
+            _validate_proxy_id(device["proxy_id"])
+            if (
+                not _valid_identifier(device["id"])
+                or device["backend"] not in ("legacy_ble", "quick_connect")
+                or device["state_source"] not in ("http", "mqtt")
+                or device["state_source"] != device["command_source"]
+                or type(device["capabilities"]["read_state"]) is not bool
+                or not isinstance(device["capabilities"]["commands"], list)
+                or any(
+                    not isinstance(command["kind"], str)
+                    for command in device["capabilities"]["commands"]
+                )
+            ):
+                raise ApiError("proxy returned invalid device identity or ownership")
+        if len({device["proxy_id"] for device in selected}) > 1:
+            raise ApiError("proxy returned inconsistent proxy identities")
+        identifiers = [device["id"] for device in selected]
+        if len(identifiers) != len(set(identifiers)):
+            raise ApiError("proxy returned duplicate device identifiers")
+    except (KeyError, TypeError) as error:
+        raise ApiError("proxy returned invalid device data") from error
+    return selected
 
 
 def _validate_proxy_id(value: object) -> None:
@@ -180,6 +199,14 @@ def _state_response(raw: Any, device_id: str) -> DeviceState:
             or state["provenance"]["backend"] != response["backend"]
         ):
             raise ApiError("proxy returned state for a different backend")
+        if state is not None and any(
+            value is not None and (type(value) is not int or value < 0)
+            for value in (
+                state["provenance"]["fetched_at_unix_ms"],
+                state["provenance"]["observed_at_unix_ms"],
+            )
+        ):
+            raise ApiError("proxy returned invalid reading timestamps")
         return response
     except (KeyError, TypeError) as error:
         raise ApiError("proxy returned invalid device state") from error
