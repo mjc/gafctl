@@ -1,6 +1,7 @@
 use super::DeviceService;
 use super::control::{V2_CONTROL_MAX_AGE, v2_request_is_fresh_at};
 use crate::backend::DeviceRuntime;
+use crate::timed_run::{TimedRun, TimerAction, TimerConfiguration, TimerObservation};
 use anyhow::Result;
 use gafctl_api::unix_millis;
 use gafctl_api::{ControlStatus as V2ControlStatus, DeviceRefreshStatus};
@@ -21,6 +22,27 @@ pub(super) struct LegacyBleRuntime {
     device: Arc<DeviceRuntime>,
     ble_client: Arc<ProbeClient>,
     peripheral_id: Arc<str>,
+    timer: RwLock<TimerConfiguration>,
+    timer_error: RwLock<Option<TimerFailure>>,
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum TimerFailure {
+    Persistence,
+    RestoreUnconfirmed,
+}
+
+impl TimerFailure {
+    const fn message(self) -> &'static str {
+        match self {
+            Self::Persistence => {
+                "could not save timer settings; automatic restoration is not armed"
+            }
+            Self::RestoreUnconfirmed => {
+                "timer ended; restoring the previous mode was not confirmed"
+            }
+        }
+    }
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -29,6 +51,7 @@ pub(super) enum ControlAdmissionError {
     StaleRequest,
     Busy,
     ReadbackUnavailable,
+    Persistence,
 }
 
 impl ControlAdmissionError {
@@ -38,6 +61,7 @@ impl ControlAdmissionError {
             Self::StaleRequest => V2ControlStatus::StaleRequest,
             Self::Busy => V2ControlStatus::Busy,
             Self::ReadbackUnavailable => V2ControlStatus::ReadbackUnavailable,
+            Self::Persistence => V2ControlStatus::ControlFailed,
         }
     }
 }
@@ -60,7 +84,14 @@ impl LegacyBleRuntime {
         if poll_error.is_some() && reconciler.latest_snapshot().is_none() {
             response.inventory_status = crate::backend::DeviceInventoryStatus::Unavailable;
         }
-        response.last_error = poll_error.or(response.last_error.take());
+        response.timer_duration_minutes = Some(self.timer.read().await.duration_minutes);
+        response.last_error = poll_error
+            .or(self
+                .timer_error
+                .read()
+                .await
+                .map(|error| error.message().to_owned()))
+            .or(response.last_error.take());
     }
 
     #[cfg(feature = "mqtt")]
@@ -70,19 +101,34 @@ impl LegacyBleRuntime {
         now_unix_ms: Option<u64>,
     ) -> bool {
         let reconciler = self.reconciler.read().await;
+        let timer_error = *self.timer_error.read().await;
         let poll_error = reconciler.last_error();
         let inventory_unavailable = poll_error.is_some() && reconciler.latest_snapshot().is_none();
+        if response.timer_duration_minutes != Some(self.timer.read().await.duration_minutes) {
+            return false;
+        }
         self.device
-            .matches_response_at(response, now_unix_ms, poll_error, inventory_unavailable)
+            .matches_response_at(
+                response,
+                now_unix_ms,
+                poll_error.or(timer_error.map(TimerFailure::message)),
+                inventory_unavailable,
+            )
             .await
     }
 
-    pub(super) fn new(peripheral_id: String, device: Arc<DeviceRuntime>) -> Self {
+    pub(super) fn new(
+        peripheral_id: String,
+        device: Arc<DeviceRuntime>,
+        timer: TimerConfiguration,
+    ) -> Self {
         Self {
             reconciler: Arc::new(RwLock::new(StateReconciler::default())),
             device,
             ble_client: Arc::new(ProbeClient::new()),
             peripheral_id: Arc::from(peripheral_id),
+            timer: RwLock::new(timer),
+            timer_error: RwLock::new(None),
         }
     }
 
@@ -100,23 +146,56 @@ impl LegacyBleRuntime {
         if !v2_request_is_fresh_at(issued_at_unix_ms, unix_millis(SystemTime::now())) {
             return Err(ControlAdmissionError::StaleRequest);
         }
-        let prepared = self.prepare_control_locked(state, command).await?;
-        if !v2_request_is_fresh_at(issued_at_unix_ms, unix_millis(SystemTime::now())) {
+        if let DeviceCommand::LegacyTimerDuration { minutes } = command {
+            let mut timer = self.timer.read().await.clone();
+            timer.duration_minutes = minutes;
+            self.save_timer(state, timer).await?;
+            state.publish_state().await;
+            return Ok(true);
+        }
+        let (prepared, observation) = self.prepare_control_locked(state, command).await?;
+        let now = unix_millis(SystemTime::now()).ok_or(ControlAdmissionError::StaleRequest)?;
+        if !v2_request_is_fresh_at(issued_at_unix_ms, Some(now)) {
             return Err(ControlAdmissionError::StaleRequest);
         }
-        let now = unix_millis(SystemTime::now()).ok_or(ControlAdmissionError::StaleRequest)?;
+        let run = self
+            .prepare_timed_run(prepared, observation.as_ref(), now)
+            .await?;
         let remaining = issued_at_unix_ms
             .saturating_add(u64::try_from(V2_CONTROL_MAX_AGE.as_millis()).unwrap_or(u64::MAX))
             .saturating_sub(now);
         let deadline = tokio::time::Instant::now() + Duration::from_millis(remaining);
-        self.execute_control_locked(state, prepared, deadline).await
+        self.cancel_timed_run(state).await?;
+        let confirmed = self
+            .execute_control_locked(state, prepared, deadline)
+            .await?;
+        self.finish_control(state, confirmed, run).await
+    }
+
+    async fn finish_control(
+        &self,
+        state: &DeviceService,
+        confirmed: bool,
+        run: Option<TimedRun>,
+    ) -> Result<bool, ControlAdmissionError> {
+        if confirmed {
+            if let Some(run) = run {
+                let mut timer = self.timer.read().await.clone();
+                timer.run = Some(run);
+                self.save_timer(state, timer).await?;
+            }
+            *self.timer_error.write().await = None;
+            state.publish_state().await;
+        }
+        Ok(confirmed)
     }
 
     async fn prepare_control_locked(
         &self,
         state: &DeviceService,
         command: DeviceCommand,
-    ) -> Result<gafctl_protocol::ControlCommand, ControlAdmissionError> {
+    ) -> Result<(gafctl_protocol::ControlCommand, Option<TimerObservation>), ControlAdmissionError>
+    {
         let settings = if crate::legacy_control::needs_state_read(command) {
             let poll_id = self.reconciler.write().await.begin_poll();
             let result = self.probe(None).await;
@@ -127,12 +206,101 @@ impl LegacyBleRuntime {
         } else {
             None
         };
-        crate::legacy_control::prepare_control(
+        let timer = self.timer.read().await.duration_minutes;
+        let prepared = crate::legacy_control::prepare_control(
             command,
-            settings.map(|(thresholds, _)| thresholds),
-            settings.map(|(_, timer)| timer),
+            settings.as_ref().map(|(thresholds, _)| *thresholds),
+            Some(gafctl_protocol::Minutes::new(timer.value())),
         )
+        .ok_or(ControlAdmissionError::ReadbackUnavailable)?;
+        Ok((prepared, settings.map(|(_, observation)| observation)))
+    }
+
+    async fn prepare_timed_run(
+        &self,
+        command: gafctl_protocol::ControlCommand,
+        observation: Option<&TimerObservation>,
+        now_ms: u64,
+    ) -> Result<Option<TimedRun>, ControlAdmissionError> {
+        let gafctl_protocol::ControlCommand::SetTimer(minutes) = command else {
+            return Ok(None);
+        };
+        if minutes.value() == 0 {
+            return Ok(None);
+        }
+        let observation = observation.ok_or(ControlAdmissionError::ReadbackUnavailable)?;
+        let minutes = minutes
+            .value()
+            .try_into()
+            .map_err(|_| ControlAdmissionError::ReadbackUnavailable)?;
+        TimedRun::start(
+            &self.peripheral_id,
+            minutes,
+            observation,
+            self.timer.read().await.run.as_ref(),
+            now_ms,
+        )
+        .map(Some)
         .ok_or(ControlAdmissionError::ReadbackUnavailable)
+    }
+
+    async fn save_timer(
+        &self,
+        state: &DeviceService,
+        timer: TimerConfiguration,
+    ) -> Result<(), ControlAdmissionError> {
+        let result = state
+            .registry
+            .write()
+            .await
+            .set_timer_configuration(timer.clone());
+        if let Err(error) = result {
+            tracing::error!(%error, "could not save timer settings");
+            *self.timer_error.write().await = Some(TimerFailure::Persistence);
+            state.publish_state().await;
+            return Err(ControlAdmissionError::Persistence);
+        }
+        *self.timer.write().await = timer;
+        let mut error = self.timer_error.write().await;
+        if *error == Some(TimerFailure::Persistence) {
+            *error = None;
+        }
+        Ok(())
+    }
+
+    async fn cancel_timed_run(&self, state: &DeviceService) -> Result<(), ControlAdmissionError> {
+        if self.timer.read().await.run.is_some() {
+            let mut timer = self.timer.read().await.clone();
+            timer.run = None;
+            self.save_timer(state, timer).await?;
+        }
+        Ok(())
+    }
+
+    async fn restore_timed_run(&self, state: &DeviceService, observation: &TimerObservation) {
+        let Some(now) = unix_millis(SystemTime::now()) else {
+            return;
+        };
+        let action = {
+            let mut timer = self.timer.write().await;
+            timer.run.as_mut().map_or(TimerAction::Wait, |run| {
+                run.observe(&self.peripheral_id, observation, now)
+            })
+        };
+        let command = match action {
+            TimerAction::Wait => return,
+            TimerAction::Cancel => None,
+            TimerAction::Restore(command) => Some(command),
+        };
+        if self.cancel_timed_run(state).await.is_err() {
+            return;
+        }
+        if let Some(command) = command {
+            let deadline = tokio::time::Instant::now() + V2_CONTROL_MAX_AGE;
+            if self.execute_control_locked(state, command, deadline).await != Ok(true) {
+                *self.timer_error.write().await = Some(TimerFailure::RestoreUnconfirmed);
+            }
+        }
     }
 
     async fn execute_control_locked(
@@ -216,10 +384,21 @@ impl LegacyBleRuntime {
         true
     }
 
-    pub(super) async fn read_state_locked(&self) -> DeviceRefreshStatus {
+    pub(super) async fn read_state_locked(&self, state: &DeviceService) -> DeviceRefreshStatus {
         let poll_id = self.reconciler.write().await.begin_poll();
         let result = self.probe(None).await;
-        self.reconcile_poll_result(poll_id, result).await
+        let observation = probe_control_settings(&result).map(|(_, observation)| observation);
+        let status = self.reconcile_poll_result(poll_id, result).await;
+        if status == DeviceRefreshStatus::Fresh
+            && let Some(observation) = observation
+        {
+            self.restore_timed_run(state, &observation).await;
+        }
+        if self.reconciler.read().await.latest_snapshot().is_some() {
+            status
+        } else {
+            DeviceRefreshStatus::Failed
+        }
     }
 
     async fn reconcile_poll_result(
@@ -361,10 +540,7 @@ fn project_legacy_snapshot(snapshot: &DeviceSnapshot) -> Option<DeviceState> {
 
 fn probe_control_settings(
     result: &Result<ProbeResult, ProbeError>,
-) -> Option<(
-    gafctl_protocol::AutomaticThresholds,
-    gafctl_protocol::Minutes,
-)> {
+) -> Option<(gafctl_protocol::AutomaticThresholds, TimerObservation)> {
     let Ok(ProbeResult::Queried { result, .. }) = result else {
         return None;
     };
@@ -372,9 +548,10 @@ fn probe_control_settings(
         return None;
     }
     let snapshot = result.snapshot.as_ref()?;
+    project_legacy_snapshot(snapshot)?;
     Some((
         *snapshot.thresholds.decoded().ok()?,
-        snapshot.timer.as_ref()?.decoded().ok()?.original,
+        TimerObservation::from_snapshot(snapshot)?,
     ))
 }
 

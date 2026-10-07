@@ -5,9 +5,139 @@ use axum::{
     body::Body,
     http::{Request, StatusCode},
 };
+#[cfg(feature = "mqtt")]
+use gafctl_api::DeviceId;
 use gafctl_api::{CommandId, ControlPreset, DeviceControlV2Request, DeviceControlV2Response};
 use http_body_util::BodyExt;
 use tower::ServiceExt;
+
+#[tokio::test]
+async fn restoration_error_clears_only_after_confirmed_explicit_recovery() {
+    let state =
+        DeviceService::with_ble_device("no-physical-device".to_owned(), DeviceRegistry::new());
+    let runtime = state.ble_device.as_ref().unwrap();
+    *runtime.timer_error.write().await = Some(TimerFailure::RestoreUnconfirmed);
+    runtime
+        .execute_control(
+            &state,
+            unix_millis(SystemTime::now()).unwrap(),
+            DeviceCommand::LegacyTimerDuration {
+                minutes: 7.try_into().unwrap(),
+            },
+        )
+        .await
+        .unwrap();
+    assert!(
+        state_response(state.clone()).await["last_error"]
+            .as_str()
+            .unwrap()
+            .contains("not confirmed")
+    );
+    runtime.finish_control(&state, false, None).await.unwrap();
+    assert!(
+        state_response(state.clone()).await["last_error"]
+            .as_str()
+            .unwrap()
+            .contains("not confirmed")
+    );
+    runtime.finish_control(&state, true, None).await.unwrap();
+    assert!(state_response(state).await["last_error"].is_null());
+}
+
+#[tokio::test]
+async fn saving_timer_duration_needs_no_bluetooth_and_survives_restart() {
+    let (_directory, path) = crate::test_support::identity_store_fixture();
+    let state = DeviceService::with_ble_device(
+        "no-physical-device".to_owned(),
+        DeviceRegistry::load(&path).unwrap(),
+    );
+    let runtime = state.ble_device.as_ref().unwrap();
+    assert_eq!(
+        state_response(state.clone()).await["timer_duration_minutes"],
+        360
+    );
+    for minutes in [0, 1, 360] {
+        assert_eq!(
+            runtime
+                .execute_control(
+                    &state,
+                    unix_millis(SystemTime::now()).unwrap(),
+                    DeviceCommand::LegacyTimerDuration {
+                        minutes: minutes.try_into().unwrap()
+                    }
+                )
+                .await,
+            Ok(true)
+        );
+        let saved = state_response(state.clone()).await;
+        assert_eq!(saved["timer_duration_minutes"], minutes);
+        assert!(saved["state"].is_null());
+        let restarted = DeviceService::with_ble_device(
+            "no-physical-device".to_owned(),
+            DeviceRegistry::load(&path).unwrap(),
+        );
+        assert_eq!(
+            state_response(restarted).await["timer_duration_minutes"],
+            minutes
+        );
+    }
+    #[cfg(feature = "mqtt")]
+    {
+        let previous = state.state(&DeviceId::configured_ble()).await.unwrap();
+        assert!(
+            runtime
+                .state_response_matches(&previous, unix_millis(SystemTime::now()))
+                .await
+        );
+        runtime
+            .execute_control(
+                &state,
+                unix_millis(SystemTime::now()).unwrap(),
+                DeviceCommand::LegacyTimerDuration {
+                    minutes: 7.try_into().unwrap(),
+                },
+            )
+            .await
+            .unwrap();
+        assert!(
+            !runtime
+                .state_response_matches(&previous, unix_millis(SystemTime::now()))
+                .await
+        );
+    }
+}
+
+#[tokio::test]
+async fn failed_timer_preference_write_is_reported_without_changing_value() {
+    let (_directory, path) = crate::test_support::identity_store_fixture();
+    let state = DeviceService::with_ble_device(
+        "no-physical-device".to_owned(),
+        DeviceRegistry::load(&path).unwrap(),
+    );
+    std::fs::remove_file(&path).unwrap();
+    std::fs::create_dir(&path).unwrap();
+    let runtime = state.ble_device.as_ref().unwrap();
+    assert_eq!(
+        runtime
+            .execute_control(
+                &state,
+                unix_millis(SystemTime::now()).unwrap(),
+                DeviceCommand::LegacyTimerDuration {
+                    minutes: 7.try_into().unwrap()
+                }
+            )
+            .await,
+        Err(ControlAdmissionError::Persistence)
+    );
+    let response = state_response(state).await;
+    assert_eq!(response["timer_duration_minutes"], 360);
+    assert!(
+        response["last_error"]
+            .as_str()
+            .unwrap()
+            .contains("could not save timer settings")
+    );
+}
 
 #[tokio::test]
 async fn ble_stale_control_releases_its_admission_slot() {

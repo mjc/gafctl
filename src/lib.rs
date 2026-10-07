@@ -28,6 +28,8 @@ mod service;
 mod stdout;
 #[cfg(all(test, feature = "http"))]
 mod test_support;
+#[cfg(feature = "http")]
+mod timed_run;
 
 #[cfg(any(feature = "cli", feature = "http"))]
 use std::process::ExitCode;

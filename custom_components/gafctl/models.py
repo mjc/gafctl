@@ -72,6 +72,7 @@ class Readings(TypedDict):
 
 
 class DeviceState(TypedDict):
+    timer_duration_minutes: int | None
     id: str
     backend: Backend
     available: bool

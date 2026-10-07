@@ -818,28 +818,56 @@ class RegistryTests(unittest.IsolatedAsyncioTestCase):
             await coordinator.async_set_mode("manual")
         client.set_control.assert_not_called()
 
-    async def test_ble_timer_can_replace_manual_sentinel_with_bounded_timer(
-        self,
-    ) -> None:
+    async def test_ble_timer_number_saves_duration_without_changing_mode(self):
+        for mode, fan, original in (("automatic", False, 0), ("timer", True, 600)):
+            for duration in (0, 1, 360):
+                with self.subTest(mode=mode, duration=duration):
+                    entry = await self.entry()
+                    selected = device(commands=["legacy_timer_duration"])
+                    old = state_data(
+                        state=reported_state(
+                            settings=legacy_settings(
+                                mode=mode,
+                                controller_fan_on=fan,
+                                timer_original_minutes=original,
+                                timer_remaining_minutes=original,
+                            )
+                        )
+                    )
+                    new = old | {"timer_duration_minutes": duration}
+                    client = fake_client(devices=[selected], states=[old, new])
+                    coordinator = coordinator_for(self.hass, client, selected, entry)
+                    coordinator.async_set_updated_data(old)
+                    entities = await self.platform_entities(gafctl_number, coordinator)
+                    self.assertEqual(len(entities), 1)
+                    timer = entities[0]
+                    self.assertEqual(timer.name, "Timer duration")
+                    self.assertTrue(timer.available)
+                    self.assertEqual(timer.native_value, 360)
+                    await timer.async_set_native_value(duration)
+                    client.set_control.assert_awaited_once_with(
+                        "configured",
+                        {"kind": "legacy_timer_duration", "minutes": duration},
+                    )
+                    self.assertEqual(timer.native_value, duration)
+                    self.assertEqual(coordinator.data["state"], old["state"])
+
+    async def test_ble_timer_number_requires_matching_saved_duration(self):
         entry = await self.entry()
-        selected = device(commands=["legacy_timer"])
-        old = state_data(
-            state=readings(settings=legacy_settings(timer_original_minutes=600))
-        )
-        new = old | {
-            "state": readings(settings=legacy_settings(timer_original_minutes=1))
-        }
-        client = fake_client(devices=[selected], states=[old, new])
+        selected = device(commands=["legacy_timer_duration"])
+        response = state_data(state=reported_state())
+        client = fake_client(devices=[selected], state=response)
         coordinator = coordinator_for(self.hass, client, selected, entry)
-        coordinator.async_set_updated_data(old)
-        entities = await self.platform_entities(gafctl_number, coordinator)
-        timer = entities[0]
-        self.assertTrue(timer.available)
-        self.assertIsNone(timer.native_value)
-        await timer.async_set_native_value(1)
+        coordinator.async_set_updated_data(response)
+        timer = (await self.platform_entities(gafctl_number, coordinator))[0]
+        with self.assertRaisesRegex(HomeAssistantError, "matching current setting"):
+            await timer.async_set_native_value(60)
         client.set_control.assert_awaited_once_with(
-            "configured", {"kind": "legacy_timer", "minutes": 1}
+            "configured", {"kind": "legacy_timer_duration", "minutes": 60}
         )
+        coordinator.async_set_updated_data(response | {"timer_duration_minutes": None})
+        self.assertFalse(timer.available)
+        self.assertIsNone(timer.native_value)
 
     async def test_ble_numbers_accept_fractional_readback_and_send_partial_command(
         self,
@@ -849,7 +877,7 @@ class RegistryTests(unittest.IsolatedAsyncioTestCase):
             commands=[
                 "legacy_automatic_temperature",
                 "legacy_automatic_humidity",
-                "legacy_timer",
+                "legacy_timer_duration",
             ]
         )
         old = state_data(
@@ -1351,20 +1379,25 @@ class RegistryTests(unittest.IsolatedAsyncioTestCase):
                         "legacy_preset",
                         "legacy_automatic_temperature",
                         "legacy_automatic_humidity",
-                        "legacy_timer",
+                        "legacy_timer_duration",
                     ]
                 )
-                old = state_data(state=reported_state())
+                old = state_data(
+                    state=reported_state(), timer_duration_minutes=duration
+                )
                 updated = old | {
+                    "timer_duration_minutes": duration,
                     "state": reported_state(
                         settings=legacy_settings(
                             mode=mode,
                             controller_fan_on=fan,
                             automatic_temperature_tenths_f=1051,
                             automatic_humidity_tenths_percent=301,
-                            timer_original_minutes=duration,
+                            timer_original_minutes=600
+                            if option == "Timer" and duration == 0
+                            else duration,
                         )
-                    )
+                    ),
                 }
                 client = fake_client(devices=[selected], states=[old, updated])
                 coordinator = coordinator_for(self.hass, client, selected, entry)
@@ -1375,7 +1408,7 @@ class RegistryTests(unittest.IsolatedAsyncioTestCase):
                 numbers = await self.platform_entities(gafctl_number, coordinator)
                 self.assertEqual(
                     {item.name for item in selectors + numbers},
-                    {"Mode", "Target temperature", "Target humidity", "Run fan for"},
+                    {"Mode", "Target temperature", "Target humidity", "Timer duration"},
                 )
                 self.assertTrue(all(item.entity_category is None for item in numbers))
                 self.assertTrue(all(item.entity_category is None for item in selectors))
@@ -1497,11 +1530,20 @@ class RegistryTests(unittest.IsolatedAsyncioTestCase):
             if key == "sensor_automatic_temperature_threshold":
                 checked.add(key)
                 self.assertEqual(rendered, [None, None, None, 105.0])
+            if key == "sensor_timer_original":
+                checked.add(key)
+                self.assertEqual(config["name"], "Last timer duration")
+                self.assertEqual(rendered, [None, None, None, 0])
             if key == "sensor_freshness":
                 checked.add(key)
                 self.assertEqual(rendered, ["unknown", "stale", "fresh", "fresh"])
         self.assertEqual(
-            checked, {"sensor_automatic_temperature_threshold", "sensor_freshness"}
+            checked,
+            {
+                "sensor_automatic_temperature_threshold",
+                "sensor_timer_original",
+                "sensor_freshness",
+            },
         )
 
     async def test_mqtt_migration_failure_replays_old_config_and_preserves_customization(
@@ -1732,6 +1774,21 @@ class RegistryTests(unittest.IsolatedAsyncioTestCase):
                 self.assertGreater(valid["issued_at_unix_ms"], 0)
                 value_field = next(key for key in valid["command"] if key != "kind")
                 self.assertEqual(valid["command"][value_field], config["min"])
+                if key == "number_timer_duration" and config["min"] == 0:
+                    self.assertEqual(config["name"], "Timer duration")
+                    self.assertEqual(valid["command"]["kind"], "legacy_timer_duration")
+                    payload = state_data(
+                        state=reported_state(
+                            settings=legacy_settings(timer_original_minutes=600)
+                        ),
+                        timer_duration_minutes=60,
+                    )
+                    self.assertEqual(
+                        Template(config["value_template"], self.hass).async_render(
+                            {"value_json": payload}
+                        ),
+                        60,
+                    )
                 for value in (True, "garbage", 90.5, None):
                     self.assertIsNone(render(value)["command"][value_field])
             elif domain == "switch":
@@ -1848,7 +1905,7 @@ class RegistryTests(unittest.IsolatedAsyncioTestCase):
                     None,
                 ),
                 "timer_original": (
-                    "Timer duration",
+                    "Last timer duration",
                     ("settings", "timer_original_minutes"),
                     UnitOfTime.MINUTES,
                     None,

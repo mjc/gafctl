@@ -25,6 +25,7 @@ pub struct DeviceListV2Response {
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct DeviceStateV2Response {
+    pub timer_duration_minutes: Option<crate::LegacyTimerMinutes>,
     pub id: DeviceId,
     pub backend: DeviceBackend,
     pub available: bool,
@@ -245,6 +246,7 @@ mod tests {
         let response = DeviceRefreshV2Response {
             status: DeviceRefreshStatus::Fresh,
             device: DeviceStateV2Response {
+                timer_duration_minutes: None,
                 id: DeviceId::configured_ble(),
                 backend: DeviceBackend::LegacyBle,
                 available: false,

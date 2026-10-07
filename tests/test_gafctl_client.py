@@ -360,12 +360,41 @@ class ApiClientTests(unittest.IsolatedAsyncioTestCase):
                 client, _ = self.client(payload)
                 await client.fetch_state("configured")
 
+    async def test_timer_duration_is_bounded_state_metadata(self):
+        for backend in ("legacy_ble", "quick_connect"):
+            values = (None, 0, 360) if backend == "legacy_ble" else (None,)
+            for duration in values:
+                with self.subTest(backend=backend, duration=duration):
+                    response = await self.state(
+                        reported_state(backend),
+                        backend,
+                        timer_duration_minutes=duration,
+                    )
+                    self.assertEqual(response["timer_duration_minutes"], duration)
+        for duration in (-1, 361, 1.5, True, "60"):
+            with self.subTest(duration=duration), self.assertRaises(ApiError):
+                await self.state(reported_state(), timer_duration_minutes=duration)
+        with self.assertRaises(ApiError):
+            client, _ = self.client(
+                state_data(
+                    state=reported_state("quick_connect"), backend="quick_connect"
+                )
+                | {"timer_duration_minutes": 60}
+            )
+            await client.fetch_state("configured")
+        self.assertNotIn(
+            "timer_duration",
+            CONTROLS.entity_keys(device(commands=["legacy_timer"])).get(
+                "number", set()
+            ),
+        )
+
     async def test_commands_keep_exact_shape_correlation_and_single_submission(self):
         commands = [
             COMMAND,
             {"kind": "legacy_automatic_temperature", "temperature_f": 90},
             {"kind": "legacy_automatic_humidity", "humidity_percent": 80},
-            {"kind": "legacy_timer", "minutes": 360},
+            {"kind": "legacy_timer_duration", "minutes": 360},
             {"kind": "quick_connect_mode", "mode": "manual"},
             {
                 "kind": "quick_connect_targets",
@@ -373,6 +402,7 @@ class ApiClientTests(unittest.IsolatedAsyncioTestCase):
                 "humidity_percent": 80,
             },
             {"kind": "quick_connect_timer_duration", "minutes": 360},
+            {"kind": "legacy_timer", "minutes": 60},
         ]
         self.assertEqual(
             CONTROLS.entity_keys(device(commands=[c["kind"] for c in commands[1:4]]))[

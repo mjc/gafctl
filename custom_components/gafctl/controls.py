@@ -5,7 +5,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Literal, TypeGuard
 
-from .models import ApiError, Backend, Device, JsonObject, Readings
+from .models import ApiError, Backend, Device, DeviceState, JsonObject, Readings
 from .readings import BINARY_FIELDS, MODE_LABELS, SENSORS
 
 CONTROL_HTTP_STATUSES = {
@@ -39,12 +39,7 @@ class NumberControl:
     @property
     def command_kind(self) -> str:
         prefix = "legacy" if self.backend == "legacy_ble" else "quick_connect"
-        setting = (
-            "timer"
-            if self.backend == "legacy_ble" and self.key == "timer_duration"
-            else self.key
-        )
-        return f"{prefix}_{setting}"
+        return f"{prefix}_{self.key}"
 
     @property
     def command_field(self) -> str:
@@ -54,8 +49,10 @@ class NumberControl:
             "timer_duration": "minutes",
         }[self.key]
 
-    def reading(self, readings: Readings) -> float | int | None:
-        settings = readings["settings"]
+    def reading(self, state: DeviceState | None) -> float | int | None:
+        if state is None or state["state"] is None:
+            return None
+        settings = state["state"]["settings"]
         match self.key:
             case "automatic_temperature":
                 return (
@@ -71,7 +68,7 @@ class NumberControl:
                 )
             case "timer_duration":
                 return (
-                    settings["timer_original_minutes"]
+                    state["timer_duration_minutes"]
                     if settings["backend"] == "legacy_ble"
                     else settings["timer_duration_minutes"]
                 )
@@ -98,20 +95,20 @@ class NumberControl:
             raise ApiError("value is outside the supported device range")
         return int(value)
 
-    def current_supported(self, readings: Readings) -> bool:
-        value = self.reading(readings)
+    def current_supported(self, state: DeviceState | None) -> bool:
+        value = self.reading(state)
         if not _is_finite_number(value):
             return False
+        if self.backend == "legacy_ble" and self.key == "timer_duration":
+            return self.accepts(value)
         if self.backend == "legacy_ble":
-            return (
-                self.minimum <= value <= self.maximum
-                or (self.key == "automatic_humidity" and value == 100)
-                or (self.key == "timer_duration" and value == 600)
+            return self.minimum <= value <= self.maximum or (
+                self.key == "automatic_humidity" and value == 100
             )
         return self.accepts(value) and (
             self.capability != "quick_connect_targets"
             or all(
-                target.accepts(target.reading(readings))
+                target.accepts(target.reading(state))
                 for target in NUMBER_CONTROLS[self.backend]
                 if target.capability == self.capability
             )

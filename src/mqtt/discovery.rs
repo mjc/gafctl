@@ -250,7 +250,7 @@ fn ble_sensors(backend: DeviceBackend) -> impl Iterator<Item = Sensor> {
         },
         Sensor {
             key: "timer_original",
-            name: "Timer duration",
+            name: "Last timer duration",
             field: "state.settings.timer_original_minutes",
             unit: Some("min"),
             class: Some("duration"),
@@ -468,7 +468,7 @@ impl NumberControl {
         ));
         if self.key == "timer_duration" && device.backend == DeviceBackend::LegacyBle {
             config["value_template"] = json!(
-                "{% set reading = ((value_json.state or {}).get('settings') or {}).get('timer_original_minutes') %}{{ reading if reading is number and 0 <= reading <= 360 else none }}"
+                "{% set reading = value_json.get('timer_duration_minutes') %}{{ reading if reading is number and 0 <= reading <= 360 else none }}"
             );
         }
         config
@@ -508,11 +508,11 @@ fn number_controls(backend: DeviceBackend) -> impl Iterator<Item = NumberControl
     };
     let timer = NumberControl {
         key: "timer_duration",
-        name: "Run fan for",
-        kind: "legacy_timer",
+        name: "Timer duration",
+        kind: "legacy_timer_duration",
         field: "minutes",
-        reading: "state.settings.timer_original_minutes",
-        capability: CommandCapability::LegacyTimer,
+        reading: "timer_duration_minutes",
+        capability: CommandCapability::LegacyTimerDuration,
         minimum: 0,
         maximum: 360,
         step: 1,
@@ -756,9 +756,9 @@ mod tests {
                         "%",
                     ),
                     (
-                        "legacy_timer",
+                        "legacy_timer_duration",
                         "minutes",
-                        "state.settings.timer_original_minutes",
+                        "timer_duration_minutes",
                         0,
                         360,
                         1,
@@ -824,7 +824,7 @@ mod tests {
                 let expected_reading = if device.backend == DeviceBackend::LegacyBle
                     && control.key == "timer_duration"
                 {
-                    "{% set reading = ((value_json.state or {}).get('settings') or {}).get('timer_original_minutes') %}{{ reading if reading is number and 0 <= reading <= 360 else none }}".to_owned()
+                    "{% set reading = value_json.get('timer_duration_minutes') %}{{ reading if reading is number and 0 <= reading <= 360 else none }}".to_owned()
                 } else {
                     nullable_template(reading)
                 };

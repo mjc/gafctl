@@ -89,6 +89,7 @@ Example original-controller state:
 {
   "id": "configured",
   "backend": "legacy_ble",
+  "timer_duration_minutes": 360,
   "available": true,
   "inventory_status": "present",
   "last_error": null,
@@ -119,6 +120,11 @@ Example original-controller state:
   }
 }
 ```
+
+`timer_duration_minutes` is the saved original-controller duration for the next
+Mode Timer command; it defaults to 360 and remains present when the fan is
+unavailable. It is `null` for QuickConnect. Device-reported timer values stay in
+`state.settings`.
 
 The endpoint returns cached state. The service polls the original Bluetooth
 controller every three seconds and QuickConnect devices every thirty seconds.
@@ -170,10 +176,12 @@ Original-controller mode selection preserves the current thresholds:
 ```
 
 Automatic reads and reapplies the current raw thresholds under the device
-transaction. Timer reads the original timer duration and starts that duration,
-or returns to Automatic with the current thresholds when it is zero. Missing or unsupported current settings prevent
-the write. Off writes a zero-minute timer, stopping the fan and disabling
-automatic operation. Timer expiry also leaves the fan off. The HA Mode selector
+transaction. Timer starts the saved `timer_duration_minutes`, or selects
+Automatic when it is zero. Missing or unsupported current settings prevent the
+write. Off writes a zero-minute timer, stopping the fan and disabling automatic
+operation. At expiry, gafctl restores the previous mode after fresh readback;
+see [timed runs](home-assistant-entities.md#returning-from-a-timed-run) for restart,
+manual takeover, and failure behavior. The HA Mode selector
 reports Off for timer mode with the controller fan flag off; the raw controller
 mode remains available separately. This command requires `legacy_mode`.
 
@@ -182,11 +190,18 @@ Original-controller adjustable commands:
 ```json
 {"kind":"legacy_automatic_temperature","temperature_f":110}
 {"kind":"legacy_automatic_humidity","humidity_percent":40}
+{"kind":"legacy_timer_duration","minutes":60}
 {"kind":"legacy_timer","minutes":60}
 ```
 
+`legacy_timer_duration` saves the next run's duration without Bluetooth access
+or a mode change. `legacy_timer` starts a run immediately; a positive value
+uses the same previous-mode restoration as Mode Timer.
+
 Temperature accepts 90–120 °F, humidity 30–80%, and timer 0–360 minutes,
-all in whole-unit steps. Zero stops the fan and disables automatic operation. These limits come from the
+all in whole-unit steps. A zero `legacy_timer` stops the fan and disables
+automatic operation; a zero `legacy_timer_duration` only saves a preference.
+These limits come from the
 original manufacturer Android app, including its timer picker and setter
 encoding. The app's manual and humidity-disable sentinels are outside these
 input ranges.
@@ -197,7 +212,8 @@ Missing or unsupported readback prevents the write. An existing 100% humidity
 disable sentinel is preserved when changing temperature.
 
 The original controller advertises `legacy_mode`, `legacy_automatic_temperature`,
-`legacy_automatic_humidity`, and `legacy_timer` capabilities. Broader values
+`legacy_automatic_humidity`, `legacy_timer_duration`, and `legacy_timer`
+capabilities. Broader values
 within the app ranges have not all been tested with readback on the controller.
 The four tested presets remain available to API and CLI clients. Home Assistant
 uses Mode and the three adjustable number controls.
@@ -246,8 +262,9 @@ controls are serialized per device.
 ### Confirmation and retries
 
 Responses include the submitted `request_id` and a `status`. Treat only
-`confirmed` as success: it requires a successful backend response and matching
-readback.
+`confirmed` as success: device commands require a successful backend response
+and matching readback. Saving the timer duration requires a successful store
+write; it does not send a Bluetooth command.
 
 Each device caches 64 completed requests in memory. Repeating an ID with the
 same command returns its cached result; changing the command returns

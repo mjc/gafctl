@@ -158,6 +158,13 @@ def _state_response(raw: Any, device_id: str) -> DeviceState:
     try:
         if response["id"] != device_id:
             raise ApiError("proxy returned mismatched device state")
+        duration = response["timer_duration_minutes"]
+        if duration is not None and (
+            response["backend"] != "legacy_ble"
+            or type(duration) is not int
+            or not 0 <= duration <= 360
+        ):
+            raise ApiError("proxy returned invalid timer duration")
         state = response["state"]
         if response["available"] is not (state is not None):
             raise ApiError("proxy returned inconsistent device state")

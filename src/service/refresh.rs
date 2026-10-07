@@ -107,7 +107,7 @@ impl DeviceService {
                 self.ble_device
                     .as_ref()
                     .ok_or(ServiceError::BackendUnavailable)?
-                    .read_state_locked()
+                    .read_state_locked(self)
                     .await
             }
             DeviceBackend::QuickConnect => {

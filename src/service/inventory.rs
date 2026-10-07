@@ -56,6 +56,7 @@ async fn device_state_v2_data(
     let runtime = registry.runtime(id).ok_or(ServiceError::UnknownDevice)?;
     let snapshot = runtime.snapshot().await;
     let mut response = DeviceStateV2Response {
+        timer_duration_minutes: None,
         id: id.clone(),
         backend: descriptor.backend,
         available: snapshot.state.is_some(),

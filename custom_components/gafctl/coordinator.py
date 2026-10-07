@@ -238,8 +238,7 @@ class GafctlCoordinator(DataUpdateCoordinator[DeviceState]):
             current = self._require_control("legacy_mode", "legacy_ble")
             expected = (
                 "automatic"
-                if mode == "timer"
-                and current["settings"]["timer_original_minutes"] == 0
+                if mode == "timer" and self.data["timer_duration_minutes"] == 0
                 else mode
             )
             if legacy_mode(current) != expected:
@@ -250,12 +249,12 @@ class GafctlCoordinator(DataUpdateCoordinator[DeviceState]):
         async with self.command_lock:
             self._require_active()
             await self.async_refresh()
-            state = self._require_control(control.capability, control.backend)
-            if not control.current_supported(state):
+            self._require_control(control.capability, control.backend)
+            if not control.current_supported(self.data):
                 raise ApiError("the selected device has no supported current setting")
             await self._async_submit_control(control.command(validated))
-            state = self._require_control(control.capability, control.backend)
-            if control.reading(state) != validated:
+            self._require_control(control.capability, control.backend)
+            if control.reading(self.data) != validated:
                 raise ApiError("confirmed control has no matching current setting")
 
     async def _async_submit_control(self, command: JsonObject) -> None:
@@ -315,7 +314,7 @@ class GafctlCoordinator(DataUpdateCoordinator[DeviceState]):
 
     def number_control_available(self, control: NumberControl) -> bool:
         state = self.control_readings(control.capability, control.backend)
-        return state is not None and control.current_supported(state)
+        return state is not None and control.current_supported(self.data)
 
     @property
     def http_owned(self) -> bool:

@@ -431,6 +431,7 @@ fn quickconnect_command(command: DeviceCommand) -> Option<QuickConnectCommand> {
         | DeviceCommand::LegacyPreset { .. }
         | DeviceCommand::LegacyAutomaticTemperature { .. }
         | DeviceCommand::LegacyAutomaticHumidity { .. }
+        | DeviceCommand::LegacyTimerDuration { .. }
         | DeviceCommand::LegacyTimer { .. } => None,
     }
 }

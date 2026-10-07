@@ -19,21 +19,42 @@ For an original **GAF Master Flow Wi-Fi Attic Vent** (ERV5SMT or EGV5SMT):
 | Automatic temperature threshold | Current threshold, °F |
 | Automatic humidity threshold | Current threshold, % |
 | Timer remaining | Remaining timer minutes |
-| Timer duration | Duration set when the timer started, minutes |
+| Last timer duration | Duration last sent to the controller, minutes |
 | Mode | Automatic, Timer, or Off |
 | Target temperature | 90–120 °F in 1 °F steps |
 | Target humidity | 30–80% in 1% steps |
-| Run fan for | 0–360 minutes in 1-minute steps; zero stops the fan |
+| Timer duration | Save 0–360 minutes in 1-minute steps; defaults to 360 |
 
-Select **Automatic** to let the controller use its current temperature and
-humidity thresholds. Select **Timer** to run for the reported timer duration.
-If no duration is set, Timer returns to Automatic. Select **Off** to stop the fan and
-disable automatic operation until you select Automatic again. An expired timer
-also leaves the fan off; it does not resume automatic operation.
+Select **Automatic** to use the current temperature and humidity thresholds.
+Editing **Timer duration** only saves a duration. Select **Timer** to start it;
+a saved zero selects Automatic. Select **Off** to stop the fan and disable
+automatic operation. Changing either target selects Automatic and preserves the
+other target.
+
+### Returning from a timed run
+
+Gafctl remembers the preceding mode and thresholds when starting a positive
+timer. At expiry, a fresh matching device reading triggers restoration:
+Automatic resumes its thresholds, Off stays off, and a preceding external timer
+resumes only the estimated time left before its original deadline. Extending a
+gafctl timer keeps its original return mode. Editing the saved duration does not
+change an active countdown.
+
+Selecting a mode or changing a target cancels pending restoration. Changes seen
+from the manufacturer app also cancel it when the mode, thresholds, original
+duration, or countdown no longer match. An external stop in the final minute can
+look like normal expiry; the protocol cannot distinguish them reliably.
+
+The saved duration and pending return survive service restart in the identity
+store. Restoration requires gafctl and Bluetooth; the controller alone ends its
+timer with the fan off. Gafctl consumes the saved return before sending it and
+does not replay an uncertain restoration. A crash between consumption and the
+write can leave the fan off. If restoration fails, inspect `last_error` and select
+a mode explicitly. Unavailable or stale readings never trigger restoration.
 
 The Mode selector reports Off when the controller is in timer mode with its fan
 flag off. Controller mode remains a separate diagnostic of the raw device mode.
-Mode, Target temperature, Target humidity, and Run fan for appear together in
+Mode, Target temperature, Target humidity, and Timer duration appear together in
 Home Assistant's Controls section. Target temperature and Target humidity are
 the only threshold controls. Read-only diagnostics appear in Diagnostics;
 connection settings are in the integration's Reconfigure flow.
@@ -41,9 +62,9 @@ connection settings are in the integration's Reconfigure flow.
 The adjustable numbers use ranges and whole-unit steps from the original
 manufacturer app. Temperature and humidity commands change only the selected
 value; the service reads and preserves the other raw threshold under the same
-transaction before writing. Both select automatic mode. Run fan for starts
-timed operation and reports the requested minutes. Remaining time is a separate
-sensor. Fractional threshold readback is displayed without rounding; new
+transaction before writing. Both select automatic mode. Timer duration reports
+the saved preference. Last timer duration and Timer remaining report the device's
+raw timer settings. Fractional threshold readback is displayed without rounding; new
 settings use whole units. The full ranges have not been tested on hardware.
 
 [QuickConnect models and retrofit controllers](hardware.md#quickconnect) expose

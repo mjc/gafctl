@@ -12,7 +12,7 @@ from .entity import GafctlEntity, translate_api_errors
 PRESENTATION = {
     "automatic_temperature": ("Target temperature", UnitOfTemperature.FAHRENHEIT),
     "automatic_humidity": ("Target humidity", PERCENTAGE),
-    "timer_duration": ("Set timer", UnitOfTime.MINUTES),
+    "timer_duration": ("Timer duration", UnitOfTime.MINUTES),
 }
 
 
@@ -40,8 +40,6 @@ class GafctlNumber(GafctlEntity, NumberEntity):
         self._attr_name, self._attr_native_unit_of_measurement = PRESENTATION[
             control.key
         ]
-        if control.backend == "legacy_ble" and control.key == "timer_duration":
-            self._attr_name = "Run fan for"
         self._attr_native_min_value = control.minimum
         self._attr_native_max_value = control.maximum
         self._attr_native_step = control.step
@@ -51,11 +49,7 @@ class GafctlNumber(GafctlEntity, NumberEntity):
         state = self.state_values
         if state is None:
             return None
-        control = self._control
-        value = control.reading(state)
-        if control.backend == "legacy_ble" and control.key == "timer_duration":
-            return value if control.accepts(value) else None
-        return value
+        return self._control.reading(self.coordinator.data)
 
     @property
     def available(self) -> bool:

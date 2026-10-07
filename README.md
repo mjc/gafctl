@@ -123,13 +123,14 @@ For an original controller, Home Assistant groups these four controls together:
 | Mode | Select Automatic, Timer, or Off |
 | Target temperature | Set 90–120 °F in 1 °F steps and select Automatic |
 | Target humidity | Set 30–80% in 1% steps and select Automatic |
-| Run fan for | Start a timer for 1–360 minutes; zero stops the fan |
+| Timer duration | Save 0–360 minutes for the next timed run; defaults to 360 |
 
 Automatic uses the current thresholds. Changing either target preserves the
-other target. Timer restarts the reported duration, or returns to Automatic
-when that duration is zero. Off stops the fan and disables automatic operation.
-An expired timer also leaves the fan off; select Automatic to resume automatic
-operation. Measurements and read-only diagnostics remain available. The fan
+other target. Editing Timer duration leaves the mode unchanged. Selecting Timer
+starts the saved duration, or selects Automatic when it is zero. Off stops the
+fan and disables automatic operation. When a timed run ends, gafctl restores the
+previous mode and thresholds after a fresh device reading. Gafctl must be running
+and able to reach the fan to restore Automatic. Measurements and read-only diagnostics remain available. The fan
 flag reports the controller's on/off state; airflow is unmeasured.
 
 To change the API address, open the entry's menu and choose **Reconfigure**.

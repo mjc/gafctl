@@ -55,8 +55,9 @@ impl DeviceService {
 
     pub(crate) fn with_ble_device(device_id: String, mut registry: DeviceRegistry) -> Self {
         let device = registry.register_configured_ble();
+        let timer = registry.timer_configuration().clone();
         Self {
-            ble_device: Some(Arc::new(LegacyBleRuntime::new(device_id, device))),
+            ble_device: Some(Arc::new(LegacyBleRuntime::new(device_id, device, timer))),
             ..Self::with_registry(registry)
         }
     }

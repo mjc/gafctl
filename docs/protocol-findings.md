@@ -55,8 +55,10 @@ writes also require automatic mode. Timer writes require timer mode; clearing
 also requires the fan flag off. Missing, malformed, mismatched or already-expired
 readback leaves a write unconfirmed. Timer clear leaves timer mode active with
 the fan off. Gafctl displays that state as Off. Selecting Automatic reads and
-reapplies the current thresholds. Selecting Timer restarts the reported positive
-duration; a zero duration selects Automatic.
+reapplies the current thresholds. Selecting Timer starts the saved positive
+duration; a saved zero selects Automatic. The service restores the previous mode
+after timer expiry and fresh matching readback. This is service behavior; the
+controller alone leaves the fan off.
 
 The identity suffix is opaque. `controller_fan_on` reports the controller flag;
 Gafctl keeps `estimated_running` null for this backend. Airflow is unmeasured.

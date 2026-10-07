@@ -503,6 +503,7 @@ mod tests {
         let publication = snapshot.publications.pop().unwrap();
         [true, false].into_iter().for_each(|available| {
             let publication = DeviceStateV2Response {
+                timer_duration_minutes: None,
                 available,
                 state: available.then(|| publication.state.clone()).flatten(),
                 ..publication.clone()

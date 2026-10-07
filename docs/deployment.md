@@ -17,7 +17,8 @@ gafctl server --device-id 'PERIPHERAL_ID' \
 ```
 
 Replace the peripheral ID with the value from `gafctl ble scan` and choose a
-private writable identity-store path. Keep the identity file across restarts.
+private writable identity-store path. Keep the identity file across restarts;
+it also stores the timer duration and any pending return to the previous mode.
 Restrict port 8787 to your trusted network or Home Assistant host. The API has
 no built-in login. An authenticated reverse proxy can provide HTTPS for remote clients.
 

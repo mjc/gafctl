@@ -2,6 +2,26 @@ use gafctl_api::{CommandId, ControlStatus, DeviceControlV2Request, DeviceStateV2
 use serde_json::json;
 
 #[test]
+fn saved_legacy_timer_duration_is_a_separate_bounded_command() {
+    let command: gafctl_api::DeviceCommand = serde_json::from_value(json!({
+        "kind": "legacy_timer_duration", "minutes": 360
+    }))
+    .unwrap();
+    assert_eq!(
+        serde_json::to_value(command).unwrap(),
+        json!({
+            "kind": "legacy_timer_duration", "minutes": 360
+        })
+    );
+    assert!(
+        serde_json::from_value::<gafctl_api::DeviceCommand>(json!({
+            "kind": "legacy_timer_duration", "minutes": 361
+        }))
+        .is_err()
+    );
+}
+
+#[test]
 fn legacy_mode_command_accepts_only_automatic_timer_and_off() {
     for mode in ["automatic", "timer", "off"] {
         let wire = json!({"kind": "legacy_mode", "mode": mode});

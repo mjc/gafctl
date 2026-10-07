@@ -46,7 +46,8 @@ pub(crate) fn prepare_control(
                     },
                 ))
         }
-        DeviceCommand::QuickConnectMode { .. }
+        DeviceCommand::LegacyTimerDuration { .. }
+        | DeviceCommand::QuickConnectMode { .. }
         | DeviceCommand::QuickConnectConditionalOff { .. }
         | DeviceCommand::QuickConnectTargets { .. }
         | DeviceCommand::QuickConnectAutomaticTemperature { .. }
@@ -62,7 +63,7 @@ fn automatic_command(current: AutomaticThresholds) -> Option<ControlCommand> {
         .then_some(ControlCommand::SetAutomaticThresholds(current))
 }
 
-pub(crate) const fn needs_state_read(command: DeviceCommand) -> bool {
+pub(crate) fn needs_state_read(command: DeviceCommand) -> bool {
     match command {
         DeviceCommand::LegacyMode {
             mode: LegacyControlMode::Automatic | LegacyControlMode::Timer,
@@ -72,14 +73,18 @@ pub(crate) const fn needs_state_read(command: DeviceCommand) -> bool {
         DeviceCommand::LegacyMode {
             mode: LegacyControlMode::Off,
         }
-        | DeviceCommand::LegacyPreset { .. }
-        | DeviceCommand::LegacyTimer { .. }
+        | DeviceCommand::LegacyTimerDuration { .. }
         | DeviceCommand::QuickConnectMode { .. }
         | DeviceCommand::QuickConnectConditionalOff { .. }
         | DeviceCommand::QuickConnectTargets { .. }
         | DeviceCommand::QuickConnectAutomaticTemperature { .. }
         | DeviceCommand::QuickConnectAutomaticHumidity { .. }
         | DeviceCommand::QuickConnectTimerDuration { .. } => false,
+        DeviceCommand::LegacyTimer { minutes } => minutes.value() > 0,
+        DeviceCommand::LegacyPreset { preset } => match preset.command() {
+            ControlCommand::SetTimer(minutes) => minutes.value() > 0,
+            ControlCommand::SetAutomaticThresholds(_) => false,
+        },
     }
 }
 
@@ -182,7 +187,7 @@ mod tests {
     }
 
     #[test]
-    fn timers_need_no_threshold_read_and_use_original_app_wire_units() {
+    fn timers_use_original_app_wire_units() {
         for minutes in [0, 1, 60, 360] {
             let command = DeviceCommand::LegacyTimer {
                 minutes: minutes.try_into().unwrap(),

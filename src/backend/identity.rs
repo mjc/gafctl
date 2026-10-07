@@ -1,4 +1,5 @@
 use super::{CloudDeviceInput, DeviceRegistryError};
+use crate::timed_run::TimerConfiguration;
 use gafctl_api::{
     DeviceBackend, DeviceCapabilities, DeviceDescriptor, DeviceId, EntitySource, ProxyId,
 };
@@ -34,6 +35,8 @@ struct IdentityFile {
     proxy_id: ProxyId,
     sources: BTreeMap<DeviceId, EntitySource>,
     bindings: Vec<IdentityBinding>,
+    #[serde(default)]
+    timer: TimerConfiguration,
 }
 
 #[derive(Serialize)]
@@ -42,6 +45,7 @@ struct IdentityFileContents<'a> {
     proxy_id: ProxyId,
     sources: &'a BTreeMap<DeviceId, EntitySource>,
     bindings: &'a [IdentityBinding],
+    timer: &'a TimerConfiguration,
 }
 
 pub(super) struct IdentityStore {
@@ -49,6 +53,7 @@ pub(super) struct IdentityStore {
     pub(super) proxy_id: ProxyId,
     pub(super) sources: BTreeMap<DeviceId, EntitySource>,
     pub(super) bindings: Vec<IdentityBinding>,
+    pub(super) timer: TimerConfiguration,
 }
 
 impl IdentityStore {
@@ -63,6 +68,7 @@ impl IdentityStore {
                     proxy_id: stored.proxy_id,
                     sources: stored.sources,
                     bindings: stored.bindings,
+                    timer: stored.timer,
                 })
             }
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
@@ -83,6 +89,7 @@ impl IdentityStore {
             proxy_id: ProxyId::default(),
             sources: BTreeMap::new(),
             bindings: Vec::new(),
+            timer: TimerConfiguration::default(),
         }
     }
 
@@ -156,10 +163,30 @@ impl IdentityStore {
         Ok(())
     }
 
+    pub(super) fn set_timer(
+        &mut self,
+        timer: TimerConfiguration,
+    ) -> Result<(), DeviceRegistryError> {
+        if self.path.is_some() {
+            self.save_contents(&self.bindings, &self.sources, &timer)?;
+        }
+        self.timer = timer;
+        Ok(())
+    }
+
     fn save(
         &self,
         bindings: &[IdentityBinding],
         sources: &BTreeMap<DeviceId, EntitySource>,
+    ) -> Result<(), DeviceRegistryError> {
+        self.save_contents(bindings, sources, &self.timer)
+    }
+
+    fn save_contents(
+        &self,
+        bindings: &[IdentityBinding],
+        sources: &BTreeMap<DeviceId, EntitySource>,
+        timer: &TimerConfiguration,
     ) -> Result<(), DeviceRegistryError> {
         let path = self
             .path
@@ -175,6 +202,7 @@ impl IdentityStore {
             proxy_id: self.proxy_id,
             sources,
             bindings,
+            timer,
         })
         .map_err(DeviceRegistryError::Encoding)?;
         let mut file = tempfile::NamedTempFile::new_in(parent).map_err(DeviceRegistryError::Io)?;
@@ -182,8 +210,10 @@ impl IdentityStore {
             .and_then(|()| file.as_file().sync_all())
             .map_err(DeviceRegistryError::Io)?;
         file.persist(path)
-            .map(drop)
-            .map_err(|error| DeviceRegistryError::Io(error.error))
+            .map_err(|error| DeviceRegistryError::Io(error.error))?;
+        fs::File::open(parent)
+            .and_then(|directory| directory.sync_all())
+            .map_err(DeviceRegistryError::Io)
     }
 }
 
@@ -254,6 +284,23 @@ mod tests {
     use super::*;
     use crate::test_support::{cloud_device, identity_store_fixture};
     use serde_json::json;
+
+    #[test]
+    fn timer_preferences_persist_and_failed_writes_preserve_previous_value() {
+        let (_directory, path) = identity_store_fixture();
+        let mut store = IdentityStore::load(path.clone()).unwrap();
+        assert_eq!(store.timer.duration_minutes.value(), 360);
+        let configured = TimerConfiguration {
+            duration_minutes: 12.try_into().unwrap(),
+            run: None,
+        };
+        store.set_timer(configured.clone()).unwrap();
+        assert_eq!(IdentityStore::load(path.clone()).unwrap().timer, configured);
+        fs::remove_file(&path).unwrap();
+        fs::create_dir(&path).unwrap();
+        assert!(store.set_timer(TimerConfiguration::default()).is_err());
+        assert_eq!(store.timer, configured);
+    }
 
     #[test]
     fn failed_identity_replacement_removes_staging_files() {

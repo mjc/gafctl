@@ -232,7 +232,7 @@ versions aligned. Choose one entity source per device as described in
 
 Copy `custom_components/gafctl` into your Home Assistant configuration directory.
 The original controller exposes Mode, Target temperature, Target humidity, and
-Run fan for together in Controls. See the [entity guide](home-assistant-entities.md)
+Timer duration together in Controls. See the [entity guide](home-assistant-entities.md)
 for their behavior and the available readings.
 The resulting path must be `custom_components/gafctl/manifest.json`. Restart Home
 Assistant, then add the integration as above. On upgrades, replace that directory

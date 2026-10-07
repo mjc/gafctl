@@ -52,8 +52,10 @@ restores availability. Last raw observations remain in diagnostics.
 Controls retain their acknowledgement and then read settings, mode, sensors,
 and timer for confirmation. Partial threshold changes first read current
 settings so the unchanged threshold is preserved. Automatic reapplies both
-current raw thresholds. Timer restarts the reported duration, or selects
-Automatic when it is zero. Off sends a zero-minute timer command. These extra reads provide
+current raw thresholds. Timer starts the saved duration, or selects Automatic
+when it is zero. Timer duration edits only save a preference. Off sends a
+zero-minute timer command. The service restores the preceding mode after timer
+expiry and fresh matching readback; see [timed runs](home-assistant-entities.md#returning-from-a-timed-run). These extra reads provide
 Gafctl's control confirmation contract; Android's setter has no equivalent
 acknowledgement/readback check.
 

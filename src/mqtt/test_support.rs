@@ -167,6 +167,7 @@ pub(super) fn snapshot(device: DeviceDescriptor) -> StateSnapshot {
         proxy_id: device.proxy_id,
         discovery_identities: vec![(device.id.clone(), device.backend)],
         publications: vec![DeviceStateV2Response {
+            timer_duration_minutes: None,
             id: device.id.clone(),
             backend: device.backend,
             available: true,

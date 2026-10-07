@@ -143,6 +143,17 @@ impl DeviceRegistry {
         })
     }
 
+    pub(crate) fn timer_configuration(&self) -> &crate::timed_run::TimerConfiguration {
+        &self.identities.timer
+    }
+
+    pub(crate) fn set_timer_configuration(
+        &mut self,
+        timer: crate::timed_run::TimerConfiguration,
+    ) -> Result<(), DeviceRegistryError> {
+        self.identities.set_timer(timer)
+    }
+
     pub fn register_configured_ble(&mut self) -> Arc<DeviceRuntime> {
         let descriptor = DeviceDescriptor::configured_ble();
         self.register(descriptor)

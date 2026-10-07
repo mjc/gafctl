@@ -110,6 +110,9 @@ pub enum DeviceCommand {
     LegacyAutomaticHumidity {
         humidity_percent: AutomaticHumidityPercent,
     },
+    LegacyTimerDuration {
+        minutes: LegacyTimerMinutes,
+    },
     LegacyTimer {
         minutes: LegacyTimerMinutes,
     },
@@ -145,6 +148,7 @@ impl DeviceCommand {
             DeviceCommand::LegacyAutomaticHumidity { .. } => {
                 CommandCapability::LegacyAutomaticHumidity
             }
+            DeviceCommand::LegacyTimerDuration { .. } => CommandCapability::LegacyTimerDuration,
             DeviceCommand::LegacyTimer { .. } => CommandCapability::LegacyTimer,
             DeviceCommand::QuickConnectMode { .. }
             | DeviceCommand::QuickConnectConditionalOff { .. } => {
@@ -198,6 +202,7 @@ pub enum CommandCapability {
     LegacyAutomaticTemperature,
     LegacyAutomaticHumidity,
     LegacyTimer,
+    LegacyTimerDuration,
     QuickConnectMode,
     QuickConnectTargets,
     QuickConnectTimerDuration,
@@ -210,7 +215,8 @@ impl CommandCapability {
             | Self::LegacyPreset(_)
             | Self::LegacyAutomaticTemperature
             | Self::LegacyAutomaticHumidity
-            | Self::LegacyTimer => DeviceBackend::LegacyBle,
+            | Self::LegacyTimer
+            | Self::LegacyTimerDuration => DeviceBackend::LegacyBle,
             Self::QuickConnectMode
             | Self::QuickConnectTargets
             | Self::QuickConnectTimerDuration => DeviceBackend::QuickConnect,
@@ -241,6 +247,7 @@ impl DeviceCapabilities {
                 CommandCapability::LegacyAutomaticTemperature,
                 CommandCapability::LegacyAutomaticHumidity,
                 CommandCapability::LegacyTimer,
+                CommandCapability::LegacyTimerDuration,
             ])
             .collect(),
         }

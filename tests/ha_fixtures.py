@@ -114,8 +114,18 @@ def reported_state(backend="legacy_ble", **overrides):
     )
 
 
-def state_data(*, state=None, available=True, freshness="fresh", backend="legacy_ble"):
+def state_data(
+    *,
+    state=None,
+    available=True,
+    freshness="fresh",
+    backend="legacy_ble",
+    timer_duration_minutes=360,
+):
     return {
+        "timer_duration_minutes": timer_duration_minutes
+        if backend == "legacy_ble"
+        else None,
         "id": "configured",
         "backend": backend,
         "available": available,

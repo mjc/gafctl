@@ -71,7 +71,7 @@ timestamps. An unavailable device with `state: null` is a valid read. Use the
 ### Controls
 
 Fixed presets remain available through the CLI and API. Home Assistant uses
-Mode, Target temperature, Target humidity, and Run fan for instead. See the
+Mode, Target temperature, Target humidity, and Timer duration instead. See the
 [entity guide](home-assistant-entities.md) for those controls.
 
 CLI preset names map to API values:
@@ -81,7 +81,7 @@ CLI preset names map to API values:
 | `automatic-105-f-30-percent` | `automatic105_f30_percent` | Automatic, 105.0 °F and 30.0% |
 | `automatic-105-1-f-30-1-percent` | `automatic105_1_f30_1_percent` | Automatic, 105.1 °F and 30.1% |
 | `timer-clear` | `timer_clear` | Stop the fan and disable automatic operation |
-| `timer-one-minute` | `timer_one_minute` | Run for one minute, then stay off |
+| `timer-one-minute` | `timer_one_minute` | Run for one minute, then restore the preceding mode through the service |
 
 QuickConnect controls require advertised capabilities and enabled cloud writes:
 
