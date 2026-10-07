@@ -1,10 +1,10 @@
 use std::sync::Arc;
 use std::time::SystemTime;
 
-use futures_util::{StreamExt, TryStreamExt, stream};
-use gafctl_api::{
+use crate::model::{
     DeviceBackend, DeviceDescriptor, DeviceId, DeviceStateV2Response, ProxyId, unix_millis,
 };
+use futures_util::{StreamExt, TryStreamExt, stream};
 use tokio::sync::{Mutex, watch};
 
 use super::{DeviceService, ServiceError};

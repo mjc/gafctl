@@ -1,8 +1,8 @@
 use super::*;
 use crate::backend::DeviceRegistry;
+use crate::model::unix_millis;
 use crate::test_support::{cloud_device, identity_store_fixture};
 use axum::{body::Body, http::Request};
-use gafctl_api::unix_millis;
 use http_body_util::BodyExt;
 use std::time::SystemTime;
 use tower::ServiceExt;

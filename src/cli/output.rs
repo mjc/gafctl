@@ -1,9 +1,9 @@
 use std::{fmt::Display, process::ExitCode};
 
+use crate::client::ClientError;
+use crate::model::CommandId;
 use anyhow::Result;
 use clap::ValueEnum;
-use gafctl_api::CommandId;
-use gafctl_client::ClientError;
 use serde::Serialize;
 
 #[derive(Clone, Copy, Debug, Default, ValueEnum)]

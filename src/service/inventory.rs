@@ -1,9 +1,9 @@
 use super::{DeviceService, ServiceError};
-use anyhow::Result;
-use gafctl_api::{
+use crate::model::{
     DeviceBackend, DeviceDescriptor, DeviceId, DeviceListV2Response, DeviceStateV2Response,
     EntitySource, EntitySources,
 };
+use anyhow::Result;
 impl DeviceService {
     pub(crate) async fn inventory(&self) -> DeviceListV2Response {
         DeviceListV2Response {

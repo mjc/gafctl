@@ -1,4 +1,5 @@
 use super::*;
+use crate::model::EntitySource;
 use crate::service::test_support::*;
 use crate::test_support::{cloud_device, identity_store_fixture};
 use crate::{api::router, backend::DeviceRegistry};
@@ -6,7 +7,6 @@ use axum::{
     body::Body,
     http::{Request, StatusCode},
 };
-use gafctl_api::EntitySource;
 use std::time::Duration;
 use tower::ServiceExt;
 

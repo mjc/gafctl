@@ -64,7 +64,7 @@ async fn invalid_inventory_marks_only_that_accounts_current_state_unavailable() 
         temperature_f: Some(78.0),
         humidity_percent: Some(40.0),
         settings: DeviceSettings::QuickConnect {
-            mode: gafctl_api::QuickConnectModeStatus::Automatic,
+            mode: crate::model::QuickConnectModeStatus::Automatic,
             automatic_temperature_f: Some(100),
             automatic_humidity_percent: Some(40),
             timer_duration_minutes: None,

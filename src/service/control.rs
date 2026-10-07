@@ -1,10 +1,10 @@
 use super::quickconnect::{QuickConnectControlIntent, QuickConnectControlStatus};
 use super::{DeviceService, legacy::ControlAdmissionError};
-use gafctl_api::{CommandId, is_fresh_at, unix_millis};
-use gafctl_api::{
+use crate::model::{CommandId, is_fresh_at, unix_millis};
+use crate::model::{
     ControlStatus as V2ControlStatus, DeviceControlV2Request, DeviceControlV2Response,
 };
-use gafctl_api::{DeviceBackend, DeviceCommand, DeviceId};
+use crate::model::{DeviceBackend, DeviceCommand, DeviceId};
 use std::{
     collections::{HashMap, VecDeque},
     sync::Arc,

@@ -1,10 +1,10 @@
 use std::time::SystemTime;
 
-use gafctl_api::{
+use crate::model::{
     DeviceBackend, DeviceDiagnostics, DeviceSettings, DeviceState, LegacyMode, StateProvenance,
     unix_millis,
 };
-use gafctl_protocol::{DeviceSnapshot, FanState, OperatingMode};
+use crate::protocol::{DeviceSnapshot, FanState, OperatingMode};
 
 pub(crate) fn project_snapshot(snapshot: &DeviceSnapshot) -> DeviceState {
     let mode = snapshot.mode.decoded().ok();

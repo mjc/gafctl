@@ -4,8 +4,8 @@ use std::{
     time::Duration,
 };
 
+use crate::model::{CommandId, DeviceControlV2Request, DeviceControlV2Response};
 use futures_util::{StreamExt, stream};
-use gafctl_api::{CommandId, DeviceControlV2Request, DeviceControlV2Response};
 use serde::{Deserialize, Serialize};
 use tokio::{
     sync::{OwnedSemaphorePermit, Semaphore, mpsc, oneshot},
@@ -14,7 +14,7 @@ use tokio::{
 };
 
 use super::topics::Topics;
-use gafctl_api::DeviceId;
+use crate::model::DeviceId;
 use rumqttc_next::{AsyncClient, Publish, PublishOptions};
 
 pub(crate) const CONTROL_QUEUE_CAPACITY: usize = 8;
@@ -95,7 +95,7 @@ pub(crate) enum MqttReply {
     Control(DeviceControlV2Response),
     Refresh {
         request_id: CommandId,
-        status: gafctl_api::DeviceRefreshStatus,
+        status: crate::model::DeviceRefreshStatus,
     },
     Rejected {
         request_id: CommandId,
@@ -359,8 +359,8 @@ mod tests {
         topics::Topics,
     };
     use super::*;
-    use gafctl_api::ProxyId;
-    use gafctl_api::unix_millis;
+    use crate::model::ProxyId;
+    use crate::model::unix_millis;
     use rumqttc_next::{MqttOptions, QoS};
     use serde_json::{Value, json};
     use std::time::SystemTime;
@@ -368,9 +368,9 @@ mod tests {
     #[test]
     fn mqtt_reply_wire_format_preserves_correlation_and_kind() {
         [
-            gafctl_api::DeviceRefreshStatus::Fresh,
-            gafctl_api::DeviceRefreshStatus::Failed,
-            gafctl_api::DeviceRefreshStatus::Superseded,
+            crate::model::DeviceRefreshStatus::Fresh,
+            crate::model::DeviceRefreshStatus::Failed,
+            crate::model::DeviceRefreshStatus::Superseded,
         ]
         .into_iter()
         .for_each(|status| {
@@ -688,11 +688,11 @@ mod tests {
                     let reply = match kind {
                         RequestKind::Control => MqttReply::Control(DeviceControlV2Response {
                             request_id: work.request.request_id().as_str().to_owned(),
-                            status: gafctl_api::ControlStatus::Confirmed,
+                            status: crate::model::ControlStatus::Confirmed,
                         }),
                         RequestKind::Refresh => MqttReply::Refresh {
                             request_id: work.request.request_id().clone(),
-                            status: gafctl_api::DeviceRefreshStatus::Fresh,
+                            status: crate::model::DeviceRefreshStatus::Fresh,
                         },
                     };
                     work.reply.send(reply).ok().expect("reply receiver ended");

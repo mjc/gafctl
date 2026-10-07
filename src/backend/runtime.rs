@@ -1,6 +1,6 @@
 #[cfg(feature = "mqtt")]
-use gafctl_api::DeviceStateV2Response;
-use gafctl_api::{DeviceInventoryStatus, DeviceState, unix_millis};
+use crate::model::DeviceStateV2Response;
+use crate::model::{DeviceInventoryStatus, DeviceState, unix_millis};
 use std::{
     sync::{
         Arc,
@@ -23,13 +23,14 @@ pub struct DeviceRuntime {
     refresh: Mutex<Option<RefreshReceiver>>,
 }
 
-pub(crate) type RefreshReceiver = watch::Receiver<Option<Arc<gafctl_api::DeviceRefreshV2Response>>>;
+pub(crate) type RefreshReceiver =
+    watch::Receiver<Option<Arc<crate::model::DeviceRefreshV2Response>>>;
 
 pub(crate) enum RefreshReservation {
     Join(RefreshReceiver),
     Execute {
         receiver: RefreshReceiver,
-        completion: watch::Sender<Option<Arc<gafctl_api::DeviceRefreshV2Response>>>,
+        completion: watch::Sender<Option<Arc<crate::model::DeviceRefreshV2Response>>>,
     },
 }
 
@@ -197,7 +198,7 @@ impl DeviceRuntime {
     #[cfg(feature = "mqtt")]
     pub(crate) async fn matches_response_at(
         &self,
-        response: &gafctl_api::DeviceStateV2Response,
+        response: &crate::model::DeviceStateV2Response,
         now_unix_ms: Option<u64>,
         error_override: Option<&str>,
         inventory_unavailable: bool,
@@ -368,8 +369,8 @@ fn state_is_fresh(state: &DeviceState, now_unix_ms: u64) -> bool {
 mod tests {
     use super::super::{DeviceRegistry, test_support::*};
     use super::*;
+    use crate::model::{DeviceSettings, QuickConnectModeStatus};
     use crate::test_support::{cloud_device, identity_store_fixture};
-    use gafctl_api::{DeviceSettings, QuickConnectModeStatus};
     async fn assert_observation(
         runtime: &DeviceRuntime,
         state: Option<DeviceState>,

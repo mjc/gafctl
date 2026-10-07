@@ -47,14 +47,14 @@ in {
     ++ lib.optionals linux [dbus];
 
   tasks."check:fmt".exec = "cargo fmt --all -- --check";
-  tasks."check:clippy".exec = "cargo clippy --workspace --all-targets --all-features --locked -- -D warnings";
-  tasks."check:clippy-cli".exec = "cargo clippy --package gafctl --all-targets --no-default-features --features cli --locked -- -D warnings";
-  tasks."check:clippy-http".exec = "cargo clippy --package gafctl --all-targets --no-default-features --features http --locked -- -D warnings";
-  tasks."check:no-features".exec = "cargo check --package gafctl --all-targets --no-default-features --locked";
-  tasks."check:test".exec = "cargo nextest run --workspace --all-targets --all-features --locked --status-level fail --final-status-level fail";
-  tasks."check:cli-bin".exec = "cargo nextest run --package gafctl --no-default-features --features cli --lib --bin gafctl --locked --status-level fail --final-status-level fail";
-  tasks."check:http".exec = "cargo nextest run --package gafctl --all-targets --no-default-features --features http --locked --status-level fail --final-status-level fail";
-  tasks."check:doc".exec = "cargo test --workspace --doc --locked";
+  tasks."check:clippy".exec = "cargo clippy --all-targets --all-features --locked -- -D warnings";
+  tasks."check:clippy-cli".exec = "cargo clippy --all-targets --no-default-features --features cli --locked -- -D warnings";
+  tasks."check:clippy-http".exec = "cargo clippy --all-targets --no-default-features --features http --locked -- -D warnings";
+  tasks."check:no-features".exec = "cargo check --all-targets --no-default-features --locked";
+  tasks."check:test".exec = "cargo nextest run --all-targets --all-features --locked --status-level fail --final-status-level fail";
+  tasks."check:cli-bin".exec = "cargo nextest run --no-default-features --features cli --lib --bin gafctl --locked --status-level fail --final-status-level fail";
+  tasks."check:http".exec = "cargo nextest run --all-targets --no-default-features --features http --locked --status-level fail --final-status-level fail";
+  tasks."check:doc".exec = "cargo test --doc --locked";
   tasks."check:python-format".exec = "ruff format --check custom_components tests/*.py packaging";
   tasks."check:python-types".exec = "mypy custom_components/gafctl/client.py custom_components/gafctl/models.py custom_components/gafctl/controls.py";
   tasks."check:python-lint".exec = "ruff check custom_components tests/*.py packaging";
@@ -70,7 +70,7 @@ in {
       trap 'rm -rf "$registry_dir"' EXIT
       export TMPDIR="$registry_dir"
       export GAFCTL_DISCOVERY_FIXTURE="$registry_dir/discovery.json"
-      cargo nextest run --package gafctl --all-features --locked \
+      cargo nextest run --all-features --locked \
         -E 'test(namespaced_templates_preserve_unknown_readings_and_freshness)' --status-level fail --final-status-level fail
       GAFCTL_HA_SKIP_PIP=1 ${registryPython}/bin/python tests/test_homeassistant_registry.py
     '';

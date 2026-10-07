@@ -1,5 +1,5 @@
-use gafctl_api::LegacyTimerMinutes;
-use gafctl_protocol::{
+use crate::model::LegacyTimerMinutes;
+use crate::protocol::{
     AutomaticThresholds, ControlCommand, DeviceSnapshot, FanState, HumidityTenthsPercent, Minutes,
     OperatingMode, TemperatureTenthsF,
 };
@@ -223,8 +223,8 @@ impl TimerObservation {
 
     fn automatic_command(&self) -> Option<ControlCommand> {
         crate::legacy_control::prepare_control(
-            gafctl_api::DeviceCommand::LegacyMode {
-                mode: gafctl_api::LegacyControlMode::Automatic,
+            crate::model::DeviceCommand::LegacyMode {
+                mode: crate::model::LegacyControlMode::Automatic,
             },
             Some(AutomaticThresholds {
                 temperature: TemperatureTenthsF::new(self.temperature),

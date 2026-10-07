@@ -161,7 +161,7 @@ pub(super) fn observed_client(
 mod tests {
     use super::super::test_support::{config, receive_topic, start_native_broker};
     use super::*;
-    use gafctl_api::ProxyId;
+    use crate::model::ProxyId;
     use tokio::time::timeout;
 
     #[tokio::test]

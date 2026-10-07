@@ -1,6 +1,10 @@
 use super::quickconnect::QuickConnectBackend;
 use super::*;
 use crate::api::router;
+use crate::model::DeviceId;
+#[cfg(feature = "mqtt")]
+use crate::model::unix_millis;
+use crate::protocol::DeviceSnapshot;
 use crate::test_support::{cloud_device, identity_store_fixture};
 use axum::{
     Json, Router,
@@ -10,10 +14,6 @@ use axum::{
     routing::{get, post},
 };
 use futures_util::{StreamExt, stream};
-use gafctl_api::DeviceId;
-#[cfg(feature = "mqtt")]
-use gafctl_api::unix_millis;
-use gafctl_protocol::DeviceSnapshot;
 use http_body_util::BodyExt;
 use std::time::{Duration, Instant, SystemTime};
 use tokio_util::task::AbortOnDropHandle;
@@ -103,7 +103,7 @@ pub(super) async fn cloud_poll_fixture(
 }
 
 pub(super) async fn mock_quickconnect_client() -> (
-    gafctl_quickconnect::QuickConnectClient,
+    crate::quickconnect::QuickConnectClient,
     AbortOnDropHandle<()>,
 ) {
     let app = Router::new()
@@ -114,7 +114,7 @@ pub(super) async fn mock_quickconnect_client() -> (
 }
 
 pub(super) async fn mock_duplicate_inventory_client() -> (
-    gafctl_quickconnect::QuickConnectClient,
+    crate::quickconnect::QuickConnectClient,
     AbortOnDropHandle<()>,
 ) {
     let app = Router::new()
@@ -239,14 +239,14 @@ pub(super) async fn refresh_fixture_detail(
 
 pub(super) fn snapshot_at(started_at: Instant, observed_at: SystemTime) -> DeviceSnapshot {
     DeviceSnapshot::from_frames_at(
-        gafctl_protocol::Frame::from_bytes(bytes::Bytes::from_static(
+        crate::protocol::Frame::from_bytes(bytes::Bytes::from_static(
             b"#idr030000private-suffix\n",
         ))
         .unwrap(),
-        gafctl_protocol::Frame::from_bytes(bytes::Bytes::from_static(b"#dmraf\n")).unwrap(),
-        gafctl_protocol::Frame::from_bytes(bytes::Bytes::from_static(b"#sdr03ca00aa\n")).unwrap(),
-        gafctl_protocol::Frame::from_bytes(bytes::Bytes::from_static(b"#atr041a012c\n")).unwrap(),
-        gafctl_protocol::Frame::from_bytes(bytes::Bytes::from_static(b"#ttr00000000\n")).unwrap(),
+        crate::protocol::Frame::from_bytes(bytes::Bytes::from_static(b"#dmraf\n")).unwrap(),
+        crate::protocol::Frame::from_bytes(bytes::Bytes::from_static(b"#sdr03ca00aa\n")).unwrap(),
+        crate::protocol::Frame::from_bytes(bytes::Bytes::from_static(b"#atr041a012c\n")).unwrap(),
+        crate::protocol::Frame::from_bytes(bytes::Bytes::from_static(b"#ttr00000000\n")).unwrap(),
         observed_at,
         started_at,
     )

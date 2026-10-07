@@ -3,9 +3,9 @@ use std::{
     io::{self, Write},
 };
 
+use crate::bluetooth::{DiscoveredDevice, ProbeResult};
 use crate::control_display::{ControlReadbackDisplay, ModeReadbackDisplay};
-use gafctl_bluetooth::{DiscoveredDevice, ProbeResult};
-use gafctl_protocol::{Acknowledgement, ControlOutcome, DeviceSnapshot, ReadCommand};
+use crate::protocol::{Acknowledgement, ControlOutcome, DeviceSnapshot, ReadCommand};
 
 use crate::stdout::write_stdout;
 
@@ -67,7 +67,7 @@ fn write_probe_result(
                 eprintln!("state readback unavailable after control acknowledgement: {error}");
             }
             print_discovery_failures(&result.discovery_failures);
-            if let gafctl_bluetooth::DisconnectOutcome::Failed(error) = &result.disconnect {
+            if let crate::bluetooth::DisconnectOutcome::Failed(error) = &result.disconnect {
                 eprintln!("BLE query succeeded, but disconnect failed: {error}");
             }
         }
@@ -75,7 +75,7 @@ fn write_probe_result(
     Ok(())
 }
 
-fn print_discovery_failures(failures: &[gafctl_bluetooth::DiscoveryFailure]) {
+fn print_discovery_failures(failures: &[crate::bluetooth::DiscoveryFailure]) {
     failures.iter().for_each(|failure| {
         eprintln!(
             "BLE properties unavailable for {}: {}",
@@ -184,7 +184,7 @@ impl fmt::Display for ReplyPayload<'_> {
 mod tests {
     use super::*;
 
-    use gafctl_protocol::{
+    use crate::protocol::{
         AutomaticThresholds, ControlReadback, HumidityTenthsPercent, Minutes, PayloadError,
         Readback, ReadbackError, ReadbackMatch, TemperatureTenthsF, TimerState,
     };

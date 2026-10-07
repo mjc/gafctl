@@ -1,16 +1,16 @@
 use super::DeviceService;
 use super::control::{V2_CONTROL_MAX_AGE, v2_request_is_fresh_at};
 use crate::backend::DeviceRuntime;
-use crate::timed_run::{TimedRun, TimerAction, TimerConfiguration, TimerObservation};
-use anyhow::Result;
-use gafctl_api::unix_millis;
-use gafctl_api::{ControlStatus as V2ControlStatus, DeviceRefreshStatus};
-use gafctl_api::{DeviceCommand, DeviceState};
-use gafctl_bluetooth::{
+use crate::bluetooth::{
     DisconnectOutcome, ProbeClient, ProbeError, ProbeErrorKind, ProbeMode, ProbeOptions,
     ProbeResult, QueryResult,
 };
-use gafctl_protocol::{DeviceSnapshot, StateReconciler};
+use crate::model::unix_millis;
+use crate::model::{ControlStatus as V2ControlStatus, DeviceRefreshStatus};
+use crate::model::{DeviceCommand, DeviceState};
+use crate::protocol::{DeviceSnapshot, StateReconciler};
+use crate::timed_run::{TimedRun, TimerAction, TimerConfiguration, TimerObservation};
+use anyhow::Result;
 use std::{
     sync::Arc,
     time::{Duration, SystemTime},
@@ -71,13 +71,13 @@ impl LegacyBleRuntime {
         self.ble_client.begin_shutdown();
     }
 
-    pub(super) async fn wait_until_idle(&self) -> Result<(), gafctl_bluetooth::ProbeError> {
+    pub(super) async fn wait_until_idle(&self) -> Result<(), crate::bluetooth::ProbeError> {
         self.ble_client.wait_until_idle().await
     }
 
     pub(super) async fn decorate_state_response(
         &self,
-        response: &mut gafctl_api::DeviceStateV2Response,
+        response: &mut crate::model::DeviceStateV2Response,
     ) {
         let reconciler = self.reconciler.read().await;
         let poll_error = reconciler.last_error().map(str::to_owned);
@@ -97,7 +97,7 @@ impl LegacyBleRuntime {
     #[cfg(feature = "mqtt")]
     pub(super) async fn state_response_matches(
         &self,
-        response: &gafctl_api::DeviceStateV2Response,
+        response: &crate::model::DeviceStateV2Response,
         now_unix_ms: Option<u64>,
     ) -> bool {
         let reconciler = self.reconciler.read().await;
@@ -194,7 +194,7 @@ impl LegacyBleRuntime {
         &self,
         state: &DeviceService,
         command: DeviceCommand,
-    ) -> Result<(gafctl_protocol::ControlCommand, Option<TimerObservation>), ControlAdmissionError>
+    ) -> Result<(crate::protocol::ControlCommand, Option<TimerObservation>), ControlAdmissionError>
     {
         let settings = if crate::legacy_control::needs_state_read(command) {
             let poll_id = self.reconciler.write().await.begin_poll();
@@ -210,7 +210,7 @@ impl LegacyBleRuntime {
         let prepared = crate::legacy_control::prepare_control(
             command,
             settings.as_ref().map(|(thresholds, _)| *thresholds),
-            Some(gafctl_protocol::Minutes::new(timer.value())),
+            Some(crate::protocol::Minutes::new(timer.value())),
         )
         .ok_or(ControlAdmissionError::ReadbackUnavailable)?;
         Ok((prepared, settings.map(|(_, observation)| observation)))
@@ -218,11 +218,11 @@ impl LegacyBleRuntime {
 
     async fn prepare_timed_run(
         &self,
-        command: gafctl_protocol::ControlCommand,
+        command: crate::protocol::ControlCommand,
         observation: Option<&TimerObservation>,
         now_ms: u64,
     ) -> Result<Option<TimedRun>, ControlAdmissionError> {
-        let gafctl_protocol::ControlCommand::SetTimer(minutes) = command else {
+        let crate::protocol::ControlCommand::SetTimer(minutes) = command else {
             return Ok(None);
         };
         if minutes.value() == 0 {
@@ -306,7 +306,7 @@ impl LegacyBleRuntime {
     async fn execute_control_locked(
         &self,
         state: &DeviceService,
-        command: gafctl_protocol::ControlCommand,
+        command: crate::protocol::ControlCommand,
         deadline: tokio::time::Instant,
     ) -> Result<bool, ControlAdmissionError> {
         let poll_id = self.reconciler.write().await.begin_poll();
@@ -330,12 +330,12 @@ impl LegacyBleRuntime {
 
     async fn probe(
         &self,
-        command: Option<gafctl_protocol::ControlCommand>,
+        command: Option<crate::protocol::ControlCommand>,
     ) -> Result<ProbeResult, ProbeError> {
         self.ble_client.probe(self.probe_options(command)).await
     }
 
-    fn probe_options(&self, command: Option<gafctl_protocol::ControlCommand>) -> ProbeOptions {
+    fn probe_options(&self, command: Option<crate::protocol::ControlCommand>) -> ProbeOptions {
         ProbeOptions {
             scan_duration: Duration::from_secs(5),
             response_timeout: Duration::from_secs(3),
@@ -428,11 +428,11 @@ enum ControlStatus {
 
 impl ControlStatus {
     fn from_readback(
-        control: Option<&gafctl_protocol::ControlOutcome>,
+        control: Option<&crate::protocol::ControlOutcome>,
         state_error: Option<String>,
     ) -> Self {
         match (
-            control.is_some_and(gafctl_protocol::ControlOutcome::is_confirmed),
+            control.is_some_and(crate::protocol::ControlOutcome::is_confirmed),
             state_error,
         ) {
             (true, _) => Self::Confirmed,
@@ -536,7 +536,7 @@ fn project_legacy_snapshot(snapshot: &DeviceSnapshot) -> Option<DeviceState> {
 
 fn probe_control_settings(
     result: &Result<ProbeResult, ProbeError>,
-) -> Option<(gafctl_protocol::AutomaticThresholds, TimerObservation)> {
+) -> Option<(crate::protocol::AutomaticThresholds, TimerObservation)> {
     let Ok(ProbeResult::Queried { result, .. }) = result else {
         return None;
     };

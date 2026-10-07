@@ -1,6 +1,6 @@
 use serde_json::{Value, json};
 
-use gafctl_api::{CommandCapability, DeviceBackend, DeviceDescriptor, DeviceId, EntitySource};
+use crate::model::{CommandCapability, DeviceBackend, DeviceDescriptor, DeviceId, EntitySource};
 
 use super::topics::Topics;
 
@@ -613,7 +613,7 @@ fn switch_configs(device: &DeviceDescriptor) -> impl Iterator<Item = (String, Va
 mod tests {
     use super::super::test_support::mqtt_device;
     use super::*;
-    use gafctl_api::ProxyId;
+    use crate::model::ProxyId;
     use std::collections::HashSet;
 
     fn mqtt_ble() -> DeviceDescriptor {

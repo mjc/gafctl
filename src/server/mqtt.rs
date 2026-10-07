@@ -45,8 +45,8 @@ pub(crate) async fn start(service: &mut DeviceService, config: MqttConfig) -> Re
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::{CommandId, DeviceRefreshStatus, unix_millis};
     use crate::service::test_support::refresh_fixture;
-    use gafctl_api::{CommandId, DeviceRefreshStatus, unix_millis};
     use std::time::SystemTime;
     use tokio::sync::mpsc;
 

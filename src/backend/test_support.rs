@@ -1,5 +1,5 @@
 use super::*;
-use gafctl_api::{
+use crate::model::{
     DeviceBackend, DeviceSettings, DeviceState, QuickConnectModeStatus, StateProvenance,
 };
 

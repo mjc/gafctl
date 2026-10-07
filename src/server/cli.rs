@@ -4,12 +4,12 @@ use std::{net::SocketAddr, path::PathBuf};
 use super::config::{ServerConfig, read_quickconnect_config};
 #[cfg(feature = "mqtt")]
 use super::config::{environment_value, mqtt_config};
-use anyhow::{Context, Result, bail};
-use clap::{Args, CommandFactory, Parser, Subcommand};
-use gafctl_bluetooth::{ProbeMode, ProbeOptions, probe};
-use gafctl_protocol::{
+use crate::bluetooth::{ProbeMode, ProbeOptions, probe};
+use crate::protocol::{
     AutomaticThresholds, ControlCommand, HumidityTenthsPercent, Minutes, TemperatureTenthsF,
 };
+use anyhow::{Context, Result, bail};
+use clap::{Args, CommandFactory, Parser, Subcommand};
 use std::process::ExitCode;
 
 use crate::arguments::DeadlineSeconds;
@@ -247,23 +247,23 @@ async fn run_ble_probe(options: BleOptions) -> Result<()> {
 
 fn control_result_confirmed(
     control_requested: bool,
-    result: &gafctl_bluetooth::ProbeResult,
+    result: &crate::bluetooth::ProbeResult,
 ) -> bool {
     let control = match result {
-        gafctl_bluetooth::ProbeResult::Queried { result, .. } => result.control.as_ref(),
-        gafctl_bluetooth::ProbeResult::NoDevices
-        | gafctl_bluetooth::ProbeResult::Discovered { .. }
-        | gafctl_bluetooth::ProbeResult::Ambiguous { .. }
-        | gafctl_bluetooth::ProbeResult::DiscoveryIncomplete { .. } => None,
+        crate::bluetooth::ProbeResult::Queried { result, .. } => result.control.as_ref(),
+        crate::bluetooth::ProbeResult::NoDevices
+        | crate::bluetooth::ProbeResult::Discovered { .. }
+        | crate::bluetooth::ProbeResult::Ambiguous { .. }
+        | crate::bluetooth::ProbeResult::DiscoveryIncomplete { .. } => None,
     };
     control_status_successful(control_requested, control)
 }
 
 fn control_status_successful(
     control_requested: bool,
-    control: Option<&gafctl_protocol::ControlOutcome>,
+    control: Option<&crate::protocol::ControlOutcome>,
 ) -> bool {
-    !control_requested || control.is_some_and(gafctl_protocol::ControlOutcome::is_confirmed)
+    !control_requested || control.is_some_and(crate::protocol::ControlOutcome::is_confirmed)
 }
 
 #[cfg(test)]
@@ -484,14 +484,14 @@ mod tests {
     #[test]
     fn only_requested_controls_require_a_queried_device() {
         [
-            gafctl_bluetooth::ProbeResult::NoDevices,
-            gafctl_bluetooth::ProbeResult::Discovered {
+            crate::bluetooth::ProbeResult::NoDevices,
+            crate::bluetooth::ProbeResult::Discovered {
                 devices: Vec::new(),
             },
-            gafctl_bluetooth::ProbeResult::Ambiguous {
+            crate::bluetooth::ProbeResult::Ambiguous {
                 devices: Vec::new(),
             },
-            gafctl_bluetooth::ProbeResult::DiscoveryIncomplete {
+            crate::bluetooth::ProbeResult::DiscoveryIncomplete {
                 devices: Vec::new(),
                 failures: Vec::new(),
             },
@@ -530,9 +530,9 @@ mod tests {
     fn timer_control_outcome(
         acknowledgement: &'static [u8],
         timer: &'static [u8],
-    ) -> gafctl_protocol::ControlOutcome {
+    ) -> crate::protocol::ControlOutcome {
         let snapshot = timer_snapshot(timer);
-        gafctl_protocol::ControlOutcome::from_response(
+        crate::protocol::ControlOutcome::from_response(
             ControlCommand::SetTimer(Minutes::new(2)),
             protocol_frame(acknowledgement),
             Some(&snapshot),
@@ -540,7 +540,7 @@ mod tests {
         .unwrap()
     }
 
-    fn timer_snapshot(timer: &'static [u8]) -> gafctl_protocol::DeviceSnapshot {
+    fn timer_snapshot(timer: &'static [u8]) -> crate::protocol::DeviceSnapshot {
         let [identity, mode, sensors, thresholds, timer] = [
             b"#idr030000\n".as_slice(),
             b"#dmrtn\n",
@@ -549,11 +549,11 @@ mod tests {
             timer,
         ]
         .map(protocol_frame);
-        gafctl_protocol::DeviceSnapshot::from_frames(identity, mode, sensors, thresholds, timer)
+        crate::protocol::DeviceSnapshot::from_frames(identity, mode, sensors, thresholds, timer)
             .unwrap()
     }
 
-    fn protocol_frame(payload: &'static [u8]) -> gafctl_protocol::Frame<'static> {
-        gafctl_protocol::Frame::from_bytes(bytes::Bytes::from_static(payload)).unwrap()
+    fn protocol_frame(payload: &'static [u8]) -> crate::protocol::Frame<'static> {
+        crate::protocol::Frame::from_bytes(bytes::Bytes::from_static(payload)).unwrap()
     }
 }

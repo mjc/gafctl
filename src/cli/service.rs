@@ -1,12 +1,12 @@
 use std::{process::ExitCode, str::FromStr, time::Duration};
 
-use anyhow::Result;
-use clap::{Args, Subcommand, ValueEnum};
-use gafctl_api::{
+use crate::client::{Client, ClientError, ClientOptions, ServerUrl};
+use crate::model::{
     AutomaticHumidityPercent, AutomaticTemperatureF, CommandId, DeviceCommand, DeviceId,
     QuickConnectMode,
 };
-use gafctl_client::{Client, ClientError, ClientOptions, ServerUrl};
+use anyhow::Result;
+use clap::{Args, Subcommand, ValueEnum};
 use serde::Serialize;
 
 use crate::arguments::DeadlineSeconds;
@@ -241,7 +241,7 @@ impl ControlOptions {
                 #[derive(Serialize)]
                 struct ControlOutput<'a> {
                     #[serde(flatten)]
-                    response: &'a gafctl_api::DeviceControlV2Response,
+                    response: &'a crate::model::DeviceControlV2Response,
                     http_status: u16,
                 }
                 self.service.format.write(
@@ -347,9 +347,9 @@ mod tests {
 
     #[test]
     fn cli_targets_carry_validated_api_types() {
-        let temperature: gafctl_api::AutomaticTemperatureF =
+        let temperature: crate::model::AutomaticTemperatureF =
             "105".parse::<TargetTemperatureF>().unwrap().0;
-        let humidity: gafctl_api::AutomaticHumidityPercent =
+        let humidity: crate::model::AutomaticHumidityPercent =
             "40".parse::<TargetHumidityPercent>().unwrap().0;
         assert_eq!(temperature.value(), 105);
         assert_eq!(humidity.value(), 40);

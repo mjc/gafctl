@@ -39,8 +39,8 @@ Use `gafctl-server probe ble --help` for diagnostics; raw `u16` controls have
 not been tested across their full range.
 
 Generate completions with `gafctl completions bash`, `zsh`, `fish`, `elvish`, or
-`powershell`. The Rust client is `gafctl-client::Client`; shared models live in
-`gafctl-api`. `prepare_control` checks capabilities, and consuming `submit`
+`powershell`. The Rust client is `gafctl::client::Client`; shared models live in
+`gafctl::model`. `prepare_control` checks capabilities, and consuming `submit`
 sends the prepared command once.
 
 ## Home Assistant behavior

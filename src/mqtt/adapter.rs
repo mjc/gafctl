@@ -1,6 +1,6 @@
+use crate::model::DeviceId;
 use crate::service::{DeviceService, ServiceError, control::v2_request_is_fresh};
 use futures_util::StreamExt;
-use gafctl_api::DeviceId;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 
@@ -65,11 +65,11 @@ async fn process_mqtt_refresh(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::{CommandId, DeviceRefreshStatus, unix_millis};
     use crate::{
         mqtt::{MqttDeviceWork, MqttRefreshRequest, MqttReply, MqttRequest, MqttRequestIntake},
         service::test_support::refresh_fixture,
     };
-    use gafctl_api::{CommandId, DeviceRefreshStatus, unix_millis};
     use std::{sync::atomic::Ordering, time::SystemTime};
 
     #[tokio::test]

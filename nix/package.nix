@@ -27,7 +27,6 @@ let
       ../THIRD-PARTY-NOTICES.txt
       ../LICENSE-RUST-STDLIB.html
       ../src
-      ../crates
       ../tests
       ../fixtures
     ];

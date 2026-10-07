@@ -1,8 +1,8 @@
 use std::{net::SocketAddr, path::PathBuf};
 
+use crate::quickconnect::{AccountRole, Credentials};
 use crate::service::quickconnect::QuickConnectRuntimeConfig;
 use anyhow::{Context, Result, bail};
-use gafctl_quickconnect::{AccountRole, Credentials};
 
 pub(crate) struct ServerConfig {
     pub(crate) device_id: Option<String>,
@@ -194,7 +194,7 @@ mod tests {
     #[test]
     fn restored_mqtt_ownership_requires_an_available_discovery_publisher() {
         use crate::backend::DeviceRegistry;
-        use gafctl_api::{DeviceId, EntitySource};
+        use crate::model::{DeviceId, EntitySource};
 
         let (_directory, path) = crate::test_support::identity_store_fixture();
         let mut registry = DeviceRegistry::load(&path).unwrap();
@@ -227,7 +227,7 @@ mod tests {
     #[test]
     fn restored_cloud_mqtt_ownership_is_scoped_to_the_configured_account() {
         use crate::backend::DeviceRegistry;
-        use gafctl_api::EntitySource;
+        use crate::model::EntitySource;
 
         let (_directory, path) = crate::test_support::identity_store_fixture();
         let mut registry = DeviceRegistry::load(&path).unwrap();

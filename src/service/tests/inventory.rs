@@ -43,7 +43,7 @@ async fn source_route_persists_owner_and_rejects_split_or_unconfigured_mqtt() {
         assert_eq!(response.status(), expected, "{sources}");
         if expected == StatusCode::OK {
             let body = response.into_body().collect().await.unwrap().to_bytes();
-            let descriptor: gafctl_api::DeviceDescriptor = serde_json::from_slice(&body).unwrap();
+            let descriptor: crate::model::DeviceDescriptor = serde_json::from_slice(&body).unwrap();
             assert_eq!(descriptor.id, DeviceId::configured_ble());
         }
     }
