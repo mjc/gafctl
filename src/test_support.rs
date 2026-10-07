@@ -1,5 +1,5 @@
+use crate::quickconnect::{AccountRole, Credentials, QuickConnectClient, QuickConnectConfig};
 use axum::Router;
-use gafctl_quickconnect::{AccountRole, Credentials, QuickConnectClient, QuickConnectConfig};
 use tokio_util::task::AbortOnDropHandle;
 
 pub(crate) fn cloud_device(provider_id: &str, name: &str) -> crate::backend::CloudDeviceInput {
@@ -29,7 +29,7 @@ pub(crate) fn identity_store_fixture() -> (tempfile::TempDir, std::path::PathBuf
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("target/test-fixtures");
     std::fs::create_dir_all(&root).unwrap();
     let directory = tempfile::Builder::new()
-        .prefix("gafctl-api-identities-")
+        .prefix("gafctl-identities-")
         .tempdir_in(root)
         .unwrap();
     let path = directory.path().join("identities.json");

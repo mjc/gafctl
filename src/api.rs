@@ -1,3 +1,9 @@
+use crate::model::CommandId;
+use crate::model::{
+    ControlStatus as V2ControlStatus, DeviceControlV2Request, DeviceControlV2Response,
+    DeviceListV2Response, DeviceStateV2Response,
+};
+use crate::model::{DeviceDescriptor, DeviceId, EntitySources};
 use crate::service::{DeviceService, ServiceError};
 use axum::{
     Json, Router,
@@ -6,12 +12,6 @@ use axum::{
     response::{IntoResponse, Response},
     routing::{get, post, put},
 };
-use gafctl_api::CommandId;
-use gafctl_api::{
-    ControlStatus as V2ControlStatus, DeviceControlV2Request, DeviceControlV2Response,
-    DeviceListV2Response, DeviceStateV2Response,
-};
-use gafctl_api::{DeviceDescriptor, DeviceId, EntitySources};
 use serde::Serialize;
 
 pub(crate) fn router(state: DeviceService) -> Router {

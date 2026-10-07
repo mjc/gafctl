@@ -3,12 +3,12 @@ use std::{
     time::{Duration, SystemTime},
 };
 
-use crate::service::publication::StateSnapshot;
-use futures_util::{StreamExt, future, stream};
-use gafctl_api::{
+use crate::model::{
     DeviceInventoryStatus, DeviceSettings, DeviceState, DeviceStateV2Response,
     QuickConnectModeStatus, StateProvenance, unix_millis,
 };
+use crate::service::publication::StateSnapshot;
+use futures_util::{StreamExt, future, stream};
 use rumqttc_next::{IncomingPacketSizeLimit, MqttOptions, MqttOptionsBuilder, Publish};
 use serde_json::json;
 use tokio::{
@@ -19,7 +19,7 @@ use tokio_stream::wrappers::UnboundedReceiverStream;
 
 use super::MqttConfig;
 pub(super) use super::connection::observed_client;
-use gafctl_api::{
+use crate::model::{
     DeviceBackend, DeviceCapabilities, DeviceDescriptor, DeviceId, EntitySource, ProxyId,
 };
 

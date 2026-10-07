@@ -50,7 +50,7 @@ async fn refresh_detail_results_report_superseded_and_preserve_newer_control_sta
 }
 
 async fn superseded_detail_result_is_ignored(failed: bool, polling: bool) {
-    use gafctl_api::{DeviceSettings, QuickConnectModeStatus, StateProvenance};
+    use crate::model::{DeviceSettings, QuickConnectModeStatus, StateProvenance};
     use std::sync::atomic::Ordering::SeqCst;
 
     let (state, id, fixture, _server, _directory) = refresh_fixture().await;
@@ -96,7 +96,7 @@ async fn superseded_detail_result_is_ignored(failed: bool, polling: bool) {
         diagnostics: None,
         provenance: StateProvenance {
             backend: DeviceBackend::QuickConnect,
-            fetched_at_unix_ms: gafctl_api::unix_millis(std::time::SystemTime::now()),
+            fetched_at_unix_ms: crate::model::unix_millis(std::time::SystemTime::now()),
             observed_at_unix_ms: None,
         },
     };
@@ -115,7 +115,7 @@ async fn superseded_detail_result_is_ignored(failed: bool, polling: bool) {
     assert_eq!(snapshot.state, Some(confirmed));
     assert_eq!(
         snapshot.inventory_status,
-        gafctl_api::DeviceInventoryStatus::Present
+        crate::model::DeviceInventoryStatus::Present
     );
     assert_eq!(snapshot.last_error, None);
 }

@@ -638,20 +638,21 @@ dependencies = [
  "assert_cmd",
  "axum",
  "backon",
+ "base64",
+ "bluez-async",
+ "btleplug",
  "bytes",
  "clap",
  "clap_complete",
+ "dbus",
  "futures-util",
- "gafctl-api",
- "gafctl-bluetooth",
- "gafctl-client",
- "gafctl-protocol",
- "gafctl-quickconnect",
  "http-body-util",
+ "httpdate",
  "reqwest",
  "rumqttc-next",
  "serde",
  "serde_json",
+ "strum",
  "tempfile",
  "thiserror",
  "tokio",
@@ -661,80 +662,6 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "uuid",
-]
-
-[[package]]
-name = "gafctl-api"
-version = "0.1.0"
-dependencies = [
- "gafctl-protocol",
- "serde",
- "serde_json",
- "strum",
- "thiserror",
- "uuid",
-]
-
-[[package]]
-name = "gafctl-bluetooth"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "backon",
- "bluez-async",
- "btleplug",
- "bytes",
- "dbus",
- "futures-util",
- "gafctl-protocol",
- "serde_json",
- "thiserror",
- "tokio",
- "tokio-util",
- "tracing",
- "uuid",
-]
-
-[[package]]
-name = "gafctl-client"
-version = "0.1.0"
-dependencies = [
- "axum",
- "bytes",
- "futures-util",
- "gafctl-api",
- "reqwest",
- "serde",
- "serde_json",
- "thiserror",
- "tokio",
- "tokio-util",
-]
-
-[[package]]
-name = "gafctl-protocol"
-version = "0.1.0"
-dependencies = [
- "bytes",
- "thiserror",
-]
-
-[[package]]
-name = "gafctl-quickconnect"
-version = "0.1.0"
-dependencies = [
- "axum",
- "backon",
- "base64",
- "bytes",
- "futures-util",
- "httpdate",
- "reqwest",
- "serde",
- "serde_json",
- "thiserror",
- "tokio",
- "tokio-util",
 ]
 
 [[package]]

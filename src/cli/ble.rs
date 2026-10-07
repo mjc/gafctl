@@ -1,14 +1,14 @@
 use std::{fmt, process::ExitCode, str::FromStr, time::Duration};
 
-use anyhow::Result;
-use clap::{Args, Subcommand};
-use gafctl_api::{ControlPreset, DeviceState};
-use gafctl_bluetooth::{
+use crate::bluetooth::{
     DisconnectOutcome, DiscoveredDevice, ProbeOptions, ProbeResult, QueryResult, probe,
 };
-use gafctl_protocol::{
+use crate::model::{ControlPreset, DeviceState};
+use crate::protocol::{
     Acknowledgement, ControlOutcome, ControlReadback, ModeReadback, ReadbackMatch,
 };
+use anyhow::Result;
+use clap::{Args, Subcommand};
 use serde::Serialize;
 
 use crate::arguments::DeadlineSeconds;
@@ -77,8 +77,8 @@ enum BleControl {
 }
 
 impl BleCommand {
-    fn into_probe(self) -> (BleIntent, BleSettings, gafctl_bluetooth::ProbeOptions) {
-        use gafctl_bluetooth::{ProbeMode, ProbeOptions};
+    fn into_probe(self) -> (BleIntent, BleSettings, crate::bluetooth::ProbeOptions) {
+        use crate::bluetooth::{ProbeMode, ProbeOptions};
         let settings = self.settings;
         let (intent, mode) = match self.command {
             BleOperation::Scan => (BleIntent::Scan, ProbeMode::Scan),
@@ -305,7 +305,7 @@ fn project_control(control: &ControlOutcome) -> ControlReport {
     }
 }
 
-fn discovery_errors(failures: &[gafctl_bluetooth::DiscoveryFailure]) -> Vec<DiscoveryError> {
+fn discovery_errors(failures: &[crate::bluetooth::DiscoveryFailure]) -> Vec<DiscoveryError> {
     failures
         .iter()
         .map(|failure| DiscoveryError {
@@ -464,14 +464,14 @@ async fn run(intent: BleIntent, settings: BleSettings, options: ProbeOptions) ->
 
 #[cfg(test)]
 mod tests {
+    use crate::bluetooth::{DisconnectOutcome, QueryResult};
+    use crate::model::ControlPreset;
+    use crate::protocol::{ControlOutcome, DeviceSnapshot, Frame};
     use bytes::Bytes;
-    use gafctl_api::ControlPreset;
-    use gafctl_bluetooth::{DisconnectOutcome, QueryResult};
-    use gafctl_protocol::{ControlOutcome, DeviceSnapshot, Frame};
 
     use super::*;
+    use crate::model::DeviceId;
     use clap::Parser;
-    use gafctl_api::DeviceId;
 
     #[derive(clap::Parser)]
     struct BleParser {
@@ -531,7 +531,7 @@ mod tests {
     #[test]
     fn unsafe_discovery_outcomes_fail_and_explain_selection_in_both_formats() {
         use super::{BleIntent, project_result};
-        use gafctl_bluetooth::ProbeResult;
+        use crate::bluetooth::ProbeResult;
         use std::process::ExitCode;
 
         for (result, status, explanation) in [
@@ -589,7 +589,7 @@ mod tests {
     #[test]
     fn incomplete_discovery_preserves_peripheral_and_property_error() {
         use super::{BleIntent, project_result};
-        use gafctl_bluetooth::{DiscoveryFailure, ProbeResult};
+        use crate::bluetooth::{DiscoveryFailure, ProbeResult};
         use std::process::ExitCode;
 
         let peripheral_id = uuid::Uuid::from_u128(42);
@@ -640,7 +640,7 @@ mod tests {
     #[test]
     fn direct_outcomes_distinguish_empty_discovery_from_missing_read_and_confirmed_control() {
         use super::{BleIntent, project_result, query_succeeded};
-        use gafctl_bluetooth::ProbeResult;
+        use crate::bluetooth::ProbeResult;
         use std::process::ExitCode;
         let (_, code) = project_result(&ProbeResult::NoDevices, BleIntent::Scan, false);
         assert_eq!(code, ExitCode::SUCCESS);
@@ -706,7 +706,7 @@ mod tests {
 
     #[test]
     fn ble_preset_mapping_preserves_target_and_transport_deadlines() {
-        use gafctl_protocol::{
+        use crate::protocol::{
             AutomaticThresholds, ControlCommand, HumidityTenthsPercent, Minutes, TemperatureTenthsF,
         };
         for (name, command) in [
@@ -753,14 +753,14 @@ mod tests {
             assert_eq!(options.scan_duration, Duration::from_secs(7));
             assert_eq!(options.response_timeout, Duration::from_secs(4));
             match options.mode {
-                gafctl_bluetooth::ProbeMode::Query {
+                crate::bluetooth::ProbeMode::Query {
                     device_id,
                     control_command,
                 } => {
                     assert_eq!(device_id.as_deref(), Some("platform/id"));
                     assert_eq!(control_command, Some(command));
                 }
-                gafctl_bluetooth::ProbeMode::Scan => unreachable!("control mapped to scan"),
+                crate::bluetooth::ProbeMode::Scan => unreachable!("control mapped to scan"),
             }
         }
     }

@@ -2,7 +2,7 @@ use self::{
     control::RecentV2ControlResults, legacy::LegacyBleRuntime, quickconnect::QuickConnectBackend,
 };
 use crate::backend::DeviceRegistry;
-use gafctl_api::{DeviceId, DeviceRefreshStatus};
+use crate::model::{DeviceId, DeviceRefreshStatus};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 pub(crate) mod control;

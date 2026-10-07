@@ -1,8 +1,8 @@
 use super::{CloudDeviceInput, DeviceRegistryError};
-use crate::timed_run::TimerConfiguration;
-use gafctl_api::{
+use crate::model::{
     DeviceBackend, DeviceCapabilities, DeviceDescriptor, DeviceId, EntitySource, ProxyId,
 };
+use crate::timed_run::TimerConfiguration;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, HashSet},

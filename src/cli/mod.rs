@@ -4,9 +4,9 @@ mod service;
 
 use std::{ffi::OsString, path::PathBuf, process::Command as ProcessCommand, process::ExitCode};
 
+use crate::model::ControlPreset;
 use anyhow::Result;
 use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
-use gafctl_api::ControlPreset;
 
 use ble::BleCommand;
 use service::{ControlOptions, ServiceOptions, StateOptions};

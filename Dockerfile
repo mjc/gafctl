@@ -3,7 +3,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends build-essential
 WORKDIR /src
 COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
 COPY src ./src
-COPY crates ./crates
 RUN cargo build --release --locked --bins
 
 FROM build AS packages

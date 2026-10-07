@@ -1,9 +1,9 @@
 use super::{DeviceService, ServiceError};
 use crate::backend::{DeviceRuntime, RefreshReceiver, RefreshReservation};
-use anyhow::Result;
-use gafctl_api::{
+use crate::model::{
     DeviceBackend, DeviceId, DeviceInventoryStatus, DeviceRefreshStatus, DeviceRefreshV2Response,
 };
+use anyhow::Result;
 use std::{sync::Arc, time::Duration};
 const DEVICE_REFRESH_TIMEOUT: Duration = Duration::from_secs(270);
 

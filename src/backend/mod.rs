@@ -3,13 +3,13 @@ mod runtime;
 #[cfg(test)]
 mod test_support;
 
-use futures_util::StreamExt;
-pub use gafctl_api::DeviceInventoryStatus;
+pub use crate::model::DeviceInventoryStatus;
 #[cfg(feature = "mqtt")]
-use gafctl_api::ProxyId;
-use gafctl_api::{
+use crate::model::ProxyId;
+use crate::model::{
     DeviceBackend, DeviceCapabilities, DeviceCommand, DeviceDescriptor, DeviceId, EntitySource,
 };
+use futures_util::StreamExt;
 use identity::IdentityStore;
 pub(crate) use runtime::{DeviceRuntime, RefreshReceiver, RefreshReservation};
 use std::{
@@ -395,8 +395,8 @@ impl DeviceRegistry {
 mod tests {
     use super::test_support::*;
     use super::*;
+    use crate::model::{DeviceSettings, DeviceState, QuickConnectModeStatus};
     use crate::test_support::{cloud_device, identity_store_fixture};
-    use gafctl_api::{DeviceSettings, DeviceState, QuickConnectModeStatus};
 
     fn command_families() -> impl Iterator<Item = (DeviceCommand, DeviceBackend)> {
         [

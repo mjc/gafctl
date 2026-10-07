@@ -2,9 +2,9 @@
 name = "gafctl"
 version = "0.1.0"
 edition = "2024"
-license.workspace = true
-repository.workspace = true
-rust-version.workspace = true
+license = "MIT"
+repository = "https://github.com/mjc/gafctl"
+rust-version = "1.98.1"
 publish = false
 description = "A Rust proxy for GAF Master Flow attic fans"
 readme = "README.md"
@@ -15,111 +15,49 @@ default-run = "gafctl"
 default = ["http", "mqtt", "cli"]
 http = [
     "dep:axum",
-    "dep:backon",
+    "dep:base64",
     "dep:clap",
     "dep:clap_complete",
-    "dep:futures-util",
-    "dep:serde",
+    "dep:httpdate",
+    "dep:reqwest",
     "dep:serde_json",
-    "dep:thiserror",
-    "dep:gafctl-quickconnect",
-    "dep:uuid",
     "dep:tempfile",
     "dep:tokio-stream",
 ]
-mqtt = ["http", "dep:rumqttc_next", "dep:tokio-util", "dep:bytes"]
-cli = [
-    "dep:clap",
-    "dep:clap_complete",
-    "dep:serde",
-    "dep:serde_json",
-    "dep:thiserror",
-    "dep:gafctl-client",
-    "dep:uuid",
-]
+mqtt = ["http", "dep:rumqttc_next"]
+cli = ["dep:clap", "dep:clap_complete", "dep:reqwest", "dep:serde_json"]
 
-[lints]
-workspace = true
-
-[workspace]
-members = [
-    "crates/gafctl-api",
-    "crates/gafctl-client",
-    "crates/gafctl-protocol",
-    "crates/gafctl-bluetooth",
-    "crates/gafctl-quickconnect",
-]
-default-members = [
-    ".",
-    "crates/gafctl-api",
-    "crates/gafctl-client",
-    "crates/gafctl-protocol",
-    "crates/gafctl-bluetooth",
-    "crates/gafctl-quickconnect",
-]
-resolver = "3"
-
-[workspace.lints.clippy]
+[lints.clippy]
 disallowed_macros = "deny"
 panic = "deny"
 
-[workspace.package]
-license = "MIT"
-repository = "https://github.com/mjc/gafctl"
-rust-version = "1.98.1"
-
-[workspace.dependencies]
+[dependencies]
 anyhow = "1.0.104"
-backon = { version = "1.6.0", default-features = false }
-axum = { version = "0.8.9", default-features = false, features = ["http1", "json", "tokio", "tracing"] }
+axum = { version = "0.8.9", default-features = false, features = ["http1", "json", "tokio", "tracing"], optional = true }
+backon = { version = "1.6.0", default-features = false, features = ["std"] }
+base64 = { version = "0.23.1", optional = true }
 btleplug = "0.13.3"
 bytes = "1.12.1"
-clap = { version = "4.6.7", features = ["derive", "env"] }
-clap_complete = "4.6.11"
-assert_cmd = "2.2.2"
+clap = { version = "4.6.7", features = ["derive", "env"], optional = true }
+clap_complete = { version = "4.6.11", optional = true }
 futures-util = { version = "0.3.34", default-features = false, features = ["std", "async-await"] }
-httpdate = "1.0.3"
-http-body-util = "0.1"
+httpdate = { version = "1.0.3", optional = true }
+reqwest = { version = "0.13.5", default-features = false, features = ["json", "rustls", "stream"], optional = true }
+rumqttc_next = { package = "rumqttc-next", version = "0.34.0", default-features = false, features = ["stream"], optional = true }
 serde = { version = "1.0.229", features = ["derive"] }
-serde_json = "1.0.151"
-base64 = "0.23.1"
-thiserror = "2.0.21"
-tempfile = "3.27.0"
+serde_json = { version = "1.0.151", optional = true }
 strum = { version = "0.28.0", default-features = false, features = ["derive"] }
-tokio = { version = "1.53.1", default-features = false }
+tempfile = { version = "3.27.0", optional = true }
+thiserror = "2.0.21"
+tokio = { version = "1.53.1", default-features = false, features = ["macros", "rt-multi-thread", "net", "signal", "sync", "time"] }
 tokio-util = { version = "0.7.18", default-features = false, features = ["rt"] }
-tokio-stream = { version = "0.1.19", default-features = false, features = ["sync"] }
-tower = { version = "0.5", default-features = false }
+tokio-stream = { version = "0.1.19", default-features = false, features = ["sync", "time"], optional = true }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter", "json"] }
-rumqttc_next = { package = "rumqttc-next", version = "0.34.0", default-features = false, features = ["stream"] }
-reqwest = { version = "0.13.5", default-features = false, features = ["json", "rustls", "stream"] }
 uuid = { version = "1.26.1", features = ["v4", "serde"] }
 
-[dependencies]
-backon = { workspace = true, optional = true }
-bytes = { workspace = true, optional = true }
-futures-util = { workspace = true, optional = true }
-anyhow.workspace = true
-axum = { workspace = true, optional = true }
-clap = { workspace = true, optional = true }
-clap_complete = { workspace = true, optional = true }
-serde = { workspace = true, optional = true }
-serde_json = { workspace = true, optional = true }
-tokio = { workspace = true, features = ["macros", "rt-multi-thread", "net", "signal", "sync", "time"] }
-tracing.workspace = true
-tracing-subscriber.workspace = true
-rumqttc_next = { workspace = true, optional = true }
-tokio-util = { workspace = true, optional = true }
-tokio-stream = { workspace = true, optional = true, features = ["time"] }
-thiserror = { workspace = true, optional = true }
-uuid = { workspace = true, optional = true }
-tempfile = { workspace = true, optional = true }
-gafctl-bluetooth = { path = "crates/gafctl-bluetooth" }
-gafctl-quickconnect = { path = "crates/gafctl-quickconnect", optional = true }
-gafctl-protocol = { path = "crates/gafctl-protocol" }
-gafctl-api = { path = "crates/gafctl-api" }
-gafctl-client = { path = "crates/gafctl-client", optional = true }
+[target.'cfg(target_os = "linux")'.dependencies]
+bluez-async = "0.8.2"
 
 [[bin]]
 name = "gafctl-server"
@@ -136,14 +74,23 @@ name = "cli"
 path = "tests/cli.rs"
 required-features = ["http", "cli"]
 
+[[test]]
+name = "client_http"
+path = "tests/client_http.rs"
+required-features = ["cli"]
+
+[[test]]
+name = "quickconnect_auth"
+path = "tests/quickconnect_auth.rs"
+required-features = ["http"]
+
 [dev-dependencies]
-serde_json.workspace = true
-tokio-util.workspace = true
-tempfile.workspace = true
-tokio = { workspace = true, features = ["test-util"] }
-assert_cmd.workspace = true
-bytes.workspace = true
-http-body-util.workspace = true
-reqwest.workspace = true
-gafctl-client = { path = "crates/gafctl-client" }
-tower = { workspace = true, features = ["util"] }
+assert_cmd = "2.2.2"
+axum = { version = "0.8.9", default-features = false, features = ["http1", "json", "tokio", "tracing"] }
+http-body-util = "0.1"
+serde_json = "1.0.151"
+tokio = { version = "1.53.1", default-features = false, features = ["test-util"] }
+tower = { version = "0.5", default-features = false, features = ["util"] }
+
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+dbus = "0.9.12"

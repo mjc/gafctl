@@ -1,5 +1,5 @@
 use super::RequestKind;
-use gafctl_api::{DeviceId, ProxyId};
+use crate::model::{DeviceId, ProxyId};
 
 #[derive(Clone, Copy)]
 pub(super) struct Topics(pub(super) ProxyId);

@@ -1,5 +1,5 @@
 use super::*;
-use gafctl_api::ControlPreset;
+use crate::model::ControlPreset;
 
 const CLEAR: DeviceCommand = DeviceCommand::LegacyPreset {
     preset: ControlPreset::TimerClear,
@@ -166,7 +166,7 @@ fn v2_control_reservations_deduplicate_without_serializing_distinct_commands() {
     let request_id = CommandId::parse("same-request").unwrap();
     let other_request_id = CommandId::parse("newer-request").unwrap();
     let command = DeviceCommand::QuickConnectMode {
-        mode: gafctl_api::QuickConnectMode::Automatic,
+        mode: crate::model::QuickConnectMode::Automatic,
     };
     let sender = reservation_is_execute(history.reserve(&request_id, command)).unwrap();
     assert!(reservation_is_wait(history.reserve(&request_id, command),));

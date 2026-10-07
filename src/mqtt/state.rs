@@ -1,15 +1,15 @@
 use std::{collections::HashSet, sync::Arc};
 
+use crate::model::DeviceStateV2Response;
 use crate::service::publication::StateSnapshot;
 use bytes::Bytes;
 use futures_util::{Stream, StreamExt, TryStreamExt, future, stream};
-use gafctl_api::DeviceStateV2Response;
 use rumqttc_next::{AsyncClient, PublishOptions};
 use tokio::sync::watch;
 
 use super::{discovery, topics::Topics};
+use crate::model::{DeviceBackend, DeviceId};
 use crate::service::DeviceService;
-use gafctl_api::{DeviceBackend, DeviceId};
 
 struct StateSubscriptions {
     state: watch::Receiver<Arc<StateSnapshot>>,
@@ -393,7 +393,7 @@ mod tests {
         },
     };
     use super::*;
-    use gafctl_api::{DeviceDescriptor, EntitySource, ProxyId};
+    use crate::model::{DeviceDescriptor, EntitySource, ProxyId};
     use rumqttc_next::QoS;
     use serde_json::Value;
     use std::time::Duration;
@@ -1198,7 +1198,7 @@ mod tests {
         let mut reading_update = initial.clone();
         reading_update.publications[0].available = false;
         reading_update.publications[0].inventory_status =
-            gafctl_api::DeviceInventoryStatus::Unavailable;
+            crate::model::DeviceInventoryStatus::Unavailable;
         reading_update.publications[0].last_error = Some("reading unavailable".to_owned());
         reading_update.publications[0].state = None;
         bridge.state_updates.send_replace(Arc::new(reading_update));

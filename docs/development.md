@@ -40,7 +40,7 @@ Running the Python test directly keeps Home Assistant's requirement checks enabl
 For focused checks:
 
 ```sh
-cargo nextest run --workspace --all-targets --locked -E 'test(TEST_NAME)'
+cargo nextest run --all-targets --locked -E 'test(TEST_NAME)'
 python3 -m unittest discover -s tests -p test_gafctl_client.py
 devenv tasks run check:ha-registry
 devenv tasks run check:python-types
@@ -53,9 +53,9 @@ synthetic cloud data. Recorded device replies are in the
 
 ## Code
 
-`src/` contains the server, CLI, device coordination, HTTP, and MQTT.
-`crates/` contains the shared API/client and the Bluetooth, protocol, and
-QuickConnect libraries. `custom_components/gafctl/` is the HA integration;
+`src/` contains one Rust package with the server, CLI, device coordination, HTTP,
+and MQTT. Bluetooth, protocol, shared models, the HTTP client, and QuickConnect
+live in their own modules. `custom_components/gafctl/` is the HA integration;
 `nix/` and `packaging/` provide installations. Cloud fixtures are synthetic.
 
 Cargo defaults to `cli`, `http`, and `mqtt`; MQTT enables HTTP. Use
@@ -65,13 +65,13 @@ the CLI alone. Both binaries call the application library.
 The HA integration requires Home Assistant 2026.9.4 or newer and Python 3.14.
 API types are in `models.py`, entities in `readings.py`, and control bounds/confirmation in
 `controls.py`. The coordinator handles identity, ownership, serialization, and
-readback. For Rust callers, `gafctl-client` uses the shared `gafctl-api` types.
+readback. For Rust callers, `gafctl::client` uses the shared `gafctl::model` types.
 
 ## Optional tools
 
 ```sh
 bacon clippy
-cargo llvm-cov nextest --workspace --html
+cargo llvm-cov nextest --html
 cargo deny check advisories sources
 cargo machete
 cargo tree --duplicates

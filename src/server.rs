@@ -118,7 +118,7 @@ async fn serve_http(
         .with_graceful_shutdown(async move {
             shutdown_signal().await;
             let transport_deadline = Instant::now() + TRANSPORT_SHUTDOWN_TIMEOUT;
-            let backend_deadline = Instant::now() + gafctl_bluetooth::SHUTDOWN_DRAIN_TIMEOUT;
+            let backend_deadline = Instant::now() + crate::bluetooth::SHUTDOWN_DRAIN_TIMEOUT;
             shutdown_state.begin_backend_shutdown();
             #[cfg(feature = "mqtt")]
             if let Some(intake) = mqtt_intake {
@@ -137,7 +137,7 @@ async fn serve_http(
                 .try_recv()
                 .unwrap_or_else(|_| (
                     Instant::now() + TRANSPORT_SHUTDOWN_TIMEOUT,
-                    Instant::now() + gafctl_bluetooth::SHUTDOWN_DRAIN_TIMEOUT,
+                    Instant::now() + crate::bluetooth::SHUTDOWN_DRAIN_TIMEOUT,
                 ));
             cleanup_transports(
                 &state,
@@ -220,7 +220,7 @@ async fn poll_device(state: DeviceService, poll_interval: Duration) {
             poll_failure_backoff(poll_interval),
             |mut backoff, ()| async {
                 let status = state.poll_and_publish_state().await;
-                let delay = if status == gafctl_api::DeviceRefreshStatus::Fresh {
+                let delay = if status == crate::model::DeviceRefreshStatus::Fresh {
                     backoff = poll_failure_backoff(poll_interval);
                     poll_interval
                 } else {

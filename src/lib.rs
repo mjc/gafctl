@@ -1,4 +1,12 @@
-//! Concrete CLI and service application entrypoints.
+//! GAF attic fan protocol, Bluetooth, client, CLI, and service.
+
+pub mod bluetooth;
+#[cfg(any(feature = "cli", all(test, feature = "http")))]
+pub mod client;
+pub mod model;
+pub mod protocol;
+#[cfg(feature = "http")]
+pub mod quickconnect;
 
 #[cfg(feature = "http")]
 mod api;

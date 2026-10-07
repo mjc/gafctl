@@ -1,7 +1,7 @@
 use super::*;
+use crate::model::DeviceId;
 use crate::service::test_support::*;
 use crate::{api::router, backend::DeviceRegistry};
-use gafctl_api::DeviceId;
 use std::time::Instant;
 use tokio::net::TcpListener;
 use tokio_util::task::AbortOnDropHandle;
@@ -61,8 +61,8 @@ async fn assert_client_snapshot(sensors: &'static [u8], humidity: Option<f64>) {
     let state =
         DeviceService::with_ble_device("private-peripheral-id".to_owned(), DeviceRegistry::new());
     let frame =
-        |payload| gafctl_protocol::Frame::from_bytes(bytes::Bytes::from_static(payload)).unwrap();
-    let snapshot = gafctl_protocol::DeviceSnapshot::from_frames(
+        |payload| crate::protocol::Frame::from_bytes(bytes::Bytes::from_static(payload)).unwrap();
+    let snapshot = crate::protocol::DeviceSnapshot::from_frames(
         frame(b"#idr030000private-suffix\n"),
         frame(b"#dmraf\n"),
         frame(sensors),
@@ -85,9 +85,9 @@ async fn assert_client_snapshot(sensors: &'static [u8], humidity: Option<f64>) {
     let _task = AbortOnDropHandle::new(tokio::spawn(async move {
         axum::serve(listener, app).await.unwrap();
     }));
-    let client = gafctl_client::Client::new(
+    let client = crate::client::Client::new(
         url.parse().unwrap(),
-        gafctl_client::ClientOptions::default(),
+        crate::client::ClientOptions::default(),
     )
     .unwrap();
     let inventory = client.devices().await.unwrap();
@@ -100,11 +100,11 @@ async fn assert_client_snapshot(sensors: &'static [u8], humidity: Option<f64>) {
     assert_eq!(snapshot.humidity_percent, humidity);
     assert_eq!(
         match snapshot.settings {
-            gafctl_api::DeviceSettings::LegacyBle {
+            crate::model::DeviceSettings::LegacyBle {
                 automatic_humidity_tenths_percent,
                 ..
             } => automatic_humidity_tenths_percent,
-            gafctl_api::DeviceSettings::QuickConnect { .. } => None,
+            crate::model::DeviceSettings::QuickConnect { .. } => None,
         },
         Some(1000)
     );
@@ -156,7 +156,7 @@ async fn failed_ble_poll_or_control_hides_previous_readings_and_recovers() {
                 let mut invalid = snapshot_at(Instant::now(), SystemTime::now());
                 invalid
                     .observe_frame(
-                        gafctl_protocol::Frame::from_bytes(bytes::Bytes::from_static(b"#atrbad\n"))
+                        crate::protocol::Frame::from_bytes(bytes::Bytes::from_static(b"#atrbad\n"))
                             .unwrap(),
                     )
                     .unwrap_err();

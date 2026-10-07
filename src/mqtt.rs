@@ -158,7 +158,7 @@ mod tests {
     #[tokio::test]
     async fn native_shutdown_retains_offline_availability() {
         let broker = start_native_broker().await;
-        let device = mqtt_device(gafctl_api::ProxyId::default(), "shutdown-availability");
+        let device = mqtt_device(crate::model::ProxyId::default(), "shutdown-availability");
         let topic = Topics(device.proxy_id).process_availability();
         let (observer, mut received) =
             observed_client("shutdown-availability-observer", broker.port);

@@ -4,12 +4,12 @@ use std::{
     time::{Duration, SystemTime},
 };
 
-use futures_util::{StreamExt, TryStreamExt, stream};
-use gafctl_api::{DeviceCommand, DeviceId, is_fresh_at, unix_millis};
-use gafctl_quickconnect::{
+use crate::model::{DeviceCommand, DeviceId, is_fresh_at, unix_millis};
+use crate::quickconnect::{
     ClientError, QuickConnectCommand, QuickConnectCommandMode, QuickConnectSettings,
     QuickConnectSettingsBody,
 };
+use futures_util::{StreamExt, TryStreamExt, stream};
 use tokio::time::{Instant, sleep, timeout};
 
 use super::QuickConnectBackend;
@@ -148,10 +148,10 @@ impl QuickConnectBackend {
         else {
             return QuickConnectControlStatus::Rejected;
         };
-        let body = match gafctl_quickconnect::build_settings_body(&intent.command, &before.settings)
+        let body = match crate::quickconnect::build_settings_body(&intent.command, &before.settings)
         {
             Ok(body) => body,
-            Err(gafctl_quickconnect::QuickConnectCommandError::ModeAlreadyInactive) => {
+            Err(crate::quickconnect::QuickConnectCommandError::ModeAlreadyInactive) => {
                 return if runtime
                     .set_control_state_if_current(generation, super::common_state(before))
                     .await
@@ -200,7 +200,7 @@ impl QuickConnectBackend {
         runtime: &Arc<DeviceRuntime>,
         provider_id: &str,
         generation: u64,
-    ) -> Option<gafctl_quickconnect::QuickConnectDeviceState> {
+    ) -> Option<crate::quickconnect::QuickConnectDeviceState> {
         let before = self
             .while_current(
                 runtime,
@@ -280,7 +280,7 @@ impl QuickConnectBackend {
         runtime: &DeviceRuntime,
         generation: u64,
         provider_id: &str,
-        before: &gafctl_quickconnect::QuickConnectDeviceState,
+        before: &crate::quickconnect::QuickConnectDeviceState,
         body: &QuickConnectSettingsBody,
     ) -> QuickConnectControlStatus {
         let result = self
@@ -370,7 +370,7 @@ impl QuickConnectBackend {
     async fn publish_readback(
         runtime: &DeviceRuntime,
         generation: u64,
-        state: Option<gafctl_quickconnect::QuickConnectDeviceState>,
+        state: Option<crate::quickconnect::QuickConnectDeviceState>,
     ) -> bool {
         match state {
             Some(state) => {
@@ -390,7 +390,7 @@ impl QuickConnectBackend {
 #[derive(Default)]
 struct ReadbackProgress {
     matched: bool,
-    state: Option<gafctl_quickconnect::QuickConnectDeviceState>,
+    state: Option<crate::quickconnect::QuickConnectDeviceState>,
 }
 
 fn quickconnect_command(command: DeviceCommand) -> Option<QuickConnectCommand> {
@@ -436,16 +436,16 @@ fn quickconnect_command(command: DeviceCommand) -> Option<QuickConnectCommand> {
     }
 }
 
-const fn cloud_mode(mode: gafctl_api::QuickConnectMode) -> QuickConnectCommandMode {
+const fn cloud_mode(mode: crate::model::QuickConnectMode) -> QuickConnectCommandMode {
     match mode {
-        gafctl_api::QuickConnectMode::Off => QuickConnectCommandMode::Off,
-        gafctl_api::QuickConnectMode::Automatic => QuickConnectCommandMode::Automatic,
-        gafctl_api::QuickConnectMode::Timer => QuickConnectCommandMode::Timer,
-        gafctl_api::QuickConnectMode::Manual => QuickConnectCommandMode::Manual,
+        crate::model::QuickConnectMode::Off => QuickConnectCommandMode::Off,
+        crate::model::QuickConnectMode::Automatic => QuickConnectCommandMode::Automatic,
+        crate::model::QuickConnectMode::Timer => QuickConnectCommandMode::Timer,
+        crate::model::QuickConnectMode::Manual => QuickConnectCommandMode::Manual,
     }
 }
 
-fn fresh_state(state: &gafctl_quickconnect::QuickConnectDeviceState) -> bool {
+fn fresh_state(state: &crate::quickconnect::QuickConnectDeviceState) -> bool {
     state.fetched_at_unix_ms.is_some_and(|fetched_at| {
         unix_millis(SystemTime::now())
             .and_then(|now| now.checked_sub(fetched_at))
@@ -485,17 +485,17 @@ mod tests {
 
     use super::*;
     use crate::backend::DeviceRegistry;
+    use crate::model::DeviceId;
     use crate::test_support::cloud_device;
-    use gafctl_api::DeviceId;
 
     #[test]
     fn control_intents_preserve_domain_commands_and_translate_cloud_payloads() {
-        let temperature_f = gafctl_api::AutomaticTemperatureF::try_from(110).unwrap();
-        let humidity_percent = gafctl_api::AutomaticHumidityPercent::try_from(42).unwrap();
+        let temperature_f = crate::model::AutomaticTemperatureF::try_from(110).unwrap();
+        let humidity_percent = crate::model::AutomaticHumidityPercent::try_from(42).unwrap();
         let cases = [
             (
                 DeviceCommand::QuickConnectMode {
-                    mode: gafctl_api::QuickConnectMode::Manual,
+                    mode: crate::model::QuickConnectMode::Manual,
                 },
                 QuickConnectCommand::SetMode {
                     mode: QuickConnectCommandMode::Manual,
@@ -503,7 +503,7 @@ mod tests {
             ),
             (
                 DeviceCommand::QuickConnectConditionalOff {
-                    only_if_current: gafctl_api::QuickConnectMode::Timer,
+                    only_if_current: crate::model::QuickConnectMode::Timer,
                 },
                 QuickConnectCommand::ClearMode {
                     mode: QuickConnectCommandMode::Timer,
@@ -548,12 +548,12 @@ mod tests {
         });
         [
             DeviceCommand::LegacyPreset {
-                preset: gafctl_api::ControlPreset::TimerClear,
+                preset: crate::model::ControlPreset::TimerClear,
             },
             DeviceCommand::LegacyAutomaticTemperature { temperature_f },
             DeviceCommand::LegacyAutomaticHumidity { humidity_percent },
             DeviceCommand::LegacyTimer {
-                minutes: gafctl_api::LegacyTimerMinutes::try_from(1).unwrap(),
+                minutes: crate::model::LegacyTimerMinutes::try_from(1).unwrap(),
             },
         ]
         .into_iter()
@@ -643,7 +643,7 @@ mod tests {
 
     fn automatic_target_change() -> DeviceCommand {
         DeviceCommand::QuickConnectAutomaticTemperature {
-            temperature_f: gafctl_api::AutomaticTemperatureF::try_from(110).unwrap(),
+            temperature_f: crate::model::AutomaticTemperatureF::try_from(110).unwrap(),
         }
     }
 
@@ -652,7 +652,7 @@ mod tests {
         let fixture = control_fixture(QuickConnectControlPolicy::for_test(), true).await;
         let status = fixture
             .execute(DeviceCommand::QuickConnectConditionalOff {
-                only_if_current: gafctl_api::QuickConnectMode::Timer,
+                only_if_current: crate::model::QuickConnectMode::Timer,
             })
             .await;
         assert_eq!(status, QuickConnectControlStatus::Confirmed);

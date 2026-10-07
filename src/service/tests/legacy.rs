@@ -1,19 +1,19 @@
 use super::*;
+#[cfg(feature = "mqtt")]
+use crate::model::DeviceId;
+use crate::model::{CommandId, ControlPreset, DeviceControlV2Request, DeviceControlV2Response};
 use crate::service::test_support::*;
 use crate::{api::router, backend::DeviceRegistry};
 use axum::{
     body::Body,
     http::{Request, StatusCode},
 };
-#[cfg(feature = "mqtt")]
-use gafctl_api::DeviceId;
-use gafctl_api::{CommandId, ControlPreset, DeviceControlV2Request, DeviceControlV2Response};
 use http_body_util::BodyExt;
 use tower::ServiceExt;
 
 #[tokio::test]
 async fn refresh_status_tracks_state_after_timer_restoration() {
-    use gafctl_api::{DeviceId, DeviceRefreshStatus};
+    use crate::model::{DeviceId, DeviceRefreshStatus};
 
     let state =
         DeviceService::with_ble_device("no-physical-device".to_owned(), DeviceRegistry::new());
@@ -243,7 +243,7 @@ async fn ble_http_admission_rejects_busy_before_waiting_or_touching_bluetooth() 
     assert_eq!(result.status(), StatusCode::TOO_MANY_REQUESTS);
     let body = result.into_body().collect().await.unwrap().to_bytes();
     let response: DeviceControlV2Response = serde_json::from_slice(&body).unwrap();
-    assert_eq!(response.status, gafctl_api::ControlStatus::Busy);
+    assert_eq!(response.status, crate::model::ControlStatus::Busy);
     assert_eq!(response.request_id, request.request_id.as_str());
     drop(permits);
     assert!(runtime.device.try_reserve_control().is_some());
@@ -306,7 +306,7 @@ fn snapshot_projection_requires_every_field_to_decode() {
         let mut wires = valid;
         wires[field] = malformed;
         let [identity, mode, sensors, thresholds, timer] = wires.map(|wire| {
-            gafctl_protocol::Frame::from_bytes(bytes::Bytes::from_static(wire)).unwrap()
+            crate::protocol::Frame::from_bytes(bytes::Bytes::from_static(wire)).unwrap()
         });
         let snapshot =
             DeviceSnapshot::from_frames(identity, mode, sensors, thresholds, timer).unwrap();

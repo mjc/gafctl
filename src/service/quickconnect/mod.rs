@@ -4,14 +4,14 @@ use super::{DeviceService, ServiceError};
 use crate::backend::{CloudDeviceInput, DeviceRegistry, DeviceRegistryError, DeviceRuntime};
 use tokio::sync::RwLock;
 mod control;
-use anyhow::{Context, Result};
-use futures_util::{StreamExt, stream};
-use gafctl_api::DeviceRefreshStatus;
-use gafctl_api::{
+use crate::model::DeviceRefreshStatus;
+use crate::model::{
     DeviceBackend, DeviceDiagnostics, DeviceId, DeviceSettings, DeviceState,
     QuickConnectModeStatus, StateProvenance,
 };
-use gafctl_quickconnect::{Credentials, QuickConnectClient, QuickConnectConfig};
+use crate::quickconnect::{Credentials, QuickConnectClient, QuickConnectConfig};
+use anyhow::{Context, Result};
+use futures_util::{StreamExt, stream};
 use std::{collections::BTreeMap, sync::Arc, time::Duration};
 
 const QUICKCONNECT_DETAIL_TIMEOUT: Duration = Duration::from_secs(270);
@@ -74,7 +74,7 @@ impl QuickConnectBackend {
 
     async fn reconcile_inventory(
         &self,
-        inventory: Vec<gafctl_quickconnect::InventoryDevice>,
+        inventory: Vec<crate::quickconnect::InventoryDevice>,
         generations: &BTreeMap<DeviceId, u64>,
     ) -> Result<Vec<QuickConnectReadTarget>, DeviceRegistryError> {
         let inputs = inventory
@@ -165,7 +165,7 @@ impl DeviceService {
     }
 }
 impl QuickConnectReadTarget {
-    async fn read(&self, client: &gafctl_quickconnect::QuickConnectClient) {
+    async fn read(&self, client: &crate::quickconnect::QuickConnectClient) {
         if tokio::time::timeout(QUICKCONNECT_DETAIL_TIMEOUT, self.read_locked(client))
             .await
             .is_err()
@@ -176,7 +176,7 @@ impl QuickConnectReadTarget {
         }
     }
 
-    async fn read_locked(&self, client: &gafctl_quickconnect::QuickConnectClient) {
+    async fn read_locked(&self, client: &crate::quickconnect::QuickConnectClient) {
         let _transaction = self.runtime.acquire_transaction().await;
         if !self.runtime.is_current_state_read(self.generation) {
             return;
@@ -189,7 +189,7 @@ impl QuickConnectReadTarget {
 async fn commit_detail_read(
     runtime: &DeviceRuntime,
     generation: u64,
-    state: Option<gafctl_quickconnect::QuickConnectDeviceState>,
+    state: Option<crate::quickconnect::QuickConnectDeviceState>,
 ) -> DeviceRefreshStatus {
     let (committed, status) = match state {
         Some(state) => (
@@ -210,8 +210,8 @@ async fn commit_detail_read(
     }
 }
 
-fn common_state(state: gafctl_quickconnect::QuickConnectDeviceState) -> DeviceState {
-    use gafctl_quickconnect::DeviceModeStatus;
+fn common_state(state: crate::quickconnect::QuickConnectDeviceState) -> DeviceState {
+    use crate::quickconnect::DeviceModeStatus;
 
     DeviceState {
         temperature_f: state.temperature_f,
