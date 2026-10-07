@@ -8,7 +8,7 @@ integration.
 | --- | --- |
 | Home Assistant OS | [Home Assistant app](#home-assistant-os) |
 | Ubuntu 24.04+, Debian 12+ | [Debian package or source build](#ubuntu-and-debian) |
-| Other Linux distributions | [Source build](#source-build) or [Docker Compose](#docker-compose) |
+| Other Linux distributions | [Binary archive](#linux-binary-archive), [source build](#source-build), or [Docker Compose](#docker-compose) |
 | NixOS / nix-darwin | [Nix package and NixOS module](#nix) |
 | macOS | [Nix package](#nix); Bluetooth access runs natively |
 
@@ -17,31 +17,44 @@ for an always-on service. Containers use the host's BlueZ over D-Bus. Keep one
 server connected to the fan. QuickConnect needs Internet access and a GAF
 account; it is experimental, with writes disabled by default.
 
-Release binaries and registry images are unpublished. Use the source builds,
-Compose, HACS custom repository, or Home Assistant app below. See
-[releases](development.md#releases) for package builds and publication.
+The commands below install version **0.1.0** from its
+[GitHub release](https://github.com/mjc/gafctl/releases/tag/v0.1.0) or
+`ghcr.io/mjc/gafctl:0.1.0`. Downloads become available when that version is
+published. For an unreleased revision, use a [source build](#source-build) or
+[build the container locally](#build-the-container-from-source).
 
 ## Ubuntu and Debian
 
-Install build dependencies and BlueZ for original controllers:
+Install the download tools:
 
 ```sh
 sudo apt update
-sudo apt install build-essential cmake pkg-config libdbus-1-dev ca-certificates git bluez
-sudo systemctl enable --now bluetooth
+sudo apt install ca-certificates curl
 ```
 
-Follow the [source build](#source-build), then build and install the package:
+Download the package for your architecture and verify its checksum:
 
 ```sh
-sudo apt install dpkg-dev jq
-./packaging/package.sh
-sudo apt install ./dist/gafctl_0.1.0_*.deb
+version=0.1.0
+arch=$(dpkg --print-architecture)
+case "$arch" in amd64|arm64) ;; *) echo "Unsupported architecture: $arch"; exit 1 ;; esac
+mkdir -p "gafctl-$version-$arch"
+cd "gafctl-$version-$arch"
+release="https://github.com/mjc/gafctl/releases/download/v$version"
+curl --fail --location --remote-name "$release/gafctl_${version}_${arch}.deb"
+curl --fail --location --remote-name "$release/SHA256SUMS"
+sha256sum --check --ignore-missing SHA256SUMS
 ```
 
-Use the package matching your architecture: `amd64` for x86-64 or `arm64` for
-64-bit ARM. Packages built by the Dockerfile target Debian 12 / Ubuntu 24.04
-and newer. On Ubuntu 22.04, build from source or use the container.
+Continue only if the package checksum reports `OK`:
+
+```sh
+sudo apt install "./gafctl_${version}_${arch}.deb"
+```
+
+The release provides `amd64` for x86-64 and `arm64` for 64-bit ARM, targeting
+Debian 12 / Ubuntu 24.04 and newer. On Ubuntu 22.04, build from source or use
+the container.
 
 The package installs both executables, a systemd unit, a private configuration
 directory, and a D-Bus policy allowing the service account to use BlueZ. It
@@ -51,6 +64,8 @@ Configure and start the service as shown below.
 For an original controller, scan and enter the ID in the configuration file:
 
 ```sh
+sudo apt install bluez
+sudo systemctl enable --now bluetooth
 sudo gafctl ble scan
 sudoedit /etc/gafctl/gafctl.env
 ```
@@ -81,6 +96,15 @@ After a package upgrade, run `sudo systemctl restart gafctl`. Removing or purgin
 the package keeps `/var/lib/gafctl` and the service account. Delete them yourself
 only when you intend to discard the proxy identity and device configuration.
 
+To build your own package, install the [source build](#source-build) dependencies,
+build the binaries, then run:
+
+```sh
+sudo apt install dpkg-dev jq
+./packaging/package.sh
+sudo apt install ./dist/gafctl_0.1.0_*.deb
+```
+
 ### Build packages with Docker or Podman
 
 On a native Linux host with Docker Buildx:
@@ -93,15 +117,65 @@ The build emits a `.deb` and a binary archive for the host's architecture. With
 Podman, build `--target packages`, then copy `/src/dist` out of that image.
 Use native ARM64 hardware to build ARM64 packages; no emulation is configured.
 
+## Linux binary archive
+
+The release archives contain both executables and their license notices. They
+require glibc 2.36 or newer, the D-Bus runtime library, and CA certificates. On
+Debian/Ubuntu, install the runtime dependencies and download tools with
+`sudo apt install libdbus-1-3 ca-certificates curl`. Original controllers also
+need BlueZ. Use your distribution's equivalent packages on other Linux systems.
+
+Download and verify the archive:
+
+```sh
+version=0.1.0
+case "$(uname -m)" in
+  x86_64) arch=amd64 ;;
+  aarch64|arm64) arch=arm64 ;;
+  *) echo "Unsupported architecture"; exit 1 ;;
+esac
+mkdir -p "gafctl-$version-$arch"
+cd "gafctl-$version-$arch"
+release="https://github.com/mjc/gafctl/releases/download/v$version"
+curl --fail --location --remote-name "$release/gafctl_${version}_linux_${arch}.tar.gz"
+curl --fail --location --remote-name "$release/SHA256SUMS"
+sha256sum --check --ignore-missing SHA256SUMS
+```
+
+Continue only if the archive checksum reports `OK`, then extract and install:
+
+```sh
+tar -xzf "gafctl_${version}_linux_${arch}.tar.gz"
+sudo install -m 755 gafctl gafctl-server /usr/local/bin/
+sudo install -d /usr/local/share/licenses/gafctl
+sudo install -m 644 LICENSE LICENSE-QUICKCONNECT-REFERENCE.txt \
+  THIRD-PARTY-NOTICES.txt LICENSE-RUST-STDLIB.html /usr/local/share/licenses/gafctl/
+gafctl --version
+gafctl server --help
+```
+
+Keep both executables together; `gafctl server` launches its sibling. Follow
+[service setup](deployment.md) for persistent operation. Archives do not install
+a systemd unit or BlueZ D-Bus policy; use the Debian package or NixOS module
+for those. Repeat these steps with the new version to upgrade both executables.
+
 ## Docker Compose
 
 Install Docker Engine and Compose 2.24 or newer on Linux, then clone this repo:
 
 ```sh
-git clone https://github.com/mjc/gafctl.git
+git clone --branch v0.1.0 --depth 1 https://github.com/mjc/gafctl.git
 cd gafctl
 cp packaging/gafctl.env gafctl.env
+export GAFCTL_IMAGE=ghcr.io/mjc/gafctl:0.1.0
+docker compose pull gafctl
 ```
+
+The registry image supports AMD64 and ARM64 Linux; Docker selects the native
+architecture. Keep `GAFCTL_IMAGE` set for every Compose command, or save
+`GAFCTL_IMAGE=ghcr.io/mjc/gafctl:0.1.0` in Compose's `.env` file beside
+`compose.yaml`. The separate `gafctl.env` configures the server inside the
+container.
 
 Edit `gafctl.env` to set the backend and optional MQTT credentials. Keep the
 configuration private with `chmod 600 gafctl.env`. The named volume `gafctl-data`
@@ -115,16 +189,16 @@ rules; do not assume an ordinary UFW rule limits them.
 
 ### Original Bluetooth controller
 
-Start BlueZ on the Linux host. Build the image and scan through the host bus:
+Start BlueZ on the Linux host and scan through the host bus:
 
 ```sh
 sudo systemctl enable --now bluetooth
-docker compose build
-docker run --rm --mount type=bind,src=/run/dbus/system_bus_socket,dst=/run/dbus/system_bus_socket,readonly \
-  --entrypoint gafctl gafctl:local ble scan
+docker compose run --rm --no-deps \
+  -v /run/dbus/system_bus_socket:/run/dbus/system_bus_socket:ro \
+  --entrypoint gafctl gafctl ble scan
 export GAFCTL_DEVICE_ID='PERIPHERAL_ID'
 export GAFCTL_LISTEN_IP='SERVER_LAN_IP'
-docker compose -f compose.yaml -f compose.bluetooth.yaml up -d
+docker compose -f compose.yaml -f compose.bluetooth.yaml up -d --no-build
 ```
 
 Replace both placeholders. The Bluetooth overlay requires a device ID and an
@@ -145,7 +219,7 @@ using your editor, with only the account password in the file:
 sudo chown root:root quickconnect-password
 sudo chmod 600 quickconnect-password
 export GAFCTL_LISTEN_IP='SERVER_LAN_IP'
-docker compose -f compose.yaml -f compose.quickconnect.yaml up -d --build
+docker compose -f compose.yaml -f compose.quickconnect.yaml up -d --no-build
 ```
 
 For rootful Docker Engine, the password bind mount must be a regular file owned
@@ -162,8 +236,24 @@ curl http://SERVER_LAN_IP:8787/health
 curl http://SERVER_LAN_IP:8787/api/v2/devices
 ```
 
-To update, pull this repository and repeat your original Compose command with
-`--build`. Use the same overlays, environment, and named volume.
+To upgrade a release installation, check out the new release tag and update
+`GAFCTL_IMAGE` to its version. Run `docker compose pull gafctl`, then repeat
+your original `up -d --no-build` command with the same overlays, environment,
+and named volume.
+
+### Build the container from source
+
+Clone the revision you want to build, copy `packaging/gafctl.env` to `gafctl.env`,
+and configure it as above. Select the local image and build:
+
+```sh
+export GAFCTL_IMAGE=gafctl:local
+docker compose build gafctl
+```
+
+Use the same scan and start commands above with this image. To update a source
+installation, pull the repository, rebuild, and repeat the original start
+command. If `.env` sets `GAFCTL_IMAGE`, keep it aligned with your chosen image.
 
 ## Home Assistant OS
 
@@ -243,7 +333,9 @@ and restart; preserve Home Assistant's configuration and the server identity sto
 
 Install Rust **1.98.1** through [rustup](https://rustup.rs/). The checked-in
 `rust-toolchain.toml` selects that version. Linux also needs a C/C++ toolchain,
-CMake, pkg-config, and D-Bus development headers. Then:
+CMake, pkg-config, and D-Bus development headers. On Debian/Ubuntu, install
+them with `sudo apt install build-essential cmake pkg-config libdbus-1-dev git`.
+Then:
 
 ```sh
 git clone https://github.com/mjc/gafctl.git

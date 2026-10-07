@@ -40,13 +40,14 @@ Choose an installation method for the computer that will connect to the fan:
 | Home Assistant OS | [Gafctl app](docs/installation.md#home-assistant-os) |
 | Ubuntu / Debian | [Native package and systemd service](docs/installation.md#ubuntu-and-debian) |
 | Linux with Docker | [Docker Compose](docs/installation.md#docker-compose) |
-| NixOS / macOS | [devenv](docs/installation.md#nix) |
-| Other Linux distributions | [Source build](docs/installation.md#source-build) |
+| NixOS / macOS | [Nix package](docs/installation.md#nix) |
+| Other Linux distributions | [Binary archive](docs/installation.md#linux-binary-archive) or [source build](docs/installation.md#source-build) |
 
 Install the separate Home Assistant integration through
 [HACS or manual installation](docs/installation.md#home-assistant-integration).
-The app, package, or container runs the server. Release binaries and registry
-images are unpublished; use the source builds in the installation guide.
+The app, package, or container runs the server. The installation guide covers
+[release downloads](https://github.com/mjc/gafctl/releases), checksum verification,
+the versioned Docker image, and source builds.
 
 The server package includes `gafctl` and `gafctl-server`. `gafctl server` launches
 its sibling `gafctl-server` and forwards arguments. The examples use

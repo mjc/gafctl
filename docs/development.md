@@ -173,7 +173,8 @@ For a release:
 
 1. Set matching versions in the root Cargo manifest, HA integration manifest
    and app configuration. Write `docs/releases/VERSION.md` with the user-facing
-   changes and installation requirements.
+   changes and installation requirements. Update the versioned installation
+   commands.
 2. Commit runtime changes, then update `home-assistant/Dockerfile` to that source
    revision. The workflow compares its Cargo, toolchain, notice and runtime
    inputs against the release commit.
