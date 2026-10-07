@@ -8,6 +8,19 @@ find_release_id_including_drafts() {
     '
 }
 
+check_release_assets() {
+    gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/releases/$release_id/assets?per_page=100" |
+        jq -e --arg mode "$1" --args '
+            [.[][] | .name] | sort as $actual |
+            ($ARGS.positional | sort) as $expected |
+            if $mode == "draft" then ($actual - $expected | length) == 0
+            else $actual == $expected end
+        ' "${assets[@]}" >/dev/null || {
+            printf 'Release asset names do not match the expected files.\n' >&2
+            return 1
+        }
+}
+
 assets=(SHA256SUMS)
 for arch in amd64 arm64; do
     assets+=("gafctl_${RELEASE_VERSION}_${arch}.deb" "gafctl_${RELEASE_VERSION}_linux_${arch}.tar.gz" "provenance-$arch.json")
@@ -31,6 +44,7 @@ release_state=$(jq -er '
     end
 ' <<< "$state")
 
+check_release_assets "$release_state"
 if [[ $release_state == published ]]; then
     mkdir -p target/github-release
     downloaded=$(mktemp -d "$PWD/target/github-release/run.XXXXXX")
@@ -42,5 +56,6 @@ if [[ $release_state == published ]]; then
     printf 'GitHub release already published with identical assets.\n'
 else
     gh release upload "$RELEASE_TAG" "${paths[@]}" --clobber
+    check_release_assets published
     gh release edit "$RELEASE_TAG" --draft=false --notes-file "$notes"
 fi
