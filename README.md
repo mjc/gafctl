@@ -10,7 +10,7 @@ MQTT bridge, and CLI provide readings, settings, and controls.
 | EZ Cool plug-in with QuickConnect | EZCQCR1 (roof), EZCQCG1 (gable) | QuickConnect cloud API |
 | QuickConnect retrofit module | ERV/EGV series with the module installed | QuickConnect cloud API |
 
-See [fan models and compatibility](https://github.com/mjc/gafctl/blob/main/docs/hardware.md) for manufacturer sources
+See [model sources](https://github.com/mjc/gafctl/blob/main/docs/reference.md#model-sources) for manufacturer sources
 and controller identification.
 
 QuickConnect is experimental, untested on hardware, and read-only by default.
@@ -25,7 +25,7 @@ QuickConnect is experimental, untested on hardware, and read-only by default.
   use a Linux computer with BlueZ. macOS can run the Bluetooth command line too.
 - **QuickConnect controller:** a fan set up in the **GAF Master Flow QuickConnect**
   app, an account, and Internet access. Follow the
-  [QuickConnect service setup](https://github.com/mjc/gafctl/blob/main/docs/deployment.md#quickconnect-experimental);
+  [QuickConnect service setup](https://github.com/mjc/gafctl/blob/main/docs/installation.md#quickconnect);
   the Bluetooth scan and device-ID examples below apply to original controllers.
 - Home Assistant, if you want its dashboard and automations.
 
@@ -84,6 +84,11 @@ use the [NixOS module](https://github.com/mjc/gafctl/blob/main/docs/installation
 
 ## Find your fan
 
+The scan and foreground-server commands below require a native installation.
+For Docker or Home Assistant OS, follow their [installation steps](https://github.com/mjc/gafctl/blob/main/docs/installation.md)
+to scan and start the service. Against a running Compose server, run CLI commands
+inside the container, for example `docker compose exec gafctl gafctl devices`.
+
 ```sh
 gafctl ble scan
 ```
@@ -130,9 +135,9 @@ Bluetooth fan has the service device ID `configured`. Look for `available: true`
 and current readings in the state response. The service polls the original
 Bluetooth controller every three seconds on a retained connection. QuickConnect
 devices are polled every 30 seconds. See
-[Bluetooth behavior](https://github.com/mjc/gafctl/blob/main/docs/bluetooth.md).
+[Bluetooth behavior](https://github.com/mjc/gafctl/blob/main/docs/reference.md#connection-lifecycle).
 
-For automatic startup and logs, follow the [service setup guide](https://github.com/mjc/gafctl/blob/main/docs/deployment.md).
+For automatic startup and logs, follow the [service setup guide](https://github.com/mjc/gafctl/blob/main/docs/installation.md#background-service).
 
 ## Add it to Home Assistant
 
@@ -162,19 +167,17 @@ For an original controller, Home Assistant groups these four controls together:
 
 Automatic uses the current thresholds. Changing either target preserves the
 other target. Editing Timer duration leaves the mode unchanged. Selecting Timer
-starts the saved duration, or selects Automatic when it is zero. Off stops the
-fan and disables automatic operation. When a timed run ends, gafctl restores the
-previous mode and thresholds after a fresh device reading. Gafctl must be running
-and able to reach the fan to restore Automatic. Measurements and read-only
-diagnostics remain available. **Fan** reports the controller's on/off state;
-airflow is unmeasured.
+starts it, or selects Automatic at zero. Off stops the fan and disables automatic
+operation. Gafctl restores the previous mode after a timed run; it must remain
+running and able to read the fan. **Fan** reports the controller's on/off state;
+airflow is unmeasured. See [timer and availability behavior](https://github.com/mjc/gafctl/blob/main/docs/reference.md#home-assistant-behavior).
 
-To change the API address, open the entry's menu and choose **Reconfigure**.
-The new address must report the same persistent proxy UUID, device ID and
-backend. Existing HA entity and device IDs are preserved.
+Use **Reconfigure** in the integration entry's menu to change its API address.
+The new address must identify the same proxy, device, and backend to preserve
+Home Assistant entity IDs.
 
 MQTT discovery is an alternative to the HTTP integration. Use the
-[Home Assistant and MQTT guide](https://github.com/mjc/gafctl/blob/main/docs/home-assistant-entities.md) if you prefer it.
+[Home Assistant and MQTT guide](https://github.com/mjc/gafctl/blob/main/docs/installation.md#mqtt) if you prefer it.
 
 ## Use the command line
 
@@ -193,20 +196,15 @@ directly over Bluetooth:
 gafctl ble control --device-id 'PERIPHERAL_ID' preset timer-one-minute
 ```
 
-Add `--format json` for scripts. See the [command line guide](https://github.com/mjc/gafctl/blob/main/docs/cli.md) for
-all presets, QuickConnect commands, timeouts, and exit codes.
+Add `--format json` for scripts. Run `gafctl --help` or a subcommand's `--help`
+for arguments. See the [reference](https://github.com/mjc/gafctl/blob/main/docs/reference.md)
+for command outcomes, timeouts, and the HTTP/MQTT protocols.
 
-## More documentation
+## Documentation
 
-- [Fan models and compatibility](https://github.com/mjc/gafctl/blob/main/docs/hardware.md)
-- [Installation methods](https://github.com/mjc/gafctl/blob/main/docs/installation.md)
-- [Run as a service; configure QuickConnect](https://github.com/mjc/gafctl/blob/main/docs/deployment.md)
-- [Home Assistant entities and MQTT](https://github.com/mjc/gafctl/blob/main/docs/home-assistant-entities.md)
-- [Command line reference](https://github.com/mjc/gafctl/blob/main/docs/cli.md)
-- [HTTP API](https://github.com/mjc/gafctl/blob/main/docs/http-api.md)
-- [Development and checks](https://github.com/mjc/gafctl/blob/main/docs/development.md)
-- [Bluetooth protocol and captured replies](https://github.com/mjc/gafctl/blob/main/docs/protocol-findings.md)
-- [QuickConnect API](https://github.com/mjc/gafctl/blob/main/docs/quickconnect-contract.md)
+- [Installation](https://github.com/mjc/gafctl/blob/main/docs/installation.md): packages, containers, services, and MQTT setup.
+- [Reference](https://github.com/mjc/gafctl/blob/main/docs/reference.md): CLI behavior, HA readings, HTTP/MQTT, and device protocols.
+- [Development](https://github.com/mjc/gafctl/blob/main/docs/development.md): builds, checks, and releases.
 
 ## License
 

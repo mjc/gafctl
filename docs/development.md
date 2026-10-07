@@ -49,39 +49,23 @@ devenv tasks run check:python-types
 Replace `TEST_NAME` with a test name or substring. `check:ha-registry` requires
 Linux. Test fixtures use fake Bluetooth transports, local HTTP servers, and
 synthetic cloud data. Recorded device replies are in the
-[Bluetooth reference](protocol-findings.md).
+[Bluetooth reference](reference.md#captured-device-evidence).
 
-## Repository layout
+## Code
 
-| Path | Purpose |
-| --- | --- |
-| `src/lib.rs`, `src/main.rs`, `src/bin/gafctl.rs` | Shared application library and binary entrypoints |
-| `src/arguments.rs`, `src/cli/` | Arguments, service commands, direct BLE commands and output |
-| `src/server.rs`, `src/server/` | Server configuration, transport startup and shutdown |
-| `src/service/` | Inventory, refresh, control replay and backend coordination |
-| `src/backend/` | Persistent identities, state and per-device synchronization |
-| `src/api.rs` | HTTP routes |
-| `src/mqtt.rs`, `src/mqtt/` | Broker connection, commands, state and discovery |
-| `crates/gafctl-api/` | Shared state, capability and command types |
-| `crates/gafctl-client/` | HTTP client |
-| `crates/gafctl-protocol/` | Original controller's wire format |
-| `crates/gafctl-bluetooth/` | Bluetooth discovery and communication |
-| `crates/gafctl-quickconnect/` | Cloud authentication, requests and decoding |
-| `custom_components/gafctl/` | Home Assistant integration |
-| `nix/` | Packages, NixOS module and checks |
-| `fixtures/quickconnect/` | Synthetic cloud requests and responses |
+`src/` contains the server, CLI, device coordination, HTTP, and MQTT.
+`crates/` contains the shared API/client and the Bluetooth, protocol, and
+QuickConnect libraries. `custom_components/gafctl/` is the HA integration;
+`nix/` and `packaging/` provide installations. Cloud fixtures are synthetic.
 
-Both binaries call the application library. On Unix, `gafctl server` replaces
-itself with `gafctl-server`. Cargo features default to `cli`, `http`, and `mqtt`;
-`mqtt` enables `http`. HTTP and MQTT commands use the same device service.
-The protocol crate handles wire data; the Bluetooth and QuickConnect crates
-handle transport. The HTTP client uses shared API types.
+Cargo defaults to `cli`, `http`, and `mqtt`; MQTT enables HTTP. Use
+`--no-default-features --features http` for a server without MQTT, or `cli` for
+the CLI alone. Both binaries call the application library.
 
 The HA integration requires Home Assistant 2026.9.4 or newer and Python 3.14.
-`models.py` describes the API dictionaries. `readings.py` defines entities;
-`controls.py` defines control bounds and confirmation. The coordinator checks
-identity, ownership and capabilities, serializes controls, and refreshes state
-for readback. Config entries store the server address and persistent device ID.
+API types are in `models.py`, entities in `readings.py`, and control bounds/confirmation in
+`controls.py`. The coordinator handles identity, ownership, serialization, and
+readback. For Rust callers, `gafctl-client` uses the shared `gafctl-api` types.
 
 ## Optional tools
 
@@ -191,24 +175,12 @@ For a release:
    commit signatures. The tagged commit must be on main, and the `release`
    environment must allow version tags.
 
-The workflow checks the tag, commit, versions and release notes before building,
-then rechecks the tag object and commit before publication. Distribution runs
-share one concurrency group with up to 100 pending runs. Packages, archives and
-provenance files receive checksums; GitHub release notes come from the checked-in
-version document.
-
-On a publication retry, an existing published GitHub release must contain
-exactly the expected asset names and identical bytes. Unexpected assets fail
-for both published releases and drafts. An existing draft can have its expected
-assets replaced; publication requires the complete asset set and clears the
-prerelease flag. Retries reject published releases marked as prereleases. If a
-rebuild changes artifact bytes, use the original artifacts or publish a new version.
-
-Before publishing, the workflow checks GitHub assets and registry images without
-changing either. Existing image tags must match the local image configuration
-digests and Linux architectures, including the complete multi-architecture set.
-Identical images are skipped. Registry authentication and connection errors stop
-publication.
+Publication rechecks signatures and versions. Published GitHub assets must have
+exactly the expected names and identical bytes on retry; drafts may replace
+expected assets but reject unexpected ones. Published prereleases are rejected.
+Registry tags must match image configurations and the complete architecture set;
+identical images are skipped. Authentication/network errors stop publication.
+If rebuilt bytes differ, use the original artifacts or publish a new version.
 
 `check:release` tests package validation, signed-candidate checks, publication
 retries, and failure handling. Git repositories are local fixtures; GitHub and
@@ -222,3 +194,17 @@ gh attestation verify --repo mjc/gafctl PATH_TO_PACKAGE
 
 Registry manifests have no such attestation. Docker base images use pinned
 index digests; apt dependencies resolve at build time.
+
+### Build distribution files locally
+
+After a release binary build, install `dpkg-dev` and `jq` on Debian/Ubuntu,
+then run `./packaging/package.sh`. The files appear in `dist/`.
+For Docker Buildx, run:
+
+```sh
+docker buildx build --target artifacts --output type=local,dest=dist .
+```
+
+This emits a Debian package and archive for the native architecture. With
+Podman, build `--target packages` and copy `/src/dist` out of the image.
+Use native ARM64 for ARM64 builds; no emulation is configured.

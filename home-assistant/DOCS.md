@@ -54,7 +54,7 @@ Timer, and Off. Timer starts the saved duration, or selects Automatic when it is
 zero. Off stops the fan and disables automatic operation. At expiry, gafctl
 restores the preceding mode after a fresh device reading. The service must be
 running and able to reach the fan to restore Automatic. See the
-[entity guide](https://github.com/mjc/gafctl/blob/main/docs/home-assistant-entities.md)
+[entity guide](https://github.com/mjc/gafctl/blob/main/docs/reference.md#home-assistant-behavior)
 for readings, diagnostics, and QuickConnect controls.
 
 Port 8787 is exposed to the local network and has no login. Keep it on your
