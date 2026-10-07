@@ -11,6 +11,16 @@
   homeAssistant = pkgs.home-assistant.override {
     extraComponents = registryComponents;
     packageOverrides = _: prev: {
+      moto = prev.moto.overridePythonAttrs (old: {
+        version = "5.2.3";
+        src = pkgs.fetchFromGitHub {
+          owner = "getmoto";
+          repo = "moto";
+          tag = "5.2.3";
+          hash = "sha256-7wE44MYdRf9p3/ac2qOPpLaS0bkpoh84R+rdJp5oycU=";
+        };
+        patches = (old.patches or []) ++ [./nix/moto-queue-name.patch];
+      });
       # Home Assistant 2026.9.4 requires SQLAlchemy 2.0.52.
       sqlalchemy = prev.sqlalchemy.overridePythonAttrs rec {
         version = "2.0.52";
