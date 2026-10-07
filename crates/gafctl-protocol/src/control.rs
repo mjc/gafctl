@@ -132,7 +132,12 @@ impl ControlOutcome {
                 }
                 ControlCommand::SetTimer(requested)
                     if mode == OperatingMode::Timer
-                        && (requested.value() > 0 || device_mode.fan == FanState::Off) =>
+                        && device_mode.fan
+                            == if requested.value() > 0 {
+                                FanState::On
+                            } else {
+                                FanState::Off
+                            } =>
                 {
                     ModeReadback::Matches(mode)
                 }

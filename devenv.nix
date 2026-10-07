@@ -4,10 +4,29 @@
   ...
 }: let
   linux = pkgs.stdenv.hostPlatform.isLinux;
-  homeAssistant = pkgs.home-assistant.override {extraComponents = ["mqtt"];};
-  registryPython =
-    homeAssistant.python3Packages.python.withPackages (ps:
-      [(ps.toPythonModule homeAssistant)] ++ homeAssistant.getPackages "mqtt" ps);
+  registryComponents = [
+    "mqtt"
+    "recorder"
+  ];
+  homeAssistant = pkgs.home-assistant.override {
+    extraComponents = registryComponents;
+    packageOverrides = _: prev: {
+      # Home Assistant 2026.9.4 requires SQLAlchemy 2.0.52.
+      sqlalchemy = prev.sqlalchemy.overridePythonAttrs rec {
+        version = "2.0.52";
+        src = pkgs.fetchPypi {
+          pname = "sqlalchemy";
+          inherit version;
+          hash = "sha256-Xi1GNWrCzLfSaKtsIxmsaitC8bjV/YvT1GhVzYKr7pc=";
+        };
+      };
+    };
+  };
+  registryPython = homeAssistant.python3Packages.python.withPackages (
+    ps:
+    [ (ps.toPythonModule homeAssistant) ]
+    ++ lib.concatMap (component: homeAssistant.getPackages component ps) registryComponents
+  );
 in {
   languages.rust = {
     enable = true;

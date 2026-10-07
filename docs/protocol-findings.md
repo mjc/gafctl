@@ -51,10 +51,10 @@ Gafctl. The firmware token `#pptP` has an unknown purpose.
 ## Confirmation
 
 Writes require an accepted acknowledgement and matching readback. Automatic
-writes also require automatic mode. Timer writes require timer mode; clearing
-also requires the fan flag off. Missing, malformed, mismatched or already-expired
-readback leaves a write unconfirmed. Timer clear leaves timer mode active with
-the fan off. Gafctl displays that state as Off. Selecting Automatic reads and
+writes also require automatic mode. Timer writes require timer mode and the fan
+flag on for a positive duration, or off for clearing. Missing, malformed,
+mismatched or already-expired readback leaves a write unconfirmed. Timer clear
+leaves timer mode active with the fan off. Gafctl displays that state as Off. Selecting Automatic reads and
 reapplies the current thresholds. Selecting Timer starts the saved positive
 duration; a saved zero selects Automatic. The service restores the previous mode
 after timer expiry and fresh matching readback. This is service behavior; the

@@ -578,6 +578,23 @@ fn timer_confirmation_requires_verified_mode_expiry_and_fan_flag() {
     for (minutes, mode, timer, expected, confirmed) in [
         (
             1,
+            b"#dmrtf\n".as_slice(),
+            b"#ttr00010001\n".as_slice(),
+            ModeReadback::FanFlagDiffers {
+                mode: OperatingMode::Timer,
+                actual: FanState::Off,
+            },
+            false,
+        ),
+        (
+            1,
+            b"#dmrtn\n".as_slice(),
+            b"#ttr00010001\n".as_slice(),
+            ModeReadback::Matches(OperatingMode::Timer),
+            true,
+        ),
+        (
+            1,
             b"#dmraf\n".as_slice(),
             b"#ttr00010001\n".as_slice(),
             ModeReadback::Differs(OperatingMode::Automatic),

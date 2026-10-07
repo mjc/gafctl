@@ -1,7 +1,9 @@
 use super::{DeviceService, ServiceError};
 use crate::backend::{DeviceRuntime, RefreshReceiver, RefreshReservation};
 use anyhow::Result;
-use gafctl_api::{DeviceBackend, DeviceId, DeviceRefreshStatus, DeviceRefreshV2Response};
+use gafctl_api::{
+    DeviceBackend, DeviceId, DeviceInventoryStatus, DeviceRefreshStatus, DeviceRefreshV2Response,
+};
 use std::{sync::Arc, time::Duration};
 const DEVICE_REFRESH_TIMEOUT: Duration = Duration::from_secs(270);
 
@@ -118,10 +120,23 @@ impl DeviceService {
                     .await?
             }
         };
-        Ok(DeviceRefreshV2Response {
-            status,
-            device: self.state(id).await?,
-        })
+        self.refresh_response(id, status).await
+    }
+
+    pub(super) async fn refresh_response(
+        &self,
+        id: &DeviceId,
+        status: DeviceRefreshStatus,
+    ) -> Result<DeviceRefreshV2Response, ServiceError> {
+        let device = self.state(id).await?;
+        let status = if status == DeviceRefreshStatus::Fresh
+            && (!device.available || device.inventory_status != DeviceInventoryStatus::Present)
+        {
+            DeviceRefreshStatus::Failed
+        } else {
+            status
+        };
+        Ok(DeviceRefreshV2Response { status, device })
     }
 }
 

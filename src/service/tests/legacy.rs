@@ -12,6 +12,52 @@ use http_body_util::BodyExt;
 use tower::ServiceExt;
 
 #[tokio::test]
+async fn refresh_status_tracks_state_after_timer_restoration() {
+    use gafctl_api::{DeviceId, DeviceRefreshStatus};
+
+    let state =
+        DeviceService::with_ble_device("no-physical-device".to_owned(), DeviceRegistry::new());
+    let runtime = state.ble_device.as_ref().unwrap();
+    let snapshot = snapshot_at(std::time::Instant::now(), SystemTime::now());
+    runtime
+        .device
+        .set_state(crate::legacy_projection::project_snapshot(&snapshot))
+        .await;
+    let poll = runtime.reconciler.write().await.begin_poll();
+    runtime
+        .reconciler
+        .write()
+        .await
+        .apply_success(poll, snapshot);
+    let id = DeviceId::configured_ble();
+    let fresh = state
+        .refresh_response(&id, DeviceRefreshStatus::Fresh)
+        .await
+        .unwrap();
+    assert_eq!(fresh.status, DeviceRefreshStatus::Fresh);
+    fresh.validate().unwrap();
+
+    let restore = runtime.reconciler.write().await.begin_poll();
+    runtime
+        .reconcile_control_snapshot(restore, None, "restore request failed")
+        .await;
+    assert!(runtime.reconciler.read().await.latest_snapshot().is_some());
+    for (status, expected) in [
+        (DeviceRefreshStatus::Fresh, DeviceRefreshStatus::Failed),
+        (DeviceRefreshStatus::Failed, DeviceRefreshStatus::Failed),
+        (
+            DeviceRefreshStatus::Superseded,
+            DeviceRefreshStatus::Superseded,
+        ),
+    ] {
+        let response = state.refresh_response(&id, status).await.unwrap();
+        assert_eq!(response.status, expected);
+        assert!(!response.device.available);
+        response.validate().unwrap();
+    }
+}
+
+#[tokio::test]
 async fn restoration_error_clears_only_after_confirmed_explicit_recovery() {
     let state =
         DeviceService::with_ble_device("no-physical-device".to_owned(), DeviceRegistry::new());

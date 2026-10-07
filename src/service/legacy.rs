@@ -394,11 +394,7 @@ impl LegacyBleRuntime {
         {
             self.restore_timed_run(state, &observation).await;
         }
-        if self.reconciler.read().await.latest_snapshot().is_some() {
-            status
-        } else {
-            DeviceRefreshStatus::Failed
-        }
+        status
     }
 
     async fn reconcile_poll_result(

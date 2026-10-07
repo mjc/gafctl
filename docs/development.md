@@ -33,7 +33,7 @@ This runs Nix evaluation and formatting, Rust formatting, feature-specific
 Clippy and tests, doctests, Python formatting/lint/types/client tests,
 package/publication fixtures, and license checks. On Linux it also runs the
 native Home Assistant registry suite with generated MQTT discovery fixtures.
-The HA suite uses Home Assistant and dependencies pinned by `devenv.lock`.
+The HA suite uses Home Assistant and dependencies from `devenv.lock` and `devenv.nix`.
 
 For focused checks:
 
