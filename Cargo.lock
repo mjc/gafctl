@@ -632,7 +632,7 @@ dependencies = [
 
 [[package]]
 name = "gafctl"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "assert_cmd",
@@ -665,7 +665,7 @@ dependencies = [
 
 [[package]]
 name = "gafctl-api"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "gafctl-protocol",
  "serde",
@@ -677,7 +677,7 @@ dependencies = [
 
 [[package]]
 name = "gafctl-bluetooth"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "backon",
@@ -697,7 +697,7 @@ dependencies = [
 
 [[package]]
 name = "gafctl-client"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "axum",
  "bytes",
@@ -713,7 +713,7 @@ dependencies = [
 
 [[package]]
 name = "gafctl-protocol"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "bytes",
  "thiserror",
@@ -721,7 +721,7 @@ dependencies = [
 
 [[package]]
 name = "gafctl-quickconnect"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "axum",
  "backon",

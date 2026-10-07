@@ -138,10 +138,19 @@ and freshness. Upstream license references are described in
 
 The [Distribution workflow](../.github/workflows/release.yml) runs native AMD64
 and ARM64 checks before building and testing the exported packages, server image
-and HA app image. Manual runs upload artifacts. A signed `vVERSION` tag publishes
-a GitHub Release with checksums and `ghcr.io/mjc/gafctl:VERSION` through the
-`release` environment. Set the GHCR package visibility to public after its first
-publication.
+and HA app image. `check:package` builds each Cargo archive with its own features
+and registry dependencies. Manual runs upload artifacts. A signed `vVERSION`
+tag publishes the Cargo workspace to crates.io, a GitHub Release with checksums,
+and `ghcr.io/mjc/gafctl:VERSION` through the `release` environment. The Cargo
+installation workflow then installs the published version on AMD64 and ARM64
+and checks both binaries, server startup, HTTP, and shutdown.
+
+Each crate's trusted publisher must allow repository `mjc/gafctl`, workflow
+`release.yml`, and environment `release`. Authentication uses GitHub OIDC.
+For the first publication, set the release environment's `CRATES_IO_TOKEN`
+secret to a token that can create the crates. Configure their trusted publishers
+after publication, then remove that secret.
+Set the GHCR package visibility to public after its first publication.
 
 The [Home Assistant workflow](../.github/workflows/home-assistant.yml) runs HACS
 and Hassfest validation on pull requests, main, and release candidates. HACS
@@ -155,8 +164,9 @@ version check includes the integration manifest.
 
 For a release:
 
-1. Set matching versions in the root Cargo manifest, HA integration manifest
-   and app configuration. Write `docs/releases/VERSION.md` with the user-facing
+1. Set matching versions in every Cargo manifest and internal dependency,
+   the HA integration manifest and app configuration. Write
+   `docs/releases/VERSION.md` with the user-facing
    changes and installation requirements. Update the versioned installation
    commands.
 2. Commit runtime changes, then update `home-assistant/Dockerfile` to that source
@@ -167,8 +177,8 @@ For a release:
    commit and push it:
 
    ```sh
-   git tag -s v0.1.0 -m 'gafctl 0.1.0'
-   git push origin v0.1.0
+   git tag -s v0.1.1 -m 'gafctl 0.1.1'
+   git push origin v0.1.1
    ```
 
    Replace the version for later releases. GitHub must verify both the tag and
@@ -181,6 +191,8 @@ expected assets but reject unexpected ones. Published prereleases are rejected.
 Registry tags must match image configurations and the complete architecture set;
 identical images are skipped. Authentication/network errors stop publication.
 If rebuilt bytes differ, use the original artifacts or publish a new version.
+Cargo publication checks every existing version's checksum before uploading
+missing packages in dependency order, then compares the downloaded archives.
 
 `check:release` tests package validation, signed-candidate checks, publication
 retries, and failure handling. Git repositories are local fixtures; GitHub and

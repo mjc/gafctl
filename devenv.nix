@@ -55,6 +55,7 @@ in {
   tasks."check:cli-bin".exec = "cargo nextest run --package gafctl --no-default-features --features cli --lib --bin gafctl --locked --status-level fail --final-status-level fail";
   tasks."check:http".exec = "cargo nextest run --package gafctl --all-targets --no-default-features --features http --locked --status-level fail --final-status-level fail";
   tasks."check:doc".exec = "cargo test --workspace --doc --locked";
+  tasks."check:package".exec = "cargo package --workspace --locked";
   tasks."check:python-format".exec = "ruff format --check custom_components tests/*.py packaging";
   tasks."check:python-types".exec = "mypy custom_components/gafctl/client.py custom_components/gafctl/models.py custom_components/gafctl/controls.py";
   tasks."check:python-lint".exec = "ruff check custom_components tests/*.py packaging";
@@ -93,6 +94,7 @@ in {
       "check:cli-bin"
       "check:http"
       "check:doc"
+      "check:package"
       "check:ha"
       "check:release"
       "check:licenses"

@@ -17,9 +17,9 @@ for an always-on service. Containers use the host's BlueZ over D-Bus. Keep one
 server connected to the fan. QuickConnect needs Internet access and a GAF
 account; it is experimental, with writes disabled by default.
 
-The commands below install version **0.1.0** from its
-[GitHub release](https://github.com/mjc/gafctl/releases/tag/v0.1.0) or
-`ghcr.io/mjc/gafctl:0.1.0`. Downloads become available when that version is
+The commands below install version **0.1.1** from its
+[GitHub release](https://github.com/mjc/gafctl/releases/tag/v0.1.1) or
+`ghcr.io/mjc/gafctl:0.1.1`. Downloads become available when that version is
 published. For an unreleased revision, use a [source build](#source-build) or
 [build the container locally](#build-the-container-from-source).
 
@@ -35,7 +35,7 @@ sudo apt install ca-certificates curl
 Download the package for your architecture and verify its checksum:
 
 ```sh
-version=0.1.0
+version=0.1.1
 arch=$(dpkg --print-architecture)
 case "$arch" in amd64|arm64) ;; *) echo "Unsupported architecture: $arch"; exit 1 ;; esac
 mkdir -p "gafctl-$version-$arch"
@@ -107,7 +107,7 @@ need BlueZ. Use your distribution's equivalent packages on other Linux systems.
 Download and verify the archive:
 
 ```sh
-version=0.1.0
+version=0.1.1
 case "$(uname -m)" in
   x86_64) arch=amd64 ;;
   aarch64|arm64) arch=arm64 ;;
@@ -143,16 +143,16 @@ for those. Repeat these steps with the new version to upgrade both executables.
 Install Docker Engine and Compose 2.24 or newer on Linux, then clone this repo:
 
 ```sh
-git clone --branch v0.1.0 --depth 1 https://github.com/mjc/gafctl.git
+git clone --branch v0.1.1 --depth 1 https://github.com/mjc/gafctl.git
 cd gafctl
 cp packaging/gafctl.env gafctl.env
-export GAFCTL_IMAGE=ghcr.io/mjc/gafctl:0.1.0
+export GAFCTL_IMAGE=ghcr.io/mjc/gafctl:0.1.1
 docker compose pull gafctl
 ```
 
 The registry image supports AMD64 and ARM64 Linux; Docker selects the native
 architecture. Keep `GAFCTL_IMAGE` set for every Compose command, or save
-`GAFCTL_IMAGE=ghcr.io/mjc/gafctl:0.1.0` in Compose's `.env` file beside
+`GAFCTL_IMAGE=ghcr.io/mjc/gafctl:0.1.1` in Compose's `.env` file beside
 `compose.yaml`. The separate `gafctl.env` configures the server inside the
 container.
 

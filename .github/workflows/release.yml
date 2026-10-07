@@ -177,12 +177,14 @@ jobs:
     permissions:
       contents: write
       packages: write
+      id-token: write
     env:
       GH_TOKEN: ${{ github.token }}
       RELEASE_TAG: ${{ github.ref_name }}
       RELEASE_VERSION: ${{ needs.candidate.outputs.version }}
       EXPECTED_RELEASE_COMMIT: ${{ needs.candidate.outputs.commit }}
       EXPECTED_RELEASE_TAG_OBJECT: ${{ needs.candidate.outputs.tag_object }}
+      BOOTSTRAP_TOKEN: ${{ secrets.CRATES_IO_TOKEN }}
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
@@ -191,6 +193,15 @@ jobs:
           persist-credentials: false
       - name: Recheck signed release candidate
         run: packaging/check-release-candidate.sh "$RELEASE_TAG"
+      - uses: cachix/install-nix-action@2126ae7fc54c9df00dd18f7f18754393182c73cd # v31.9.1
+      - name: Authenticate with crates.io
+        if: env.BOOTSTRAP_TOKEN == ''
+        id: crates
+        uses: rust-lang/crates-io-auth-action@9c067fc5d5c254b33978fed918cb50c032549d0e
+      - name: Publish Cargo workspace
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CRATES_IO_TOKEN || steps.crates.outputs.token }}
+        run: nix run --accept-flake-config github:cachix/devenv/b904dcb51fe48c30db250038241507f60752f222 -- shell -- packaging/publish-crates.sh
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           pattern: packages-*
@@ -218,3 +229,8 @@ jobs:
           image="ghcr.io/${GITHUB_REPOSITORY,,}"
           version="${GITHUB_REF_NAME#v}"
           packaging/publish-release.sh "$image" "$version" "$IMAGE_ARTIFACT_DIRECTORY"
+  install-crate:
+    needs: [candidate, publish]
+    uses: ./.github/workflows/cargo-install.yml
+    with:
+      version: ${{ needs.candidate.outputs.version }}
