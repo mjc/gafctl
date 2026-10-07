@@ -58,10 +58,10 @@ On Ubuntu or Debian, install these build dependencies:
 sudo apt install build-essential cmake pkg-config libdbus-1-dev git
 ```
 
-Then install both `gafctl` and `gafctl-server` from Git:
+Then install both `gafctl` and `gafctl-server` from crates.io:
 
 ```sh
-cargo install --git https://github.com/mjc/gafctl.git --locked gafctl
+cargo install gafctl --locked
 ```
 
 Make sure Cargo's binary directory, normally `$HOME/.cargo/bin`, is on `PATH`:

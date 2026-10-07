@@ -2996,6 +2996,7 @@ MIT License (MIT)
 
 bluez-async 0.8.2
 bluez-generated 0.4.0
+gafctl 0.1.1
 
 MIT License
 

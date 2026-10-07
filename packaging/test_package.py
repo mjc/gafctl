@@ -5,10 +5,12 @@ import shutil
 import subprocess
 import tarfile
 import tempfile
+import tomllib
 import unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+VERSION = tomllib.loads((ROOT / "Cargo.toml").read_text())["package"]["version"]
 
 
 class PackageTests(unittest.TestCase):
@@ -43,8 +45,8 @@ class PackageTests(unittest.TestCase):
             **os.environ,
             "PATH": f"{self.root / 'bin'}:{os.environ['PATH']}",
         }
-        self.binary("gafctl", "0.1.0")
-        self.binary("gafctl-server", "0.1.0")
+        self.binary("gafctl", VERSION)
+        self.binary("gafctl-server", VERSION)
         self.command(
             "od",
             'if [ "$2" = -N6 ]; then echo \'7f 45 4c 46 02 01\'; else echo "${ELF_MACHINE:-3e 00}"; fi\n',
@@ -98,7 +100,7 @@ class PackageTests(unittest.TestCase):
                 self.assertEqual(result.returncode, 0, result.stderr)
                 licenses = (
                     self.root
-                    / f"target/packages/gafctl_0.1.0_{arch}/usr/share/doc/gafctl"
+                    / f"target/packages/gafctl_{VERSION}_{arch}/usr/share/doc/gafctl"
                 )
                 self.assertEqual(
                     (licenses / "LICENSE").read_text(), "Test project license\n"
@@ -116,7 +118,7 @@ class PackageTests(unittest.TestCase):
                     "Test Rust notices\n",
                 )
                 with tarfile.open(
-                    self.root / f"dist/gafctl_0.1.0_linux_{arch}.tar.gz"
+                    self.root / f"dist/gafctl_{VERSION}_linux_{arch}.tar.gz"
                 ) as archive:
                     self.assertEqual(
                         set(archive.getnames()),

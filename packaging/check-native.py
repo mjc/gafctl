@@ -11,8 +11,11 @@ from urllib.request import urlopen
 
 root = Path(__file__).resolve().parents[1]
 parser = argparse.ArgumentParser(description=__doc__)
-parser.add_argument("--package", type=Path, help="Check an existing installation")
-package = parser.parse_args().package
+source = parser.add_mutually_exclusive_group()
+source.add_argument("--package", type=Path, help="Check an existing installation")
+source.add_argument("--version", help="Install this version from crates.io")
+args = parser.parse_args()
+package = args.package
 installation = root / "target/install-native"
 installation.mkdir(parents=True, exist_ok=True)
 if package is None:
@@ -20,8 +23,11 @@ if package is None:
         [
             "cargo",
             "install",
-            "--path",
-            str(root),
+            *(
+                ["gafctl", "--version", f"={args.version}", "--registry", "crates-io"]
+                if args.version
+                else ["--path", str(root)]
+            ),
             "--locked",
             "--root",
             str(installation),
@@ -30,6 +36,11 @@ if package is None:
     )
 package = package or installation
 for executable in ("gafctl", "gafctl-server"):
+    if args.version:
+        version = subprocess.check_output(
+            [str(package / "bin" / executable), "--version"], text=True
+        ).strip()
+        assert version == f"{executable} {args.version}", version
     subprocess.run(
         [str(package / "bin" / executable), "--help"],
         check=True,
