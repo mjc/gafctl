@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
+mode=${1:-publish}
+case "$mode" in publish|--check) ;; *) printf 'Usage: %s [--check]\n' "$0" >&2; exit 1 ;; esac
 
 find_release_id_including_drafts() {
     gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/releases?per_page=100" | jq -r --arg tag "$RELEASE_TAG" '
@@ -33,6 +35,7 @@ test -s "$notes"
 
 release_id=$(find_release_id_including_drafts)
 if [[ -z $release_id ]]; then
+    [[ $mode != --check ]] || exit 0
     gh release create "$RELEASE_TAG" "${paths[@]}" --verify-tag --prerelease=false --title "gafctl $RELEASE_VERSION" --notes-file "$notes"
     exit 0
 fi
@@ -56,6 +59,7 @@ if [[ $release_state == published ]]; then
     done
     printf 'GitHub release already published with identical assets.\n'
 else
+    [[ $mode != --check ]] || exit 0
     gh release upload "$RELEASE_TAG" "${paths[@]}" --clobber
     check_release_assets published
     gh release edit "$RELEASE_TAG" --draft=false --prerelease=false --notes-file "$notes"

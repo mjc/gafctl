@@ -23,7 +23,7 @@ class PublishImagesTests(unittest.TestCase):
         stub = self.root / "docker"
         stub.write_text(
             "#!/usr/bin/env python3\n"
-            "import json, os, sys\n"
+            "import hashlib, json, os, sys\n"
             "from pathlib import Path\n"
             "args = sys.argv[1:]\n"
             "with open(os.environ['DOCKER_STUB_LOG'], 'a') as log:\n"
@@ -38,7 +38,15 @@ class PublishImagesTests(unittest.TestCase):
             "elif args[:2] == ['image', 'inspect']:\n"
             "    if not state.exists():\n"
             "        sys.exit(1)\n"
-            "    print(state.read_text().strip())\n"
+            "    architecture = state.read_text().strip()\n"
+            "    if '--format' in args and args[args.index('--format') + 1] == '{{json .}}':\n"
+            "        digest = hashlib.sha256(architecture.encode()).hexdigest()\n"
+            "        print(json.dumps({'Architecture': architecture, 'Os': 'linux', 'Id': 'sha256:' + digest}))\n"
+            "    else:\n"
+            "        print(architecture)\n"
+            "elif args[:2] == ['manifest', 'inspect']:\n"
+            "    print('no such manifest: ' + args[-1], file=sys.stderr)\n"
+            "    sys.exit(1)\n"
         )
         stub.chmod(0o755)
         self.environment = {

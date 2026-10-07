@@ -203,6 +203,12 @@ assets replaced; publication requires the complete asset set and clears the
 prerelease flag. Retries reject published releases marked as prereleases. If a
 rebuild changes artifact bytes, use the original artifacts or publish a new version.
 
+Before publishing, the workflow checks GitHub assets and registry images without
+changing either. Existing image tags must match the local image configuration
+digests and Linux architectures, including the complete multi-architecture set.
+Identical images are skipped. Registry authentication and connection errors stop
+publication.
+
 Tagged builds attest the package and image archives. Verify a package with:
 
 ```sh

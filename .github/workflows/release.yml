@@ -210,13 +210,11 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - name: Publish multi-architecture image
+      - name: Check and publish release
         env:
           IMAGE_ARTIFACT_DIRECTORY: ${{ steps.image-artifacts.outputs.path }}
         shell: bash
         run: |
           image="ghcr.io/${GITHUB_REPOSITORY,,}"
           version="${GITHUB_REF_NAME#v}"
-          packaging/publish-images.sh "$image" "$version" "$IMAGE_ARTIFACT_DIRECTORY"
-      - name: Publish packages and checksums
-        run: packaging/publish-github-release.sh
+          packaging/publish-release.sh "$image" "$version" "$IMAGE_ARTIFACT_DIRECTORY"
