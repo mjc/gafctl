@@ -47,11 +47,13 @@ and add it with `http://HOME_ASSISTANT_HOST:8787`. Select one entity source per
 fan.
 
 For an original controller, the integration groups Mode, Target temperature,
-Target humidity, and Run fan for in Controls. Changing either target selects
-Automatic and preserves the other target. Run fan for starts timed operation;
-zero stops the fan. Mode offers Automatic, Timer, and Off. Timer restarts the
-reported duration, or returns to Automatic if it is zero. Off and timer expiry
-leave the fan off until you select Automatic or start another timer. See the
+Target humidity, and Timer duration in Controls. Changing either target selects
+Automatic and preserves the other target. Timer duration saves 0–360 minutes and
+defaults to 360; editing it leaves the mode unchanged. Mode offers Automatic,
+Timer, and Off. Timer starts the saved duration, or selects Automatic when it is
+zero. Off stops the fan and disables automatic operation. At expiry, gafctl
+restores the preceding mode after a fresh device reading. The service must be
+running and able to reach the fan to restore Automatic. See the
 [entity guide](https://github.com/mjc/gafctl/blob/main/docs/home-assistant-entities.md)
 for readings, diagnostics, and QuickConnect controls.
 
