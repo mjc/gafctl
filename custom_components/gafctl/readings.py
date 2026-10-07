@@ -71,7 +71,7 @@ SENSORS: dict[Backend, dict[str, SensorReading]] = {
 BINARY_FIELDS: dict[Backend, dict[str, tuple[str, tuple[str, ...], str]]] = {
     "legacy_ble": {
         "controller_fan_flag": (
-            "Controller fan flag",
+            "Fan",
             ("settings", "controller_fan_on"),
             "controller",
         ),

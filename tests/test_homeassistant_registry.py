@@ -2183,7 +2183,7 @@ class RegistryTests(unittest.IsolatedAsyncioTestCase):
         binaries = {
             "legacy_ble": {
                 "controller_fan_flag": (
-                    "Controller fan flag",
+                    "Fan",
                     ("settings", "controller_fan_on"),
                     "controller",
                 ),

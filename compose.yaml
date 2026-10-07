@@ -1,7 +1,7 @@
 services:
   gafctl:
     build: .
-    image: gafctl:local
+    image: ${GAFCTL_IMAGE:-gafctl:local}
     restart: unless-stopped
     stop_grace_period: 100s
     ports:

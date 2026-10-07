@@ -6,21 +6,55 @@ on:
 permissions:
   contents: read
 concurrency:
-  group: distribution-${{ github.ref }}
+  group: distribution-${{ github.repository }}
+  queue: max
   cancel-in-progress: false
 jobs:
+  candidate:
+    runs-on: ubuntu-24.04
+    outputs:
+      commit: ${{ steps.candidate.outputs.commit }}
+      version: ${{ steps.candidate.outputs.version }}
+      tag_object: ${{ steps.candidate.outputs.tag_object }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Check release candidate
+        id: candidate
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_type == 'tag' && github.ref_name || '' }}
+        shell: bash
+        run: |
+          if [[ -n "$RELEASE_TAG" ]]; then
+            packaging/check-release-candidate.sh "$RELEASE_TAG"
+          else
+            echo "commit=$GITHUB_SHA" >> "$GITHUB_OUTPUT"
+            echo "version=$(packaging/version.sh)" >> "$GITHUB_OUTPUT"
+          fi
+  home-assistant:
+    needs: candidate
+    uses: ./.github/workflows/home-assistant.yml
+    with:
+      revision: ${{ needs.candidate.outputs.commit }}
   checks:
+    needs: candidate
     strategy:
       matrix:
         runner: [ubuntu-24.04, ubuntu-24.04-arm]
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ needs.candidate.outputs.commit }}
+          persist-credentials: false
       - uses: cachix/install-nix-action@2126ae7fc54c9df00dd18f7f18754393182c73cd # v31.9.1
       - name: Check Rust and Home Assistant contracts
         run: nix run --accept-flake-config github:cachix/devenv/b904dcb51fe48c30db250038241507f60752f222 -- tasks run check:all
   build:
-    needs: checks
+    needs: [candidate, checks, home-assistant]
     strategy:
       matrix:
         include:
@@ -36,7 +70,9 @@ jobs:
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
+          ref: ${{ needs.candidate.outputs.commit }}
           fetch-depth: 0
+          persist-credentials: false
       - name: Check versions
         shell: bash
         run: |
@@ -119,32 +155,49 @@ jobs:
         with:
           name: packages-${{ matrix.arch }}
           path: dist/
+          if-no-files-found: error
           retention-days: 7
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: image-${{ matrix.arch }}
           path: gafctl-image.tar
+          if-no-files-found: error
           retention-days: 7
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: app-image-${{ matrix.arch }}
           path: gafctl-app-image.tar
+          if-no-files-found: error
           retention-days: 7
   publish:
     if: github.ref_type == 'tag'
-    needs: build
+    needs: [candidate, build]
     runs-on: ubuntu-24.04
     environment: release
     permissions:
       contents: write
       packages: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      RELEASE_TAG: ${{ github.ref_name }}
+      RELEASE_VERSION: ${{ needs.candidate.outputs.version }}
+      EXPECTED_RELEASE_COMMIT: ${{ needs.candidate.outputs.commit }}
+      EXPECTED_RELEASE_TAG_OBJECT: ${{ needs.candidate.outputs.tag_object }}
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ needs.candidate.outputs.commit }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Recheck signed release candidate
+        run: packaging/check-release-candidate.sh "$RELEASE_TAG"
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           pattern: packages-*
           path: dist
           merge-multiple: true
+      - name: Prepare package checksums
+        run: (cd dist && sha256sum ./*.deb ./*.tar.gz ./provenance-*.json > SHA256SUMS)
       - name: Create image artifact directory
         id: image-artifacts
         run: echo "path=$(mktemp -d "$RUNNER_TEMP/gafctl-images.XXXXXX")" >> "$GITHUB_OUTPUT"
@@ -157,18 +210,11 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - name: Publish multi-architecture image
+      - name: Check and publish release
         env:
           IMAGE_ARTIFACT_DIRECTORY: ${{ steps.image-artifacts.outputs.path }}
         shell: bash
         run: |
           image="ghcr.io/${GITHUB_REPOSITORY,,}"
           version="${GITHUB_REF_NAME#v}"
-          packaging/publish-images.sh "$image" "$version" "$IMAGE_ARTIFACT_DIRECTORY"
-      - name: Publish packages and checksums
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        shell: bash
-        run: |
-          (cd dist && sha256sum ./*.deb ./*.tar.gz > SHA256SUMS)
-          gh release create "$GITHUB_REF_NAME" --verify-tag --title "$GITHUB_REF_NAME" --generate-notes dist/*
+          packaging/publish-release.sh "$image" "$version" "$IMAGE_ARTIFACT_DIRECTORY"
