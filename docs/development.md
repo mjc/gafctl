@@ -192,8 +192,9 @@ For a release:
 
 The workflow checks the tag, commit, versions and release notes before building,
 then rechecks the tag object and commit before publication. Distribution runs
-share one concurrency group with up to 100 pending runs. Packages, archives and provenance files receive
-checksums; GitHub release notes come from the checked-in version document.
+share one concurrency group with up to 100 pending runs. Packages, archives and
+provenance files receive checksums; GitHub release notes come from the checked-in
+version document.
 
 On a publication retry, an existing published GitHub release must contain
 exactly the expected asset names and identical bytes. Unexpected assets fail
