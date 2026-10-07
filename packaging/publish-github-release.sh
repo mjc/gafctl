@@ -33,14 +33,15 @@ test -s "$notes"
 
 release_id=$(find_release_id_including_drafts)
 if [[ -z $release_id ]]; then
-    gh release create "$RELEASE_TAG" "${paths[@]}" --verify-tag --title "gafctl $RELEASE_VERSION" --notes-file "$notes"
+    gh release create "$RELEASE_TAG" "${paths[@]}" --verify-tag --prerelease=false --title "gafctl $RELEASE_VERSION" --notes-file "$notes"
     exit 0
 fi
 state=$(gh api "repos/$GITHUB_REPOSITORY/releases/$release_id")
 release_state=$(jq -er '
     if .draft == true then "draft"
-    elif .draft == false then "published"
-    else error("missing release draft status")
+    elif .draft == false and .prerelease == false then "published"
+    elif .draft == false and .prerelease == true then error("stable release is marked as a prerelease")
+    else error("missing or invalid release status")
     end
 ' <<< "$state")
 
@@ -57,5 +58,5 @@ if [[ $release_state == published ]]; then
 else
     gh release upload "$RELEASE_TAG" "${paths[@]}" --clobber
     check_release_assets published
-    gh release edit "$RELEASE_TAG" --draft=false --notes-file "$notes"
+    gh release edit "$RELEASE_TAG" --draft=false --prerelease=false --notes-file "$notes"
 fi

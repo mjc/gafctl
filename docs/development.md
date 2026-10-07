@@ -199,8 +199,9 @@ version document.
 On a publication retry, an existing published GitHub release must contain
 exactly the expected asset names and identical bytes. Unexpected assets fail
 for both published releases and drafts. An existing draft can have its expected
-assets replaced; publication requires the complete asset set. If a rebuild
-changes artifact bytes, use the original artifacts or publish a new version.
+assets replaced; publication requires the complete asset set and clears the
+prerelease flag. Retries reject published releases marked as prereleases. If a
+rebuild changes artifact bytes, use the original artifacts or publish a new version.
 
 Tagged builds attest the package and image archives. Verify a package with:
 
