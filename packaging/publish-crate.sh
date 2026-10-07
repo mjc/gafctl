@@ -4,13 +4,13 @@ cd "$(dirname "$0")/.."
 version=$(packaging/version.sh)
 work="$PWD/target/crates-publication"
 mkdir -p "$work"
-cargo package --locked
 cargo metadata --locked --no-deps --format-version 1 > "$work/metadata.json"
 jq -e --arg version "$version" '
     .packages | length == 1 and
     .[0].name == "gafctl" and .[0].version == $version and .[0].publish == ["crates-io"]
 ' "$work/metadata.json" >/dev/null
 archive="target/package/gafctl-$version.crate"
+test -f "$archive"
 status=$(curl --silent --show-error --location --retry 5 \
     --user-agent 'gafctl-release (https://github.com/mjc/gafctl)' \
     --output "$work/gafctl.json" --write-out '%{http_code}' \
@@ -22,7 +22,7 @@ case "$status" in
         ' "$work/gafctl.json")
         printf '%s  %s\n' "$checksum" "$archive" | sha256sum --check
         ;;
-    404) cargo publish --locked --registry crates-io ;;
+    404) cargo publish --locked --no-verify --registry crates-io ;;
     *) printf 'Cannot check gafctl %s: HTTP %s\n' "$version" "$status" >&2; exit 1 ;;
 esac
 curl --fail --silent --show-error --location --retry 10 --retry-all-errors --retry-delay 3 \

@@ -139,10 +139,10 @@ and freshness. Upstream license references are described in
 The [Distribution workflow](../.github/workflows/release.yml) runs native AMD64
 and ARM64 checks before building and testing the exported packages, server image
 and HA app image. `check:package` builds the Cargo archive with its registry dependencies. Manual runs upload artifacts. A signed `vVERSION`
-tag publishes `gafctl` to crates.io, a GitHub Release with checksums,
-and `ghcr.io/mjc/gafctl:VERSION` through the `release` environment. The Cargo
-installation workflow then installs the published version on AMD64 and ARM64
-and checks both binaries, server startup, HTTP, and shutdown.
+tag publishes `gafctl` to crates.io through the `release` environment. The Cargo
+installation workflow installs the published version on AMD64 and ARM64
+and checks both binaries, server startup, HTTP, and shutdown before publishing
+the GitHub release and container image.
 
 The crate's trusted publisher must allow repository `mjc/gafctl`, workflow
 `release.yml`, and environment `release`. Authentication uses GitHub OIDC.
@@ -189,7 +189,7 @@ expected assets but reject unexpected ones. Published prereleases are rejected.
 Registry tags must match image configurations and the complete architecture set;
 identical images are skipped. Authentication/network errors stop publication.
 If rebuilt bytes differ, use the original artifacts or publish a new version.
-Cargo publication checks the version’s checksum if it already exists, publishes
+Cargo publication checks the version's checksum if it already exists, publishes
 it otherwise, then compares the downloaded archive with the local one.
 
 `check:release` tests package validation, signed-candidate checks, publication
