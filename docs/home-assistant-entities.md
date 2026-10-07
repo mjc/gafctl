@@ -34,7 +34,8 @@ other target.
 ### Returning from a timed run
 
 Gafctl remembers the preceding mode and thresholds when starting a positive
-timer. At expiry, a fresh matching device reading triggers restoration:
+timer. After expiry, gafctl restores them when a fresh device reading matches
+the expected timer state:
 Automatic resumes its thresholds, Off stays off, and a preceding external timer
 resumes only the estimated time left before its original deadline. Extending a
 gafctl timer keeps its original return mode. Editing the saved duration does not
@@ -97,9 +98,9 @@ Running is estimated from mode and measurements. Airflow is unmeasured.
 
 The service polls the original Bluetooth controller every three seconds and
 QuickConnect devices every 30 seconds. Failed Bluetooth polls back off with
-jitter up to sixty seconds. The HTTP integration reads cached state every three seconds for Bluetooth and
-every thirty seconds for QuickConnect. Each Bluetooth poll refreshes sensors,
-thresholds, mode, and timer state on the retained connection. Failed
+jitter up to sixty seconds. The HTTP integration reads cached state every three
+seconds for Bluetooth and every thirty seconds for QuickConnect. Each Bluetooth
+poll refreshes sensors, thresholds, mode, and timer state on the retained connection. Failed
 Bluetooth reads immediately invalidate current state. Both the service and HTTP
 adapter expire readings after ninety seconds from the earliest observation/fetch
 time; receiving an old cached response does not extend its life. The HTTP
@@ -122,8 +123,7 @@ clears `api_error`.
 Home Assistant saves the latest validated reading in its private storage for
 integration reloads and orderly restarts. It restores the reading only for the
 same API address and device identity, within the original freshness deadline.
-Controls require a live read after startup. Home Assistant entities are
-inaccessible while Home Assistant itself is stopped.
+Controls require a live read after startup.
 
 `/health` checks whether the service responds. To check the fan, use
 `/api/v2/devices/{id}/state` and inspect `available`, `last_error`, and the
@@ -171,9 +171,9 @@ broker and discovery at startup. A broker outage does not change ownership.
 The HTTP adapter removes its obsolete registry entities and empty device record
 when it observes the change, including after a restart. MQTT discovery is removed
 by publishing empty retained configurations, including for saved devices absent
-from the active inventory. The adapter polls every three seconds for Bluetooth and every thirty seconds for
-QuickConnect, so handoff can
-briefly expose both owners. HA gives integrations separate device records;
+from the active inventory. The adapter polls every three seconds for Bluetooth
+and every thirty seconds for QuickConnect, so handoff can briefly expose both
+owners. HA gives integrations separate device records;
 changing the owner can change HA device and entity IDs. Update automations that
 refer to the old owner.
 

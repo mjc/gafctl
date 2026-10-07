@@ -315,8 +315,8 @@ service name, in the integration.
 5. Enter `http://GAFCTL_HOST:8787` and select the fans to add.
 
 Published GitHub releases appear as versions in HACS. HACS updates the Python
-integration separately from the server. Keep their
-versions aligned. Choose one entity source per device as described in
+integration separately from the server. Keep their versions aligned.
+Choose one entity source per device as described in
 [MQTT setup](home-assistant-entities.md).
 
 ### Manual installation

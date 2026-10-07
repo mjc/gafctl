@@ -3,10 +3,10 @@
 QuickConnect controllers use GAF's cloud API. See [fan models](hardware.md#quickconnect)
 and [service setup](deployment.md#quickconnect-experimental).
 
-This backend is experimental. The API comes from
+This backend is experimental. Its implementation follows
 [GAFVentControl-HA](https://github.com/hitchin999/GAFVentControl-HA), revision
-`336adfd8d8cc0a936b4585bd20301f74d585554c`, version 1.1.0. Its source was Android
-app `com.gaf.quickconnectapp` 1.0.9. Repository fixtures are synthetic; live
+`336adfd8d8cc0a936b4585bd20301f74d585554c`, version 1.1.0, which was based on
+Android app `com.gaf.quickconnectapp` 1.0.9. Repository fixtures are synthetic; live
 account and hardware compatibility are untested. Attribution is in
 [LICENSE-QUICKCONNECT-REFERENCE.txt](../LICENSE-QUICKCONNECT-REFERENCE.txt).
 

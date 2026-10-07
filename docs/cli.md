@@ -1,10 +1,9 @@
 # Command line interface
 
 `gafctl` reads and controls fans over Bluetooth or through a running service's
-HTTP API. Run `gafctl --help`
-and any command's `--help` for the full argument reference. The `gafctl`
-command `server` launches `gafctl-server` from the same directory, falling back
-to `PATH`. It forwards all arguments after `server`, including `--help`.
+HTTP API. Run `gafctl --help` or a command's `--help` for the full argument
+reference. `gafctl server` launches `gafctl-server` from the same directory,
+falling back to `PATH`. It forwards all arguments after `server`, including `--help`.
 On Unix, the server replaces the CLI process and receives signals directly.
 
 For development, use the repository's pinned environment:
@@ -250,5 +249,5 @@ consuming `submit` sends it once. A `ControlResult::Confirmed` contains a privat
 `ConfirmedControl` value constructed after HTTP, correlation and backend
 confirmation checks.
 
-Automated tests check software behavior with local HTTP servers and fake BLE
-transports. Hardware test results are in the [protocol findings](protocol-findings.md).
+Tests use local HTTP servers and fake BLE transports. Hardware test results are
+in the [protocol findings](protocol-findings.md).

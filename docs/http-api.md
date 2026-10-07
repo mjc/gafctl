@@ -29,11 +29,12 @@ the shared worker running.
 Periodic BLE reads use this operation too.
 
 The response contains the state fields shown below plus `status`: `fresh`
-(`200`), `failed` (`502`), or `superseded` (`409`). A failed Bluetooth refresh clears current readings and reports the device
-unavailable. A cloud refresh may retain earlier readings until their expiry.
-A superseded read lost to a newer state or control operation. Unknown devices
-return `404`, and unconfigured backends return `503`. A worker that closes without a result returns `500` and can be
-replaced by the next request.
+(`200`), `failed` (`502`), or `superseded` (`409`). A failed Bluetooth refresh
+clears current readings and reports the device unavailable. A cloud refresh may
+retain earlier readings until their expiry. A superseded read was replaced by a
+newer state or control operation. Unknown devices return `404`, and unconfigured
+backends return `503`. A worker that closes without a result returns `500`; the
+next request can start a replacement worker.
 
 The shared worker has a 270-second deadline, including time waiting for the
 device lock. The Rust client allows 300 seconds for this request. The Home
