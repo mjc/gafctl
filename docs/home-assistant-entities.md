@@ -14,7 +14,7 @@ For an original **GAF Master Flow Wi-Fi Attic Vent** (ERV5SMT or EGV5SMT):
 | Ambient temperature | Attic temperature, °F |
 | Relative humidity | Attic relative humidity, % |
 | Controller mode | Automatic, timer, or OTA |
-| Controller fan flag | Binary diagnostic of the controller's reported on/off state |
+| Fan | Controller's reported on/off state |
 | Firmware version | Controller firmware version |
 | Automatic temperature threshold | Current threshold, °F |
 | Automatic humidity threshold | Current threshold, % |

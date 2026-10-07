@@ -382,7 +382,7 @@ fn binary_sensors(backend: DeviceBackend) -> impl Iterator<Item = BinarySensor> 
     [
         BinarySensor {
             key: "controller_fan_flag",
-            name: "Controller fan flag",
+            name: "Fan",
             field: "state.settings.controller_fan_on",
             mode: None,
             provenance: "controller",
