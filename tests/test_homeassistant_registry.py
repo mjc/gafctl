@@ -76,6 +76,12 @@ COMPONENT_DIR = Path(__file__).resolve().parents[1] / "custom_components/gafctl"
 REGISTRY_FIXTURE_DIR = COMPONENT_DIR.parents[1] / "target/ha-registry-tests"
 
 
+def new_home_assistant(config_dir: str) -> HomeAssistant:
+    hass = HomeAssistant(config_dir)
+    hass.config.skip_pip = os.environ.get("GAFCTL_HA_SKIP_PIP") == "1"
+    return hass
+
+
 @contextmanager
 def api_client(client, module="custom_components.gafctl.config_flow"):
     with (
@@ -1339,7 +1345,7 @@ class RegistryTests(unittest.IsolatedAsyncioTestCase):
         self.directory = await asyncio.to_thread(
             tempfile.TemporaryDirectory, dir=REGISTRY_FIXTURE_DIR
         )
-        self.hass = HomeAssistant(self.directory.name)
+        self.hass = new_home_assistant(self.directory.name)
         self.hass.config_entries = ConfigEntries(self.hass, {})
         await ir.async_load(self.hass)
         dr.async_setup(self.hass)
@@ -1928,7 +1934,7 @@ class RegistryTests(unittest.IsolatedAsyncioTestCase):
         await self.hass.async_stop()
         platforms.clear()
         subscriptions.clear()
-        self.hass = HomeAssistant(self.directory.name)
+        self.hass = new_home_assistant(self.directory.name)
         self.hass.config_entries = ConfigEntries(self.hass, {})
         await ir.async_load(self.hass)
         dr.async_setup(self.hass)

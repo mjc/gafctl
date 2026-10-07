@@ -10,20 +10,6 @@
   ];
   homeAssistant = pkgs.home-assistant.override {
     extraComponents = registryComponents;
-    packageOverrides = _: prev: {
-      moto = prev.moto.overridePythonAttrs (old: {
-        patches = (old.patches or []) ++ [./nix/moto-queue-name.patch];
-      });
-      # Home Assistant 2026.9.4 requires SQLAlchemy 2.0.52.
-      sqlalchemy = prev.sqlalchemy.overridePythonAttrs rec {
-        version = "2.0.52";
-        src = pkgs.fetchPypi {
-          pname = "sqlalchemy";
-          inherit version;
-          hash = "sha256-Xi1GNWrCzLfSaKtsIxmsaitC8bjV/YvT1GhVzYKr7pc=";
-        };
-      };
-    };
   };
   registryPython = homeAssistant.python3Packages.python.withPackages (
     ps:
@@ -86,7 +72,7 @@ in {
       export GAFCTL_DISCOVERY_FIXTURE="$registry_dir/discovery.json"
       cargo nextest run --package gafctl --all-features --locked \
         -E 'test(namespaced_templates_preserve_unknown_readings_and_freshness)' --status-level fail --final-status-level fail
-      ${registryPython}/bin/python tests/test_homeassistant_registry.py
+      GAFCTL_HA_SKIP_PIP=1 ${registryPython}/bin/python tests/test_homeassistant_registry.py
     '';
   };
   tasks."check:install".exec = "packaging/check.sh";

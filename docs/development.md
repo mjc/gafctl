@@ -34,6 +34,8 @@ Clippy and tests, doctests, Python formatting/lint/types/client tests,
 package/publication fixtures, and license checks. On Linux it also runs the
 native Home Assistant registry suite with generated MQTT discovery fixtures.
 The HA suite uses Home Assistant and dependencies from `devenv.lock` and `devenv.nix`.
+The Nix task disables pip installation, matching Nix's Home Assistant launcher.
+Running the Python test directly keeps Home Assistant's requirement checks enabled.
 
 For focused checks:
 
