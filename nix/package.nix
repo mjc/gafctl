@@ -22,6 +22,7 @@ let
       ../Cargo.lock
       ../rust-toolchain.toml
       ../.clippy.toml
+      ../.cargo/config.toml
       ../LICENSE
       ../LICENSE-QUICKCONNECT-REFERENCE.txt
       ../THIRD-PARTY-NOTICES.txt
