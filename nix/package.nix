@@ -45,6 +45,10 @@ rustPlatform.buildRustPackage {
   buildInputs =
     lib.optionals stdenv.hostPlatform.isLinux [ dbus ]
     ++ lib.optionals stdenv.hostPlatform.isDarwin [ libiconv ];
+  # Remote Nix builders can expose this variable globally without providing
+  # AWS-LC. Force aws-lc-sys to build its bundled source instead of failing
+  # while probing for a system installation.
+  AWS_LC_SYS_USE_SYSTEM = "0";
   SSL_CERT_FILE = "${cacert}/etc/ssl/certs/ca-bundle.crt";
   postInstall = ''
     install -Dm644 LICENSE "$out/share/licenses/gafctl/LICENSE"
