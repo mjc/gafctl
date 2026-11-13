@@ -47,7 +47,7 @@ jq -e '(.licenses | length) > 0 and all(.licenses[]; .source_path != null)' "$wo
 jq -r '"Third-party dependency notices\n", (.licenses | group_by(.text)[] | "============================================================", (map("\(.name) (\(.id))") | unique | join(" / ")), "", (map(.used_by[].crate | "\(.name) \(.version)") | unique | join("\n")), "", .[0].text, "")' "$work/dependencies.json" > "$work/THIRD-PARTY-NOTICES.txt"
 rust_sysroot=$(rustc --print sysroot)
 printf '\n============================================================\nRust standard library MIT license\n\n' >> "$work/THIRD-PARTY-NOTICES.txt"
-cat packaging/license-reference/rust-1.98.1-LICENSE-MIT >> "$work/THIRD-PARTY-NOTICES.txt"
+cat packaging/license-reference/rust-1.100.0-LICENSE-MIT >> "$work/THIRD-PARTY-NOTICES.txt"
 for source in \
     lib/rustlib/src/rust/library/compiler-builtins/LICENSE.txt \
     lib/rustlib/src/rust/src/llvm-project/libunwind/LICENSE.TXT; do

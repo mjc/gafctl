@@ -93,9 +93,9 @@
     "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
   },
   {
-    "file": "rust-1.98.1-LICENSE-MIT",
-    "rust_version": "1.98.1",
-    "url": "https://raw.githubusercontent.com/rust-lang/rust/48a229ceaefd4985c50990b14116b6d856af0985/LICENSE-MIT",
+    "file": "rust-1.100.0-LICENSE-MIT",
+    "rust_version": "1.100.0",
+    "url": "https://raw.githubusercontent.com/rust-lang/rust/0ef1bc386059596dada8fb65b50425aab2ea637a/LICENSE-MIT",
     "sha256": "b71bd43a069ca0641a9ecfe585ca7b3c53b5cc1608f8b68321168698e28b5ea1"
   }
 ]
