@@ -30,16 +30,19 @@ macro_rules! bounded_whole {
 
 bounded_whole!(
     /// Automatic target in whole degrees Fahrenheit (90–120).
-    AutomaticTemperatureF, 90..=120,
+    AutomaticTemperatureF,
+    90..=120,
     "temperature must be 90..120 whole degrees Fahrenheit"
 );
 bounded_whole!(
     /// Automatic humidity target in whole percent (30–80).
-    AutomaticHumidityPercent, 30..=80,
+    AutomaticHumidityPercent,
+    30..=80,
     "humidity must be 30..80 whole percent"
 );
 bounded_whole!(
     /// Original controller timer in whole minutes (1–360), or zero to clear.
-    LegacyTimerMinutes, 0..=360,
+    LegacyTimerMinutes,
+    0..=360,
     "timer must be 0..360 whole minutes"
 );

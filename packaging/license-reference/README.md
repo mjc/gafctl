@@ -7,7 +7,7 @@ checks package versions and formats cargo-about’s output.
 
 `sources.json` records the exact published package versions, upstream commit URLs,
 and SHA-256 checksums. The upstream commits came from each crate’s packaged
-.cargo_vcs_info.json; Rust’s commit is the resolved `1.98.1` release tag. A crate or
+.cargo_vcs_info.json; Rust’s commit is the resolved `1.100.0` release tag. A crate or
 toolchain update requires reviewing and refreshing its references.
 
 ## License sources
@@ -37,4 +37,4 @@ toolchain update requires reviewing and refreshing its references.
 | bluez-async-0.9.0-LICENSE-MIT | bluez-async 0.9.0 | `eef0c0b2cf6e14147a8362cfa2408a79220cc1ea22bab1a2e188b9cd1d2e0f0d` | [upstream](https://raw.githubusercontent.com/bluez-rs/bluez-async/25097690ada3c6c55ad5dc612c2c405e60c0f202/LICENSE-MIT) |
 | bluez-generated-0.4.0-LICENSE-MIT | bluez-generated 0.4.0 | `eef0c0b2cf6e14147a8362cfa2408a79220cc1ea22bab1a2e188b9cd1d2e0f0d` | [upstream](https://raw.githubusercontent.com/bluez-rs/bluez-async/0162fe1f036e7ceef218db49e8d034692b80f8ca/LICENSE-MIT) |
 | rumqtt-next-0.34.0-LICENSE | mqttbytes-core-next 0.34.0, rumqttc-core-next 0.34.0, rumqttc-next 0.34.0, rumqttc-v5-next 0.34.0 | `cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30` | [upstream](https://raw.githubusercontent.com/thehouseisonfire/rumqtt/aa7a694f9b76b17d4c31200cf73d79616acae9b3/LICENSE) |
-| rust-1.98.1-LICENSE-MIT | Rust 1.98.1 | `b71bd43a069ca0641a9ecfe585ca7b3c53b5cc1608f8b68321168698e28b5ea1` | [upstream](https://raw.githubusercontent.com/rust-lang/rust/48a229ceaefd4985c50990b14116b6d856af0985/LICENSE-MIT) |
+| rust-1.100.0-LICENSE-MIT | Rust 1.100.0 | `b71bd43a069ca0641a9ecfe585ca7b3c53b5cc1608f8b68321168698e28b5ea1` | [upstream](https://raw.githubusercontent.com/rust-lang/rust/0ef1bc386059596dada8fb65b50425aab2ea637a/LICENSE-MIT) |

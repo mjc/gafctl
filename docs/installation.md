@@ -289,7 +289,7 @@ per fan.
 
 ## Source build
 
-Install Rust **1.98.1** through [rustup](https://rustup.rs/). The checked-in
+Install Rust **1.100.0** through [rustup](https://rustup.rs/). The checked-in
 `rust-toolchain.toml` selects that version. Linux also needs a C/C++ toolchain,
 CMake, pkg-config, and D-Bus development headers. On Debian/Ubuntu, install
 them with `sudo apt install build-essential cmake pkg-config libdbus-1-dev git`.
