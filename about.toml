@@ -33,14 +33,14 @@ files = [
     { path = "LICENSE", license = "MIT", checksum = "60ec118b689f55316997d801ee2510c361a1f16be44178eac7c23dd8ee61b628" },
 ]
 
-# aws-lc-rs 1.18.2: exact source file checksum(s).
+# aws-lc-rs 1.19.0: exact source file checksum(s).
 [aws-lc-rs.clarify]
 license = "ISC AND (Apache-2.0 OR ISC)"
 files = [
     { path = "LICENSE", license = "Apache-2.0 OR ISC", checksum = "b50b376e7d24a0598488b730c3034ffcd0b58dd36c0913a24b9903a3cfd04bf7" },
 ]
 
-# aws-lc-sys 0.46.0: exact source file checksum(s).
+# aws-lc-sys 0.47.0: exact source file checksum(s).
 [aws-lc-sys.clarify]
 license = "ISC AND (Apache-2.0 OR ISC) AND Apache-2.0 AND MIT AND BSD-3-Clause AND (Apache-2.0 OR ISC OR MIT) AND (Apache-2.0 OR ISC OR MIT-0)"
 files = [
